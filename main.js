@@ -143,6 +143,7 @@ const WHY = {
   createNs:"Der Namespace muss existieren, bevor irgendetwas darin angelegt werden kann. Steht er im selben Manifest, erledigt kubectl apply das in der richtigen Reihenfolge.|The namespace has to exist before anything can be created in it. If it is in the same manifest, kubectl apply handles the ordering.",
   filesPath:"Die ConfigMap wird als Verzeichnis eingehängt, jeder Schlüssel wird zu einer Datei. Der Inhalt aktualisiert sich im laufenden Pod, aber die Anwendung muss ihn selbst neu einlesen.|The ConfigMap is mounted as a directory, each key becoming a file. The content updates in the running pod, but the app has to re-read it itself.",
 
+  "Pod.restartPolicy":"Always startet den Container im selben Pod neu, sobald er endet — auch nach einem erfolgreichen Ende. Für einen Pod, der eine Aufgabe einmal erledigen soll, ist OnFailure oder Never richtig. Der Pod selbst wird davon nie neu erstellt: Fällt der Node aus, ist er weg und niemand legt ihn wieder an.|Always restarts the container inside the same pod as soon as it exits — even after a successful exit. For a pod meant to do one job, OnFailure or Never is right. The pod itself is never recreated by this: if the node fails it is gone, and nobody brings it back.",
   "Service.type":"ClusterIP ist nur im Cluster erreichbar und der Normalfall. NodePort öffnet einen festen Port auf jedem Node. LoadBalancer fordert beim Cloud-Anbieter eine externe IP an — die kostet dort Geld und existiert auf lokalen Clustern oft gar nicht.|ClusterIP is cluster-internal and the normal case. NodePort opens a fixed port on every node. LoadBalancer requests an external IP from your cloud provider — that costs money and often does not exist on local clusters.",
   "Service.selector":"Der Service findet seine Pods ausschließlich über Labels, nie über Namen. Passt kein Label, existiert der Service zwar, hat aber keine Endpoints — Anfragen laufen ins Leere, ohne dass irgendwo ein Fehler auftaucht.|A service finds its pods purely by labels, never by name. If nothing matches, the service exists but has no endpoints — requests go nowhere and no error appears anywhere.",
   "Service.ports":"port ist die Adresse des Service, targetPort der Port im Container. Beide dürfen sich unterscheiden; üblich ist 80 nach außen und 8080 im Container. nodePort gilt nur beim Typ NodePort.|port is the service's own address, targetPort the port inside the container. They may differ; 80 outside and 8080 inside is common. nodePort only applies to type NodePort.",
@@ -329,6 +330,35 @@ RES.StatefulSet = {
           }
         }))
       }
+    };
+  }
+};
+
+/* Wie der Container-Schritt des Deployments, nur ohne Replicas — dafür mit restartPolicy. */
+const podFields = RES.Deployment.steps[1].fields.filter(f => f.k !== "replicas");
+podFields.splice(podFields.findIndex(f => f.k === "pullPolicy") + 1, 0,
+  {k:"restartPolicy", t:"select", l:"restartPolicy", half:true,
+    opts:[["","Always (Standard)|Always (default)"],["OnFailure","OnFailure"],["Never","Never"]]});
+
+RES.Pod = {
+  group:"workloads", desc:"Ein einzelner Pod ohne Controller|A single pod without a controller",
+  steps:[
+    RES.Deployment.steps[0],
+    {id:"pod", title:"Container",
+     desc:"Ein Pod läuft genau so, wie er hier steht — einmal, ohne Replicas und ohne Ersatz. Zum Ausprobieren, für kurze Debug-Container und für Aufgaben, die von Hand angestoßen werden. Alles, was dauerhaft laufen soll, gehört in ein Deployment.|A pod runs exactly as written here — once, without replicas and without a replacement. Good for trying things out, for short-lived debug containers and for work you kick off by hand. Anything meant to keep running belongs in a Deployment.",
+     fields: podFields},
+    RES.Deployment.steps[2],
+    RES.Deployment.steps[3],
+    {id:"adv", adv:true, title:"Erweitert|Advanced", desc:"Optional. Leere Felder landen nicht im YAML.|Optional. Empty fields never reach the YAML.",
+     fields: RES.Deployment.steps[4].fields.filter(f => f.k !== "strategy")}
+  ],
+  build(d){
+    const sel = d.name ? {app:d.name} : undefined;
+    return {
+      apiVersion:"v1", kind:"Pod",
+      metadata:{name:d.name, namespace:d.namespace||undefined, labels:allLabels(d, sel),
+        annotations:kvObj(d.annotations)},
+      spec: Object.assign({restartPolicy: d.restartPolicy || undefined}, podSpecOf(d))
     };
   }
 };
@@ -1254,8 +1284,9 @@ function validate(docs){
         warn(nm + ": nodePort " + v + " " + t("liegt außerhalb des Standardbereichs 30000–32767|is outside the default range 30000–32767"));
     });
 
-    if (kind === "Deployment" || kind === "StatefulSet"){
-      const tpl = ((doc.spec||{}).template||{});
+    if (kind === "Deployment" || kind === "StatefulSet" || kind === "Pod"){
+      /* Beim Pod ist das Dokument selbst die Pod-Vorlage. */
+      const tpl = kind === "Pod" ? doc : ((doc.spec||{}).template||{});
       const lbl = (tpl.metadata||{}).labels;
       if (lbl) podLabels.push(lbl);
       const cs = ((tpl.spec||{}).containers)||[];
@@ -1334,6 +1365,9 @@ function validate(docs){
         });
       }
     }
+
+    if (kind === "Pod")
+      warn(nm + ": " + t("einzelner Pod ohne Controller — bei einem Node-Ausfall wird er nirgends neu angelegt, und Skalierung, Rolling Update und Selbstheilung gibt es nicht. Für alles, was laufen bleiben soll, ist ein Deployment der richtige Weg.|a single pod with no controller — after a node failure nothing recreates it anywhere, and there is no scaling, no rolling update and no self-healing. For anything meant to keep running, a Deployment is the way to go."));
 
     if (kind === "StatefulSet"){
       const sn = (doc.spec||{}).serviceName;
@@ -1488,7 +1522,8 @@ function startRes(kind){
   RES[kind].steps.forEach(st => st.fields.forEach(f => { if (f.def !== undefined) d[f.k] = f.def; }));
   applyProfile(kind, d);
   if (kind === "Service"){
-    const dep = currentDocs().slice().reverse().find(x => x.kind === "Deployment");
+    const all = currentDocs().slice().reverse();
+    const dep = all.find(x => x.kind === "Deployment") || all.find(x => x.kind === "Pod");
     if (dep){
       const l = (dep.metadata||{}).labels || {};
       d.selector = Object.keys(l).map(k => ({k:k, v:l[k]}));
@@ -1715,7 +1750,10 @@ function refreshYaml(){
   ISSUES = issues;
 
   const app = docs.find(d => d.kind === "Deployment") || docs.find(d => d.kind === "StatefulSet");
-  const nsFlag = app && app.metadata.namespace ? " -n " + app.metadata.namespace : "";
+  const pod = app ? null : docs.find(d => d.kind === "Pod");
+  const head = app || pod;
+  const nsFlag = head && head.metadata.namespace ? " -n " + head.metadata.namespace : "";
+  const rolloutRef = (app && app.kind === "StatefulSet" ? "statefulset/" : "deploy/") + (app ? app.metadata.name : "");
 
   /* kubeseal-Aufrufe für alle SealedSecrets im Manifest */
   const seals = [];
@@ -1730,8 +1768,13 @@ function refreshYaml(){
   $("cmds").innerHTML = !docs.length ? "" :
     ["kubectl apply -f manifest.yaml"]
       .concat(app ? [
-        "kubectl rollout status deploy/" + app.metadata.name + nsFlag,
+        "kubectl rollout status " + rolloutRef + nsFlag,
         "kubectl logs -l app=" + app.metadata.name + nsFlag + " -f --tail=50"
+      ] : [])
+      .concat(pod ? [
+        "kubectl get pod " + pod.metadata.name + nsFlag + " -w",
+        "kubectl logs " + pod.metadata.name + nsFlag + " -f --tail=50",
+        "kubectl describe pod " + pod.metadata.name + nsFlag
       ] : [])
       .map(c => '<button class="cmd" data-cmd="' + esc(c) + '"><span>' + esc(c) + "</span></button>").join("")
       + seals.map(x => '<button class="cmd cmd--seal" data-cmd="' + esc(x.cmd) +
@@ -2131,7 +2174,8 @@ const KUBECTL = [
 
 function renderWiki(){
   const docs = currentDocs();
-  const app = docs.find(d => d.kind === "Deployment") || docs.find(d => d.kind === "StatefulSet");
+  const app = docs.find(d => d.kind === "Deployment") || docs.find(d => d.kind === "StatefulSet")
+    || docs.find(d => d.kind === "Pod");
   const appName = app ? app.metadata.name : "my-app";
   const nsName = (app && app.metadata.namespace) || "default";
   const q = ($("wikiFilter").value || "").toLowerCase();
@@ -2209,7 +2253,9 @@ function toMarkdown(){
   const docs = currentDocs();
   const raw = docs.map(toYaml).join("\n---\n");
   const app = docs.filter(x => x.kind === "Deployment")[0];
-  const title = app ? app.metadata.name : (S.docs.length ? entryLabel(S.docs[0], -1) : "manifest");
+  const pod = app ? null : docs.filter(x => x.kind === "Pod")[0];
+  const title = (app || pod) ? (app || pod).metadata.name
+    : (S.docs.length ? entryLabel(S.docs[0], -1) : "manifest");
   const de = LANG === "de";
   let m = "# " + title + "\n\n";
   m += (de ? "Erzeugt mit manifest.wizard am " : "Generated with manifest.wizard on ") +
@@ -2250,9 +2296,11 @@ function toMarkdown(){
     m += "\n";
   }
 
-  const ns = app && app.metadata.namespace ? " -n " + app.metadata.namespace : "";
+  const nsSrc = app || pod;
+  const ns = nsSrc && nsSrc.metadata.namespace ? " -n " + nsSrc.metadata.namespace : "";
   m += "## " + (de ? "Anwenden" : "Applying") + "\n\n```sh\nkubectl diff -f manifest.yaml\nkubectl apply -f manifest.yaml\n";
   if (app) m += "kubectl rollout status deploy/" + app.metadata.name + ns + "\n";
+  else if (pod) m += "kubectl get pod " + pod.metadata.name + ns + " -w\n";
   m += "```\n\n## manifest.yaml\n\n```yaml\n" + raw + "```\n";
   return m;
 }
@@ -2260,7 +2308,7 @@ function toMarkdown(){
 $("docBtn").addEventListener("click", () => {
   const docs = currentDocs();
   if (!docs.length) return;
-  const app = docs.filter(x => x.kind === "Deployment")[0];
+  const app = docs.filter(x => x.kind === "Deployment")[0] || docs.filter(x => x.kind === "Pod")[0];
   download(toMarkdown(), (app ? app.metadata.name : "manifest") + ".md", "text/markdown");
 });
 
@@ -2702,13 +2750,17 @@ $("cmdTasks").addEventListener("click", e => {
 
 function defaultsForCmd(){
   const docs = currentDocs();
-  const app = docs.filter(x => x.kind === "Deployment")[0];
-  return {
+  const app = docs.filter(x => x.kind === "Deployment")[0] || docs.filter(x => x.kind === "Pod")[0];
+  const o = {
     name: app ? app.metadata.name : "",
     ns: app && app.metadata.namespace ? app.metadata.namespace : "",
     selector: "",
     tail: "100", follow: true
   };
+  /* Ein einzelner Pod ist kein deploy/… — nur dort umstellen, wo die Aufgabe pod überhaupt anbietet. */
+  const tf = cmdTask().fields.filter(f => f.k === "targetKind")[0];
+  if (app && app.kind === "Pod" && tf && tf.opts.some(x => x[0] === "pod")) o.targetKind = "pod";
+  return o;
 }
 
 $("cmdFields").addEventListener("input", e => {
@@ -2914,6 +2966,30 @@ function runSelfTests(){
       containers:[{name:"a", image:"x:1", volumeMounts:[{name:"weg", mountPath:"/x"}],
         resources:{limits:{cpu:"1", memory:"1Gi"}}, readinessProbe:{httpGet:{path:"/", port:80}}}]}}}}])
       .some(x => x.indexOf("err:volumes") === 0), "");
+
+  /* --- Pod --- */
+  const bare = RES.Pod.build({name:"probe", namespace:"prod", image:"nginx:1.27",
+    ports:[{containerPort:8080}], restartPolicy:"Never", hardened:true, stdLabels:true,
+    cpuReq:"100m", cpuLim:"500m", memReq:"128Mi", memLim:"512Mi", probe:"http", probePort:8080});
+  ok("Pod: apiVersion v1, kind Pod",
+    bare.apiVersion === "v1" && bare.kind === "Pod", bare.apiVersion + "/" + bare.kind);
+  ok("Pod: kein template, keine Replicas, kein Selector",
+    !bare.spec.template && bare.spec.replicas === undefined && !bare.spec.selector &&
+    bare.spec.containers.length === 1, toYaml(bare));
+  ok("Pod: restartPolicy wird übernommen", bare.spec.restartPolicy === "Never", String(bare.spec.restartPolicy));
+  ok("Pod trägt das app-Label", (bare.metadata.labels||{}).app === "probe", JSON.stringify(bare.metadata.labels));
+  ok("Pod: Härtung greift genauso",
+    bare.spec.containers[0].securityContext.readOnlyRootFilesystem === true &&
+    bare.spec.volumes.some(v => v.name === "tmp" && v.emptyDir === EMPTY_MAP), toYaml(bare));
+  ok("Pod: einziger Hinweis ist der fehlende Controller",
+    val([bare]).length === 1 && val([bare])[0].indexOf("warn:") === 0, val([bare]).join(" | "));
+  ok("Pod ohne limits wird geprüft wie ein Deployment",
+    val([RES.Pod.build({name:"p", image:"x:1"})]).some(x => x.indexOf("warn:cpuLim") === 0),
+    val([RES.Pod.build({name:"p", image:"x:1"})]).join(" | "));
+  ok("Service findet einen einzelnen Pod",
+    !val([bare, RES.Service.build({name:"probe", namespace:"prod",
+      selector:[{k:"app", v:"probe"}], ports:[{port:80, targetPort:8080}]})])
+      .some(x => x.indexOf("warn:selector") === 0), "");
 
   /* --- RBAC --- */
   const rbac = RES.RBAC.build({name:"r", namespace:"prod", createSA:true, source:"own",
