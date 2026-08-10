@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wizard — Kubernetes YAML</title>
+<link rel="stylesheet" href="./main.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">Wizard <em>— kubernetes.yaml</em></div>
+  <div class="top-note" id="offlineNote">offline · kein serverkontakt</div>
+  <div class="top-sp"></div>
+  <button class="tbtn" id="langDe" aria-pressed="true">DE</button>
+  <button class="tbtn" id="langEn" aria-pressed="false">EN</button>
+  <button class="tbtn" id="themeBtn" title="Hell / Dunkel">◐</button>
+  <button class="tbtn" id="searchBtn">Suche</button>
+  <button class="tbtn" id="explainBtn" aria-pressed="false">Erklärungen</button>
+  <button class="tbtn" id="wikiBtn">kubectl</button>
+  <button class="tbtn" id="profileBtn">Profil</button>
+  <button class="tbtn" id="saveBtn">Speichern</button>
+  <button class="tbtn" id="loadBtn">Laden</button>
+  <input type="file" id="loadFile" accept="application/json,.json" hidden>
+  <button class="tbtn" id="resetAll">Reset</button>
+</header>
+
+<main class="shell">
+  <section class="pane pane--form">
+    <div id="picker"></div>
+    <div id="wizard" hidden>
+      <nav class="rail" id="rail" aria-label="Schritte"></nav>
+      <h1 class="steptitle" id="stepTitle" tabindex="-1"></h1>
+      <p class="stepdesc" id="stepDesc"></p>
+      <form id="form" class="fields" autocomplete="off" onsubmit="return false"></form>
+    </div>
+    <div class="stepnav" id="stepnav" hidden></div>
+  </section>
+
+  <aside class="pane pane--yaml">
+    <div class="yamlbar">
+      <span id="yamlMeta">manifest.yaml</span>
+      <div class="top-sp"></div>
+      <button class="ybtn" id="copyBtn">copy</button>
+      <button class="ybtn" id="dlBtn">download</button>
+      <button class="ybtn" id="docBtn">doku</button>
+      <button class="ybtn" id="testBtn">tests</button>
+    </div>
+    <p class="sr" id="checkSummary" aria-live="polite"></p>
+    <div class="checks" id="checks"></div>
+    <pre class="code" id="code" tabindex="0"></pre>
+    <div class="cmds" id="cmds"></div>
+    <div class="doclist" id="doclist"></div>
+  </aside>
+</main>
+
+<div class="toast" id="toast" hidden role="status" aria-live="polite">
+  <span id="toastText"></span>
+  <button class="btn" id="toastUndo"></button>
+</div>
+
+<div class="profilepanel" id="envPanel" hidden>
+  <p class="eyebrow" id="envEyebrow"></p>
+  <p class="stepdesc" id="envDesc"></p>
+  <div class="fields" id="envFields"></div>
+  <div class="profilebtns">
+    <button class="btn btn--go" id="envApply"></button>
+    <div class="nav-sp"></div>
+    <button class="btn" id="envClose">×</button>
+  </div>
+</div>
+
+<div class="wikipanel" id="searchPanel" hidden>
+  <div class="wikihead">
+    <p class="eyebrow" id="searchEyebrow"></p>
+    <input type="text" id="searchInput" placeholder="readiness, storage, rollout…">
+    <div class="nav-sp"></div>
+    <button class="btn" id="searchClose">×</button>
+  </div>
+  <p class="stepdesc" id="searchDesc"></p>
+  <div id="searchResults"></div>
+</div>
+
+<div class="wikipanel" id="testPanel" hidden>
+  <div class="wikihead">
+    <p class="eyebrow" id="testEyebrow">Selbsttests</p>
+    <div class="nav-sp"></div>
+    <button class="btn" id="testClose">×</button>
+  </div>
+  <p class="stepdesc" id="testDesc"></p>
+  <div id="testList"></div>
+</div>
+
+<div class="wikipanel" id="wikiPanel" hidden>
+  <div class="wikihead">
+    <div class="tabs">
+      <button class="tab" id="tabRef" aria-pressed="true"></button>
+      <button class="tab" id="tabBuild" aria-pressed="false"></button>
+      <button class="tab" id="tabStorage" aria-pressed="false"></button>
+    </div>
+    <input type="text" id="wikiFilter" placeholder="filter">
+    <div class="nav-sp"></div>
+    <button class="btn" id="wikiClose">×</button>
+  </div>
+  <p class="stepdesc" id="wikiDesc"></p>
+  <div id="wikiList"></div>
+  <div id="cmdBuild" hidden>
+    <div class="cmdtasks" id="cmdTasks"></div>
+    <div class="fields" id="cmdFields"></div>
+    <div class="cmdout" id="cmdOut"></div>
+  </div>
+  <div class="storagewiki" id="storageWiki" hidden></div>
+</div>
+
+<div class="profilepanel" id="profilePanel" hidden>
+  <p class="eyebrow" id="profileEyebrow"></p>
+  <p class="stepdesc" id="profileDesc"></p>
+  <textarea id="profileText" spellcheck="false"></textarea>
+  <div class="profilebtns">
+    <button class="btn btn--go" id="profileApply"></button>
+    <button class="btn" id="profileSave"></button>
+    <button class="btn" id="profileLoad"></button>
+    <button class="btn btn--ghost" id="profileClear"></button>
+    <div class="nav-sp"></div>
+    <button class="btn" id="profileClose">×</button>
+  </div>
+  <input type="file" id="profileFile" accept="application/json,.json" hidden>
+</div>
+
+<script src="./main.js"></script>
+
+</body>
+</html>
