@@ -2787,30 +2787,39 @@ $("cmdOut").addEventListener("click", e => {
 });
 
 let WIKI_TAB = "ref";
+const WIKI_TABS = {ref:"tabRef", build:"tabBuild", storage:"tabStorage", cheat:"tabCheat"};
 function setWikiTab(tab){
   WIKI_TAB = tab;
-  ["ref","build","storage"].forEach(x =>
-    $(x === "ref" ? "tabRef" : x === "build" ? "tabBuild" : "tabStorage")
-      .setAttribute("aria-pressed", tab === x));
+  Object.keys(WIKI_TABS).forEach(x => $(WIKI_TABS[x]).setAttribute("aria-pressed", tab === x));
   $("wikiList").hidden = tab !== "ref";
   $("cmdBuild").hidden = tab !== "build";
   $("storageWiki").hidden = tab !== "storage";
+  $("cheatWiki").hidden = tab !== "cheat";
   $("wikiFilter").hidden = tab !== "ref";
+  $("cheatPrint").hidden = tab !== "cheat";
   const de = LANG === "de";
   $("wikiDesc").textContent =
     tab === "ref" ? (de ? "Namen und Namespace sind aus dem aktuellen Manifest eingesetzt. Klick kopiert den Befehl."
                         : "Names and namespace are filled in from the current manifest. Click copies the command.")
   : tab === "build" ? (de ? "Aufgabe wählen, Felder ausfüllen — der Befehl entsteht mit. Darunter steht, was jedes Flag bewirkt."
                           : "Pick a task, fill in the fields — the command assembles as you go. Below it you see what each flag does.")
+  : tab === "cheat" ? (de ? "Zum Nachschlagen und zum Danebenlegen: Ports, Mengenangaben, Statusmeldungen, YAML-Fallen. Drucken legt nur diese Seite aufs Papier."
+                          : "For looking up and pinning next to your screen: ports, quantities, status messages, YAML traps. Print puts this page alone on paper.")
   : (de ? "Wie dauerhafter Speicher in Kubernetes zusammenhängt — und woran er in der Praxis scheitert."
         : "How persistent storage fits together in Kubernetes — and where it fails in practice.");
   if (tab === "build"){ if (!Object.keys(CMD.o).length) CMD.o = defaultsForCmd(); renderCmdAll(); }
   else if (tab === "storage") renderStorageWiki();
+  else if (tab === "cheat") renderCheatsheet();
   else renderWiki();
 }
 $("tabRef").addEventListener("click", () => setWikiTab("ref"));
 $("tabBuild").addEventListener("click", () => setWikiTab("build"));
 $("tabStorage").addEventListener("click", () => setWikiTab("storage"));
+$("tabCheat").addEventListener("click", () => setWikiTab("cheat"));
+$("cheatPrint").addEventListener("click", () => {
+  if (WIKI_TAB !== "cheat") setWikiTab("cheat");
+  window.print();
+});
 
 
 const STORAGE_WIKI = [
@@ -2876,12 +2885,15 @@ function mdInline(x){
                .replace(/`(.+?)`/g, "<code>$1</code>");
 }
 
-function renderStorageWiki(){
+/* Gemeinsame Darstellung für Speicher-Wiki und Spickzettel. */
+function sectionsHtml(list){
   let h = "";
-  STORAGE_WIKI.forEach(sec => {
-    h += '<div class="swsec"><p class="hgroup">' + esc(t(sec.h)) + "</p>";
+  list.forEach(sec => {
+    /* Breite Tabellen bekommen im Spickzettel die volle Spaltenbreite. */
+    const wide = (sec.table && sec.table[0].length >= 3) || (sec.code && !sec.table);
+    h += '<div class="swsec' + (wide ? " swsec--wide" : "") + '"><p class="hgroup">' + esc(t(sec.h)) + "</p>";
     (sec.p || []).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
-    if (sec.code) h += '<pre class="swcode">' + esc(sec.code) + "</pre>";
+    if (sec.code) h += '<pre class="swcode">' + esc(t(sec.code)) + "</pre>";
     if (sec.table){
       const rows = sec.table;
       h += '<div class="swtwrap"><table class="swtable"><thead><tr>' +
@@ -2894,7 +2906,102 @@ function renderStorageWiki(){
     (sec.p2 || []).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
     h += "</div>";
   });
-  $("storageWiki").innerHTML = h;
+  return h;
+}
+
+function renderStorageWiki(){
+  $("storageWiki").innerHTML = sectionsHtml(STORAGE_WIKI);
+}
+
+/* Spickzettel: dicht, zum Nachschlagen und zum Ausdrucken. Keine Prosa. */
+const CHEATSHEET = [
+{h:"Welcher Port ist welcher|Which port is which",
+ table:[["Feld|Field","Wo|Where","Bedeutung|Meaning"],
+   ["containerPort","Pod","Reine Dokumentation. Der Prozess lauscht auch ohne diese Angabe.|Documentation only. The process listens with or without it."],
+   ["port","Service","Unter diesem Port ist der Service im Cluster erreichbar.|The port the service itself is reachable on inside the cluster."],
+   ["targetPort","Service","Zielport im Container. Darf eine Zahl oder ein Portname sein.|Target port in the container. May be a number or a port name."],
+   ["nodePort","Service","Nur bei type NodePort. Standardbereich 30000–32767.|Only with type NodePort. Default range 30000–32767."],
+   ["backend…port.number","Ingress","Der Port des **Service**, nicht der des Containers.|The **service** port, not the container port."],
+   ["probe port","Pod","Muss zu einem containerPort passen, sonst prüft die Probe ins Leere.|Has to match a containerPort, otherwise the probe checks nothing."]]},
+
+{h:"Mengenangaben|Quantities",
+ table:[["Schreibweise|Notation","Wert|Value","Anmerkung|Note"],
+   ["1 / 1000m","1 CPU-Kern|1 CPU core","m heißt Milli. 500m ist ein halber Kern.|m means milli. 500m is half a core."],
+   ["Mi Gi Ti","1024er-Schritte|powers of 1024","Für Speicher der Normalfall.|The usual choice for memory."],
+   ["M G T","1000er-Schritte|powers of 1000","512M ist kleiner als 512Mi.|512M is smaller than 512Mi."],
+   ["MB GB","ungültig|invalid","Kubernetes kennt kein MB. Der Apply schlägt fehl.|Kubernetes has no MB. The apply fails."]],
+ p2:["`requests` reserviert der Scheduler, `limits` ist die harte Grenze. CPU über dem Limit wird gedrosselt, Speicher über dem Limit wird **OOMKilled**.|`requests` is what the scheduler reserves, `limits` is the hard ceiling. CPU above the limit gets throttled, memory above the limit gets **OOMKilled**."]},
+
+{h:"Status und was dahintersteckt|Status and what is behind it",
+ table:[["Status|Status","Meist die Ursache|Usually the cause"],
+   ["Pending","Kein Node hat genug frei, oder das PVC ist nicht gebunden, oder nodeSelector passt nirgends.|No node has enough free, or the PVC is unbound, or the nodeSelector matches nothing."],
+   ["ContainerCreating","Volume hängt noch — bei `Multi-Attach` zweite Replica auf ReadWriteOnce.|Volume still attaching — with `Multi-Attach` it is a second replica on ReadWriteOnce."],
+   ["ImagePullBackOff","Tag existiert nicht, oder die Registry verlangt Anmeldung: imagePullSecrets fehlt.|The tag does not exist, or the registry wants credentials: imagePullSecrets missing."],
+   ["CreateContainerConfigError","Eine ConfigMap oder ein Secret aus envFrom oder volumes gibt es nicht.|A ConfigMap or Secret referenced by envFrom or volumes does not exist."],
+   ["CrashLoopBackOff","Prozess endet sofort. `logs --previous` zeigt warum.|The process exits immediately. `logs --previous` says why."],
+   ["OOMKilled","limits.memory überschritten. Kein Drosseln, sofortiges Ende.|limits.memory exceeded. No throttling, immediate kill."],
+   ["Running 0/1","Container läuft, readinessProbe schlägt fehl — kein Traffic.|The container runs but the readiness probe fails — no traffic."],
+   ["Evicted","Node ging der Speicher oder der Plattenplatz aus.|The node ran out of memory or disk."],
+   ["Terminating hängt|Terminating stuck","Finalizer wartet, oder der Prozess ignoriert SIGTERM.|A finalizer is waiting, or the process ignores SIGTERM."]]},
+
+{h:"Die drei Probes|The three probes",
+ table:[["Probe","Schlägt fehl →|On failure →","Wofür|What for"],
+   ["startupProbe","Erst danach greifen die anderen beiden.|The other two only start after it passes.","Langsame Starts, statt initialDelaySeconds.|Slow starts, instead of initialDelaySeconds."],
+   ["readinessProbe","Pod aus dem Service genommen, kein Neustart.|Pod removed from the service, no restart.","Traffic erst, wenn wirklich bereit.|Traffic only when truly ready."],
+   ["livenessProbe","Container wird neu gestartet.|The container gets restarted.","Nur gegen echte Hänger. Zu streng = Neustartschleife.|Only against genuine deadlocks. Too strict = restart loop."]],
+ p2:["Der Endpunkt prüft nur den eigenen Prozess. Hängt er an der Datenbank, reißt ein Datenbankausfall sämtliche Pods mit in den Neustart.|The endpoint checks your own process only. If it depends on the database, a database outage drags every pod into a restart loop."]},
+
+{h:"Labels und Selektoren|Labels and selectors",
+ code:{de:"app: my-app                          # Selector: minimal halten\napp.kubernetes.io/name: my-app       # Konvention\napp.kubernetes.io/instance: my-app-prod\napp.kubernetes.io/version: \"1.27\"    # nie in den Selector\napp.kubernetes.io/component: backend\napp.kubernetes.io/part-of: shop",
+       en:"app: my-app                          # selector: keep it minimal\napp.kubernetes.io/name: my-app       # convention\napp.kubernetes.io/instance: my-app-prod\napp.kubernetes.io/version: \"1.27\"    # never in the selector\napp.kubernetes.io/component: backend\napp.kubernetes.io/part-of: shop"},
+ p2:["`spec.selector.matchLabels` ist **unveränderlich**. Eine Änderung erfordert, das Deployment zu löschen und neu anzulegen. Ein Service findet Pods ausschließlich über Labels — passt nichts, hat er keine Endpoints und meldet trotzdem keinen Fehler.|`spec.selector.matchLabels` is **immutable**. Changing it means deleting and recreating the deployment. A service finds pods purely by labels — if nothing matches it has no endpoints and still reports no error."]},
+
+{h:"Welcher Workload|Which workload",
+ table:[["Art|Kind","Wofür|What for"],
+   ["Deployment","Zustandslos, austauschbare Pods, Rolling Update.|Stateless, interchangeable pods, rolling update."],
+   ["StatefulSet","Feste Namen und eigenes Volume je Pod. Datenbanken, Queues.|Fixed names and one volume per pod. Databases, queues."],
+   ["DaemonSet","Ein Pod je Node. Log-Shipper, Agenten, Node-Exporter.|One pod per node. Log shippers, agents, node exporters."],
+   ["Job","Läuft einmal bis zum Erfolg.|Runs once until it succeeds."],
+   ["CronJob","Job nach Zeitplan, in UTC ohne timeZone.|Job on a schedule, in UTC unless timeZone is set."],
+   ["Pod","Einzeln, ohne Controller. Debug und Handgriffe.|On its own, no controller. Debugging and one-offs."]]},
+
+{h:"accessModes in einer Zeile|accessModes in one line",
+ table:[["Modus|Mode","Gilt für **Nodes**, nicht Pods|Applies to **nodes**, not pods"],
+   ["ReadWriteOnce","Ein Node schreibt. Mehrere Pods auf demselben Node dürfen mit.|One node writes. Several pods on that same node may join."],
+   ["ReadWriteOncePod","Genau ein Pod, punkt.|Exactly one pod, full stop."],
+   ["ReadOnlyMany","Viele lesen, keiner schreibt.|Many read, none writes."],
+   ["ReadWriteMany","Viele Nodes schreiben. Nur NFS, CephFS und Ähnliches.|Many nodes write. Only NFS, CephFS and similar."]]},
+
+{h:"YAML-Fallen|YAML traps",
+ table:[["Geschrieben|Written","Wird gelesen als|Is read as","Richtig|Correct"],
+   ["no / yes / on / off","false / true","`\"no\"`"],
+   ["1.27","Zahl|number","`\"1.27\"`"],
+   ["*/5 * * * *","Anker-Fehler|anchor error","`\"*/5 * * * *\"`"],
+   ["key: wert: mehr","Syntaxfehler|syntax error","`\"wert: mehr\"`"],
+   ["Tabulator|Tab","Syntaxfehler|syntax error","Zwei Leerzeichen|Two spaces"],
+   ["012","oktal oder Zeichenkette|octal or string","`\"012\"`"]],
+ p2:["`data` in einem Secret ist base64, `stringData` ist Klartext — beides ist **nicht verschlüsselt**, nur kodiert.|`data` in a Secret is base64, `stringData` is plain text — neither is **encrypted**, only encoded."]},
+
+{h:"securityContext, restricted|securityContext, restricted",
+ code:"securityContext:            # Pod\n  runAsNonRoot: true\n  seccompProfile: { type: RuntimeDefault }\n\nsecurityContext:            # Container\n  allowPrivilegeEscalation: false\n  readOnlyRootFilesystem: true\n  runAsNonRoot: true\n  capabilities: { drop: [ALL] }",
+ p2:["Mit `readOnlyRootFilesystem` braucht fast jedes Image ein beschreibbares `/tmp` als emptyDir. Cluster mit erzwungenem Pod Security Standard lehnen Pods ohne diese Felder ab.|With `readOnlyRootFilesystem` almost every image needs a writable `/tmp` as an emptyDir. Clusters enforcing the Pod Security Standard reject pods without these fields."]},
+
+{h:"Cron-Syntax|Cron syntax",
+ code:{de:"┌ Minute 0-59\n│ ┌ Stunde 0-23\n│ │ ┌ Tag 1-31\n│ │ │ ┌ Monat 1-12\n│ │ │ │ ┌ Wochentag 0-6 (So=0)\n│ │ │ │ │\n0 3 * * *      # täglich 03:00\n*/15 * * * *   # alle 15 Minuten\n0 2 * * 1      # montags 02:00\n0 0 1 * *      # am Ersten des Monats",
+       en:"┌ minute 0-59\n│ ┌ hour 0-23\n│ │ ┌ day 1-31\n│ │ │ ┌ month 1-12\n│ │ │ │ ┌ weekday 0-6 (Sun=0)\n│ │ │ │ │\n0 3 * * *      # daily at 03:00\n*/15 * * * *   # every 15 minutes\n0 2 * * 1      # Mondays at 02:00\n0 0 1 * *      # on the first of the month"},
+ p2:["Ohne `timeZone` gilt UTC — gegenüber deutscher Zeit im Winter eine, im Sommer zwei Stunden Versatz.|Without `timeZone` it is UTC — one hour off Central European time in winter, two in summer."]},
+
+{h:"kubectl in zehn Zeilen|kubectl in ten lines",
+ code:{de:"kubectl diff -f manifest.yaml            # vorher ansehen\nkubectl apply -f manifest.yaml\nkubectl get pods -o wide                 # Node und IP\nkubectl describe pod NAME                # Events unten lesen\nkubectl logs -l app=NAME -f --tail=100\nkubectl logs NAME --previous             # nach einem Absturz\nkubectl exec -it deploy/NAME -- sh\nkubectl port-forward svc/NAME 8080:80    # ohne Ingress testen\nkubectl rollout status deploy/NAME\nkubectl rollout undo deploy/NAME         # zurück",
+       en:"kubectl diff -f manifest.yaml            # look before you leap\nkubectl apply -f manifest.yaml\nkubectl get pods -o wide                 # node and IP\nkubectl describe pod NAME                # read the events at the bottom\nkubectl logs -l app=NAME -f --tail=100\nkubectl logs NAME --previous             # after a crash\nkubectl exec -it deploy/NAME -- sh\nkubectl port-forward svc/NAME 8080:80    # test without ingress\nkubectl rollout status deploy/NAME\nkubectl rollout undo deploy/NAME         # back"}},
+
+{h:"Kurznamen|Short names",
+ code:"po    pods           deploy  deployments    sts   statefulsets\nsvc   services       ds      daemonsets     rs    replicasets\ncm    configmaps     ing     ingresses      netpol networkpolicies\npvc   persistentvolumeclaims               pv    persistentvolumes\nsa    serviceaccounts                      ns    namespaces\nno    nodes          cj      cronjobs       hpa   horizontalpodautoscalers",
+ p2:["`kubectl api-resources` listet alle auf, samt apiVersion und ob sie an einen Namespace gebunden sind.|`kubectl api-resources` lists them all, with apiVersion and whether they are namespaced."]}
+];
+
+function renderCheatsheet(){
+  $("cheatWiki").innerHTML = sectionsHtml(CHEATSHEET);
 }
 
 function runSelfTests(){
@@ -3056,6 +3163,37 @@ function runSelfTests(){
   ok("Secret: auth ist base64 von user:pass",
     has(sec.stringData[".dockerconfigjson"], b64("u:p")), sec.stringData[".dockerconfigjson"]);
 
+  /* --- Spickzettel --- */
+  const cheatStrings = [];
+  CHEATSHEET.forEach(sec => {
+    cheatStrings.push(sec.h);
+    (sec.p||[]).concat(sec.p2||[]).forEach(x => cheatStrings.push(x));
+    (sec.table||[]).forEach(r => r.forEach(c => cheatStrings.push(c)));
+    if (sec.code) cheatStrings.push(sec.code);
+  });
+  ok("Spickzettel: jeder Abschnitt hat eine Überschrift",
+    CHEATSHEET.every(s => s.h && (s.table || s.code || s.p || s.p2)), "");
+  ok("Spickzettel: keine leeren Zeichenketten in DE oder EN",
+    cheatStrings.every(s => {
+      const keep = LANG; let good = true;
+      ["de","en"].forEach(l => { LANG = l; if (!String(t(s)).trim()) good = false; });
+      LANG = keep; return good;
+    }), "");
+  /* Mehrzeilige Codeblöcke müssen die Objektform nutzen — t() zerlegt Zeichenketten am | */
+  ok("Spickzettel: Codeblöcke überleben den Sprachwechsel",
+    CHEATSHEET.filter(s => s.code).every(s => {
+      const keep = LANG; let good = true;
+      ["de","en"].forEach(l => {
+        LANG = l;
+        const c = t(s.code);
+        if (typeof s.code === "string" && s.code.indexOf("|") !== -1) good = false;
+        if (c.split("\n").length !== (typeof s.code === "string" ? s.code : s.code.de).split("\n").length) good = false;
+      });
+      LANG = keep; return good;
+    }), "");
+  ok("Spickzettel steht in der Suche",
+    searchIndex().filter(x => x.g === "cheat").length === CHEATSHEET.length, "");
+
   if (typeof getComputedStyle === "function" && document.body){
     ["stepnav","toast","wikipanel"].forEach(cn => {
       const probe = document.createElement("div");
@@ -3132,13 +3270,21 @@ function searchIndex(){
       text:t(sec.h) + " " + body + " " + tbl, body:body.slice(0, 220),
       act:{type:"wiki", i:i}});
   });
+  CHEATSHEET.forEach((sec, i) => {
+    const body = (sec.p||[]).concat(sec.p2||[]).map(t).join(" ");
+    const tbl = (sec.table||[]).map(r => r.map(t).join(" ")).join(" ");
+    idx.push({g:"cheat", title:t(sec.h), sub:LANG === "de" ? "Spickzettel" : "Cheat sheet",
+      text:[t(sec.h), body, tbl, sec.code ? t(sec.code) : ""].join(" "),
+      body:(body || tbl).slice(0, 220),
+      act:{type:"cheat", i:i}});
+  });
   return idx;
 }
 
 const SEARCH_GROUPS = {
   res:"Ressourcen|Resources", field:"Felder und Erklärungen|Fields and explanations",
   cmd:"kubectl-Befehle|kubectl commands", task:"Befehls-Assistent|Command builder",
-  wiki:"Speicher-Wiki|Storage wiki"
+  wiki:"Speicher-Wiki|Storage wiki", cheat:"Spickzettel|Cheat sheet"
 };
 
 let SEARCH_HITS = [];
@@ -3203,6 +3349,12 @@ function goSearchHit(hit){
     $("wikiPanel").hidden = false; setWikiTab("storage");
     const sec = $("storageWiki").children[a.i];
     if (sec) sec.scrollIntoView({behavior:"smooth", block:"start"});
+    return;
+  }
+  if (a.type === "cheat"){
+    $("wikiPanel").hidden = false; setWikiTab("cheat");
+    const sec = $("cheatWiki").children[a.i];
+    if (sec) sec.scrollIntoView({behavior:"smooth", block:"start"});
   }
 }
 
@@ -3259,6 +3411,8 @@ function setLang(l){
   $("tabRef").textContent = l === "de" ? "Nachschlagen" : "Reference";
   $("tabBuild").textContent = l === "de" ? "Zusammenbauen" : "Builder";
   $("tabStorage").textContent = l === "de" ? "Speicher" : "Storage";
+  $("tabCheat").textContent = l === "de" ? "Spickzettel" : "Cheat sheet";
+  $("cheatPrint").textContent = l === "de" ? "drucken" : "print";
   $("testBtn").textContent = l === "de" ? "tests" : "tests";
   $("testEyebrow").textContent = l === "de" ? "Selbsttests" : "Self-tests";
   $("searchBtn").textContent = l === "de" ? "Suche" : "Search";
