@@ -143,6 +143,9 @@ const WHY = {
   createNs:"Der Namespace muss existieren, bevor irgendetwas darin angelegt werden kann. Steht er im selben Manifest, erledigt kubectl apply das in der richtigen Reihenfolge.|The namespace has to exist before anything can be created in it. If it is in the same manifest, kubectl apply handles the ordering.",
   filesPath:"Die ConfigMap wird als Verzeichnis eingehängt, jeder Schlüssel wird zu einer Datei. Der Inhalt aktualisiert sich im laufenden Pod, aber die Anwendung muss ihn selbst neu einlesen.|The ConfigMap is mounted as a directory, each key becoming a file. The content updates in the running pod, but the app has to re-read it itself.",
 
+  "PersistentVolume.reclaim":"Retain lässt das Volume samt Inhalt stehen, wenn der Claim gelöscht wird — aufräumen muss man dann von Hand, und ein neuer Claim bindet es nicht automatisch wieder. Delete räumt mit auf, was bei einem von Hand geschriebenen PV selten gemeint ist: Der Speicher dahinter existierte ja schon vorher.|Retain leaves the volume and its contents in place when the claim is deleted — you clean up by hand afterwards, and a new claim does not automatically bind it again. Delete cleans up with it, which is rarely the intent for a hand-written PV: the storage behind it existed beforehand.",
+  "PersistentVolume.src":"local zeigt auf eine Platte an einem bestimmten Node und braucht deshalb zwingend eine nodeAffinity — sonst plant der Scheduler den Pod irgendwohin, wo es das Volume nicht gibt. nfs ist die übliche Antwort, wenn mehrere Nodes gleichzeitig schreiben sollen. csi bindet ein Volume ein, das beim Anbieter bereits existiert. hostPath ist der Notnagel für lokale Tests.|local points at a disk in one particular node and therefore requires a nodeAffinity — otherwise the scheduler places the pod somewhere the volume does not exist. nfs is the usual answer when several nodes need to write at once. csi attaches a volume that already exists at your provider. hostPath is the stopgap for local testing.",
+  "PersistentVolumeClaim.bindMode":"Dynamisch ist der Normalfall: Der Claim nennt eine StorageClass, und der Provisioner legt das Volume passend an. Statisch bindet an ein PersistentVolume, das schon da ist. Beides zu mischen geht schief — nennt ein Claim keine Klasse, springt die Standardklasse ein und legt ein zweites Volume an, während das vorhandene unberührt liegen bleibt.|Dynamic is the normal case: the claim names a storage class and the provisioner creates a matching volume. Static binds to a PersistentVolume that is already there. Mixing the two goes wrong — if a claim names no class, the default class steps in and provisions a second volume while the existing one sits untouched.",
   "Pod.restartPolicy":"Always startet den Container im selben Pod neu, sobald er endet — auch nach einem erfolgreichen Ende. Für einen Pod, der eine Aufgabe einmal erledigen soll, ist OnFailure oder Never richtig. Der Pod selbst wird davon nie neu erstellt: Fällt der Node aus, ist er weg und niemand legt ihn wieder an.|Always restarts the container inside the same pod as soon as it exits — even after a successful exit. For a pod meant to do one job, OnFailure or Never is right. The pod itself is never recreated by this: if the node fails it is gone, and nobody brings it back.",
   "Service.type":"ClusterIP ist nur im Cluster erreichbar und der Normalfall. NodePort öffnet einen festen Port auf jedem Node. LoadBalancer fordert beim Cloud-Anbieter eine externe IP an — die kostet dort Geld und existiert auf lokalen Clustern oft gar nicht.|ClusterIP is cluster-internal and the normal case. NodePort opens a fixed port on every node. LoadBalancer requests an external IP from your cloud provider — that costs money and often does not exist on local clusters.",
   "Service.selector":"Der Service findet seine Pods ausschließlich über Labels, nie über Namen. Passt kein Label, existiert der Service zwar, hat aber keine Endpoints — Anfragen laufen ins Leere, ohne dass irgendwo ein Fehler auftaucht.|A service finds its pods purely by labels, never by name. If nothing matches, the service exists but has no endpoints — requests go nowhere and no error appears anywhere.",
@@ -667,6 +670,84 @@ RES.CronJob = {
   }
 };
 
+RES.PersistentVolume = {
+  group:"config", desc:"Ein konkretes Stück Speicher, clusterweit|A concrete piece of storage, cluster-wide",
+  steps:[
+    {id:"meta", title:"Metadaten|Metadata",
+     desc:"Ein PersistentVolume gehört keinem Namespace. Normalerweise legt die StorageClass es automatisch an — von Hand schreibt man eines, wenn der Speicher schon existiert: eine NFS-Freigabe, eine Platte an einem bestimmten Node, ein fertiges Volume beim Anbieter.|A PersistentVolume belongs to no namespace. Normally the storage class creates one automatically — you write one by hand when the storage already exists: an NFS share, a disk on a particular node, a ready-made volume at your provider.",
+     fields:[
+      {k:"name", t:"text", l:"Name|Name", req:true, ph:"data-pv-01"},
+      {k:"labels", t:"kv", l:"Labels|Labels",
+        hint:"Ein Claim kann darüber auswählen, statt das Volume beim Namen zu nennen.|A claim can select by these instead of naming the volume."},
+      {k:"annotations", t:"kv", adv:true, l:"Annotations|Annotations"}
+     ]},
+    {id:"spec", title:"Größe & Klasse|Size & class",
+     desc:"Die Angaben müssen zum Claim passen, sonst kommt die Bindung nie zustande.|These have to match the claim, otherwise binding never happens.",
+     fields:[
+      {k:"size", t:"text", l:"capacity.storage", req:true, ph:"10Gi", half:true},
+      {k:"class", t:"text", l:"storageClassName", ph:"manual", half:true,
+        hint:"Frei wählbar, muss aber im Claim genauso stehen. Leer heißt: nur ein Claim ohne Klasse passt dazu.|Free to choose, but the claim has to say the same. Empty means only a claim without a class fits."},
+      {k:"access", t:"select", l:"accessMode",
+        opts:[["","ReadWriteOnce"],["ReadOnlyMany","ReadOnlyMany"],["ReadWriteMany","ReadWriteMany"],["ReadWriteOncePod","ReadWriteOncePod"]]},
+      {k:"mode", t:"select", l:"volumeMode", opts:[["","Filesystem"],["Block","Block"]]},
+      {k:"reclaim", t:"select", l:"persistentVolumeReclaimPolicy",
+        opts:[["","Retain — Volume bleibt liegen|Retain — the volume stays behind"],
+              ["Delete","Delete — verschwindet mit dem Claim|Delete — goes away with the claim"]]},
+      {k:"mountOptions", t:"lines", adv:true, l:"mountOptions", hint:"Eine Zeile pro Option, z. B. hard oder nfsvers=4.1|One line per option, e.g. hard or nfsvers=4.1"}
+     ]},
+    {id:"src", title:"Woher der Speicher kommt|Where the storage comes from", desc:"",
+     fields:[
+      {k:"src", t:"select", l:"Art|Kind", def:"local", structural:true,
+        opts:[["local","local — Pfad auf einem bestimmten Node|local — a path on one particular node"],
+              ["nfs","nfs — Netzwerkfreigabe|nfs — a network share"],
+              ["csi","csi — vorhandenes Volume eines Treibers|csi — an existing volume of some driver"],
+              ["hostPath","hostPath — Pfad auf dem Node, nur für Tests|hostPath — a path on the node, for testing only"]]},
+      {k:"server", t:"text", l:"NFS-Server|NFS server", req:true, ph:"nfs.intern", half:true, when:d=>d.src==="nfs"},
+      {k:"path", t:"text", l:"Pfad|Path", req:true, ph:"/export/data", half:true,
+        when:d=>d.src!=="csi"},
+      {k:"node", t:"text", l:"Node", req:true, ph:"worker-01", when:d=>d.src==="local",
+        hint:"kubernetes.io/hostname des Nodes, auf dem die Platte steckt.|The kubernetes.io/hostname of the node the disk sits in."},
+      {k:"hostType", t:"select", l:"hostPath.type", when:d=>d.src==="hostPath",
+        opts:[["","DirectoryOrCreate"],["Directory","Directory"],["FileOrCreate","FileOrCreate"],["File","File"]]},
+      {k:"driver", t:"text", l:"csi.driver", req:true, ph:"ebs.csi.aws.com", half:true, when:d=>d.src==="csi"},
+      {k:"handle", t:"text", l:"csi.volumeHandle", req:true, ph:"vol-0a1b2c3d", half:true, when:d=>d.src==="csi"},
+      {k:"attrs", t:"kv", adv:true, l:"csi.volumeAttributes", when:d=>d.src==="csi"},
+      {k:"fsType", t:"text", adv:true, l:"fsType", ph:"ext4", half:true, when:d=>d.src==="csi"||d.src==="local"},
+      {k:"readOnly", t:"bool", l:"readOnly", when:d=>d.src==="nfs"||d.src==="csi"}
+     ]},
+    {id:"bind", adv:true, title:"Reservierung|Reservation",
+     desc:"Ohne Reservierung nimmt der erste passende Claim das Volume — auch ein fremder aus einem anderen Namespace.|Without a reservation the first matching claim takes the volume — including someone else's from another namespace.",
+     fields:[
+      {k:"claimName", t:"text", l:"claimRef · Name", ph:"data", half:true},
+      {k:"claimNs", t:"text", l:"claimRef · Namespace", ph:"default", half:true}
+     ]}
+  ],
+  build(d){
+    const src = d.src || "local";
+    const spec = {
+      capacity:{storage:d.size},
+      volumeMode: d.mode || undefined,
+      accessModes:[d.access || "ReadWriteOnce"],
+      persistentVolumeReclaimPolicy: d.reclaim || "Retain",
+      storageClassName: d.class || undefined,
+      mountOptions: lines(d.mountOptions),
+      claimRef: d.claimName ? {name:d.claimName, namespace:d.claimNs || "default"} : undefined
+    };
+    if (src === "nfs") spec.nfs = {server:d.server, path:d.path, readOnly:d.readOnly || undefined};
+    else if (src === "hostPath") spec.hostPath = {path:d.path, type:d.hostType || undefined};
+    else if (src === "csi") spec.csi = {driver:d.driver, volumeHandle:d.handle,
+      fsType:d.fsType || undefined, readOnly:d.readOnly || undefined, volumeAttributes:kvObj(d.attrs)};
+    else {
+      spec.local = {path:d.path, fsType:d.fsType || undefined};
+      spec.nodeAffinity = d.node ? {required:{nodeSelectorTerms:[{matchExpressions:[
+        {key:"kubernetes.io/hostname", operator:"In", values:[d.node]}]}]}} : undefined;
+    }
+    return {apiVersion:"v1", kind:"PersistentVolume",
+      metadata:{name:d.name, labels:kvObj(d.labels), annotations:kvObj(d.annotations)},
+      spec:spec};
+  }
+};
+
 RES.PersistentVolumeClaim = {
   group:"config", desc:"Anforderung von dauerhaftem Speicher|Request for durable storage",
   steps:[
@@ -682,15 +763,31 @@ RES.PersistentVolumeClaim = {
         opts:[["","ReadWriteOnce"],["ReadOnlyMany","ReadOnlyMany"],["ReadWriteMany","ReadWriteMany"],["ReadWriteOncePod","ReadWriteOncePod"]]},
       {k:"mode", t:"select", l:"volumeMode",
         opts:[["","Filesystem"],["Block","Block"]]}
+     ]},
+    {id:"bind", title:"Bereitstellung|Provisioning",
+     desc:"Normalerweise legt die StorageClass das Volume selbst an. Existiert der Speicher schon — als PersistentVolume von Hand geschrieben —, muss der Claim ausdrücklich darauf zeigen.|Normally the storage class creates the volume itself. If the storage already exists — written by hand as a PersistentVolume — the claim has to point at it explicitly.",
+     fields:[
+      {k:"bindMode", t:"select", l:"Woher das Volume kommt|Where the volume comes from", structural:true,
+        opts:[["","dynamisch — die StorageClass legt es an|dynamic — the storage class creates it"],
+              ["static","statisch — an ein vorhandenes PersistentVolume binden|static — bind to an existing PersistentVolume"]]},
+      {k:"volumeName", t:"text", l:"volumeName", ph:"data-pv-01", when:d=>d.bindMode==="static",
+        hint:"Der Name des PersistentVolume. Leer lassen, wenn stattdessen über Labels ausgewählt wird.|The name of the PersistentVolume. Leave empty if you select by labels instead."},
+      {k:"pvSel", t:"kv", l:"…oder Auswahl über Labels|…or select by labels", when:d=>d.bindMode==="static"},
+      {k:"emptyClass", t:"bool", def:true, l:"storageClassName ausdrücklich leer setzen|Set storageClassName to empty explicitly",
+        when:d=>d.bindMode==="static",
+        hint:"Ohne diese Zeile springt die Standard-StorageClass ein und legt ein zweites, dynamisches Volume an — das vorhandene bleibt unberührt liegen.|Without this line the default storage class steps in and provisions a second, dynamic volume — the existing one stays untouched."}
      ]}
   ],
   build(d){
+    const staticBind = d.bindMode === "static";
     return {apiVersion:"v1", kind:"PersistentVolumeClaim",
       metadata:{name:d.name, namespace:d.namespace||undefined, labels:kvObj(d.labels)},
       spec:{
         accessModes:[d.access || "ReadWriteOnce"],
         volumeMode: d.mode || undefined,
-        storageClassName: d.class || undefined,
+        storageClassName: d.class || (staticBind && d.emptyClass ? EMPTY_STR : undefined),
+        volumeName: staticBind ? (d.volumeName || undefined) : undefined,
+        selector: staticBind && kvObj(d.pvSel) ? {matchLabels:kvObj(d.pvSel)} : undefined,
         resources:{requests:{storage:d.size}}
       }};
   }
@@ -1263,8 +1360,11 @@ function validate(docs){
   const err = (m, field) => out.push({lvl:"err", m:m, src:ctx, field:field});
   const warn = (m, field) => out.push({lvl:"warn", m:m, src:ctx, field:field});
   const podLabels = [];
-  const pvcs = {};
-  docs.forEach(d => { if (d.kind === "PersistentVolumeClaim") pvcs[(d.metadata||{}).name] = d; });
+  const pvcs = {}, pvs = {};
+  docs.forEach(d => {
+    if (d.kind === "PersistentVolumeClaim") pvcs[(d.metadata||{}).name] = d;
+    if (d.kind === "PersistentVolume") pvs[(d.metadata||{}).name] = d;
+  });
 
   docs.forEach(doc => {
     ctx = doc.__src || null;
@@ -1468,8 +1568,50 @@ function validate(docs){
         err(nm + ": " + t("schedule braucht 5 Felder|schedule needs 5 fields") + " — " + s, "schedule");
     }
 
-    if (kind === "PersistentVolumeClaim" && !(((doc.spec||{}).resources||{}).requests||{}).storage)
-      err(nm + ": " + t("keine Größe angegeben|no size given"), "size");
+    if (kind === "PersistentVolume"){
+      const sp = doc.spec || {};
+      const cap = (sp.capacity||{}).storage;
+      if (!cap) err(nm + ": " + t("keine Größe angegeben|no size given"), "size");
+      else if (qty(cap) === null) err(nm + ": capacity.storage — " + t("ungültige Mengenangabe|invalid quantity") + ": " + cap, "size");
+      if (!sp.local && !sp.nfs && !sp.hostPath && !sp.csi)
+        err(nm + ": " + t("keine Quelle angegeben — ohne local, nfs, csi oder hostPath beschreibt das PV keinen Speicher|no source given — without local, nfs, csi or hostPath the PV describes no storage"), "src");
+      if (sp.local && !sp.nodeAffinity)
+        err(nm + ": " + t("local ohne nodeAffinity — der Scheduler weiß nicht, wo die Platte steckt, und der Pod bleibt Pending|local without nodeAffinity — the scheduler does not know where the disk is and the pod stays Pending"), "node");
+      if (sp.hostPath)
+        warn(nm + ": " + t("hostPath greift auf das Dateisystem des Nodes zu, bindet den Pod an genau diesen Node und wird von Pod Security Standards blockiert. Für Produktion praktisch nie die Antwort.|hostPath reaches into the node's filesystem, pins the pod to that one node and is blocked by Pod Security Standards. For production, almost never the answer."), "src");
+      if (sp.persistentVolumeReclaimPolicy === "Delete")
+        warn(nm + ": " + t("reclaimPolicy Delete — mit dem Claim verschwindet auch das Volume samt Inhalt|reclaimPolicy Delete — the volume and its contents disappear along with the claim"), "reclaim");
+    }
+
+    if (kind === "PersistentVolumeClaim"){
+      const sp = doc.spec || {};
+      if (!((sp.resources||{}).requests||{}).storage)
+        err(nm + ": " + t("keine Größe angegeben|no size given"), "size");
+      const pv = sp.volumeName ? pvs[sp.volumeName] : null;
+      if (sp.volumeName && !pv)
+        warn(nm + ": " + t("bindet an das PersistentVolume|binds to the PersistentVolume") + " " + sp.volumeName + ", " +
+          t("das nicht in diesem Manifest steht — es muss im Cluster bereits existieren|which is not in this manifest — it has to exist in the cluster already"), "volumeName");
+      if (pv){
+        const cls = v => (v === undefined || v === EMPTY_STR) ? "" : v;
+        const pvSpec = pv.spec || {};
+        if (cls(pvSpec.storageClassName) !== cls(sp.storageClassName))
+          err(nm + ": storageClassName " + t("passt nicht zu|does not match") + " " + sp.volumeName +
+            " (\"" + cls(sp.storageClassName) + "\" ≠ \"" + cls(pvSpec.storageClassName) + "\") — " +
+            t("die Bindung kommt damit nie zustande|binding will therefore never happen"), "class");
+        const want = qty(((sp.resources||{}).requests||{}).storage), got = qty((pvSpec.capacity||{}).storage);
+        if (typeof want === "number" && typeof got === "number" && want > got)
+          err(nm + ": " + t("fordert mehr an, als|requests more than") + " " + sp.volumeName + " " +
+            t("hergibt|provides") + " (" + sp.resources.requests.storage + " > " + pvSpec.capacity.storage + ")", "size");
+        const pvModes = pvSpec.accessModes || [];
+        (sp.accessModes||[]).forEach(m => {
+          if (pvModes.indexOf(m) === -1)
+            err(nm + ": accessMode " + m + " " + t("bietet das Volume nicht an|is not offered by the volume") + " " +
+              sp.volumeName + " (" + pvModes.join(", ") + ")", "access");
+        });
+      }
+      if (!sp.volumeName && sp.selector && sp.storageClassName !== EMPTY_STR && !sp.storageClassName)
+        warn(nm + ": " + t("Auswahl über Labels, aber storageClassName fehlt — die Standardklasse legt dann ein zweites, dynamisches Volume an|selecting by labels but storageClassName is missing — the default class then provisions a second, dynamic volume"), "emptyClass");
+    }
   });
 
   ctx = null;
@@ -3162,6 +3304,59 @@ function runSelfTests(){
     regServer:"h.de", regUser:"u", regPass:"p"});
   ok("Secret: auth ist base64 von user:pass",
     has(sec.stringData[".dockerconfigjson"], b64("u:p")), sec.stringData[".dockerconfigjson"]);
+
+  /* --- PersistentVolume und statische Bindung --- */
+  const pvLocal = RES.PersistentVolume.build({name:"data-pv-01", size:"10Gi", class:"manual",
+    src:"local", path:"/mnt/disks/data", node:"worker-01"});
+  ok("PV: clusterweit, ohne Namespace",
+    pvLocal.metadata.namespace === undefined && pvLocal.kind === "PersistentVolume", toYaml(pvLocal));
+  ok("PV: Retain ist gesetzt, nicht nur gemeint",
+    pvLocal.spec.persistentVolumeReclaimPolicy === "Retain", toYaml(pvLocal));
+  ok("PV local: nodeAffinity zeigt auf den Node",
+    pvLocal.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0] === "worker-01",
+    toYaml(pvLocal));
+  ok("PV local ohne Node ist ein Fehler",
+    val([RES.PersistentVolume.build({name:"p", size:"1Gi", src:"local", path:"/mnt/x"})])
+      .some(x => x.indexOf("err:node") === 0), "");
+  ok("PV ohne Quelle ist ein Fehler",
+    val([{apiVersion:"v1", kind:"PersistentVolume", metadata:{name:"p"}, spec:{capacity:{storage:"1Gi"}}}])
+      .some(x => x.indexOf("err:src") === 0), "");
+  ok("PV hostPath wird gewarnt",
+    val([RES.PersistentVolume.build({name:"p", size:"1Gi", src:"hostPath", path:"/data"})])
+      .some(x => x.indexOf("warn:src") === 0), "");
+  const pvNfs = RES.PersistentVolume.build({name:"nfs-pv", size:"50Gi", access:"ReadWriteMany",
+    src:"nfs", server:"nfs.intern", path:"/export/data", mountOptions:"hard\nnfsvers=4.1"});
+  ok("PV nfs: Server, Pfad und mountOptions",
+    pvNfs.spec.nfs.server === "nfs.intern" && pvNfs.spec.mountOptions.length === 2, toYaml(pvNfs));
+
+  const claimStatic = RES.PersistentVolumeClaim.build({name:"data", namespace:"prod", size:"10Gi",
+    class:"manual", bindMode:"static", volumeName:"data-pv-01"});
+  ok("PVC statisch: volumeName wird gesetzt",
+    claimStatic.spec.volumeName === "data-pv-01", toYaml(claimStatic));
+  ok("PVC statisch: passende Bindung meldet nichts",
+    val([pvLocal, claimStatic]).length === 0, val([pvLocal, claimStatic]).join(" | "));
+  ok("PVC: leere storageClassName landet als \"\" im YAML",
+    has(toYaml(RES.PersistentVolumeClaim.build({name:"d", size:"1Gi",
+      bindMode:"static", volumeName:"p", emptyClass:true})), 'storageClassName: ""'),
+    toYaml(RES.PersistentVolumeClaim.build({name:"d", size:"1Gi", bindMode:"static", volumeName:"p", emptyClass:true})));
+  ok("PVC: unpassende Klasse ist ein Fehler",
+    val([pvLocal, RES.PersistentVolumeClaim.build({name:"data", size:"10Gi",
+      bindMode:"static", volumeName:"data-pv-01", emptyClass:true})])
+      .some(x => x.indexOf("err:class") === 0), "");
+  ok("PVC: mehr fordern als das PV hergibt ist ein Fehler",
+    val([pvLocal, RES.PersistentVolumeClaim.build({name:"data", size:"20Gi", class:"manual",
+      bindMode:"static", volumeName:"data-pv-01"})]).some(x => x.indexOf("err:size") === 0), "");
+  ok("PVC: accessMode, den das PV nicht anbietet, ist ein Fehler",
+    val([pvLocal, RES.PersistentVolumeClaim.build({name:"data", size:"10Gi", class:"manual",
+      access:"ReadWriteMany", bindMode:"static", volumeName:"data-pv-01"})])
+      .some(x => x.indexOf("err:access") === 0), "");
+  ok("PVC: unbekanntes PV wird nur gewarnt",
+    val([RES.PersistentVolumeClaim.build({name:"data", size:"1Gi",
+      bindMode:"static", volumeName:"woanders", emptyClass:true})])
+      .some(x => x.indexOf("warn:volumeName") === 0), "");
+  ok("PVC dynamisch bleibt unverändert",
+    RES.PersistentVolumeClaim.build({name:"d", size:"1Gi", class:"fast"}).spec.volumeName === undefined &&
+    RES.PersistentVolumeClaim.build({name:"d", size:"1Gi", class:"fast"}).spec.storageClassName === "fast", "");
 
   /* --- Spickzettel --- */
   const cheatStrings = [];
