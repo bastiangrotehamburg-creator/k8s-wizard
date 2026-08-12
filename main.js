@@ -127,6 +127,8 @@ const WHY = {
   cpuLim:"limits sind die harte Obergrenze. Bei CPU wird gedrosselt — die Anwendung wird langsam, läuft aber weiter. Ohne Limit kann ein einzelner Container einen Node auslasten.|limits are the hard ceiling. CPU gets throttled — the app slows down but keeps running. Without a limit a single container can saturate a node.",
   memLim:"Beim Speicher gibt es kein Drosseln: Wer sein Limit überschreitet, wird ohne Vorwarnung beendet. Im Status steht dann OOMKilled, und der Pod startet neu.|There is no throttling for memory: exceed the limit and the container is killed without warning. The status reads OOMKilled and the pod restarts.",
   probe:"readinessProbe entscheidet, ob der Pod Traffic bekommt. livenessProbe entscheidet, ob er neu gestartet wird. Ohne readiness schickt der Service sofort Anfragen an einen Container, der noch startet. Eine zu strenge liveness startet gesunde Pods im Kreis neu.|The readiness probe decides whether the pod receives traffic. The liveness probe decides whether it gets restarted. Without readiness the service sends requests to a container that is still starting. An over-strict liveness probe restarts healthy pods in a loop.",
+  probeStartup:"Die startupProbe deckt genau die Phase ab, in der die Anwendung noch hochfährt: Solange sie läuft, greifen readiness und liveness nicht. Ihr Budget ist periodSeconds mal failureThreshold — großzügig gesetzt, ohne dass die liveness danach träge wird. Das ist der saubere Ersatz für ein hohes initialDelaySeconds, das man sonst raten muss und das im laufenden Betrieb nichts mehr bringt. Ohne sie ist die Reihenfolge tückisch: Startet die Anwendung langsamer als gedacht, tötet die liveness sie mitten im Hochfahren, wieder und wieder.|The startup probe covers exactly the phase while the app is still coming up: as long as it runs, readiness and liveness stay out of the way. Its budget is periodSeconds times failureThreshold — set generously without making the liveness probe sluggish afterwards. That is the clean replacement for a high initialDelaySeconds, which you otherwise have to guess and which does nothing once the app is running. Without it the ordering bites: if the app starts slower than expected, the liveness probe kills it mid-startup, over and over.",
+  probeCmd:"Der Befehl läuft im Container selbst, ohne Shell — jedes Argument in eine eigene Zeile. Gewertet wird allein der Rückgabewert, die Ausgabe interessiert niemanden. Für Anwendungen ohne HTTP-Endpunkt ist das der Weg, etwa ein pg_isready oder eine Datei, die der Prozess anlegt, sobald er bereit ist.|The command runs inside the container itself, without a shell — one argument per line. Only the exit code counts, the output goes nowhere. For applications without an HTTP endpoint this is the way, for instance a pg_isready or a file the process creates once it is ready.",
   probePath:"Der Endpunkt sollte nur prüfen, ob der eigene Prozess antwortet — keine Datenbank, keine fremden Dienste. Sonst reißt ein Ausfall der Datenbank sämtliche Pods mit in den Neustart.|The endpoint should only check that your own process responds — no database, no third-party services. Otherwise a database outage drags every pod into a restart loop.",
   sa:"Der ServiceAccount bestimmt, was der Pod gegenüber der Kubernetes-API darf. default hat in der Regel keine Rechte, und für die allermeisten Anwendungen ist genau das richtig.|The service account decides what the pod may do against the Kubernetes API. default usually has no permissions, and for the vast majority of apps that is exactly right.",
   nodeSelector:"Bindet den Pod an Nodes mit bestimmten Labels — GPU-Nodes, eine bestimmte Zone, dedizierte Hardware. Passt kein Node auf die Auswahl, bleibt der Pod dauerhaft Pending, ohne dass etwas kaputt aussieht.|Pins the pod to nodes carrying certain labels — GPU nodes, a particular zone, dedicated hardware. If no node matches, the pod stays Pending forever without anything looking broken.",
@@ -241,9 +243,26 @@ RES.Deployment = {
       {k:"cpuLim", t:"text", l:"limits.cpu", ph:"500m", half:true},
       {k:"memLim", t:"text", l:"limits.memory", ph:"512Mi", half:true},
       {k:"probe", t:"select", l:"Health check|Health check", structural:true,
-        opts:[["","keiner|none"],["http","httpGet"],["tcp","tcpSocket"]]},
+        opts:[["","keiner|none"],["http","httpGet"],["tcp","tcpSocket"],["exec","exec"]]},
       {k:"probePath", t:"text", l:"Pfad|Path", ph:"/healthz", def:"/healthz", when:d=>d.probe==="http"},
-      {k:"probePort", t:"number", l:"Port|Port", ph:"8080", when:d=>d.probe==="http"||d.probe==="tcp"}
+      {k:"probePort", t:"number", l:"Port|Port", ph:"8080", when:d=>d.probe==="http"||d.probe==="tcp"},
+      {k:"probeCmd", t:"lines", l:"Befehl|Command", req:true, ph:"cat\n/tmp/ready", when:d=>d.probe==="exec",
+        hint:"Eine Zeile pro Argument. Rückgabewert 0 heißt gesund, alles andere gilt als Fehlschlag.|One line per argument. Exit code 0 means healthy, anything else counts as a failure."},
+      {k:"probeReadiness", t:"bool", def:true, l:"readinessProbe", when:d=>!!d.probe,
+        hint:"Entscheidet, ob der Pod Traffic vom Service bekommt.|Decides whether the pod receives traffic from the service."},
+      {k:"probeLiveness", t:"bool", def:true, structural:true, l:"livenessProbe", when:d=>!!d.probe,
+        hint:"Entscheidet, ob der Container neu gestartet wird.|Decides whether the container gets restarted."},
+      {k:"probeStartup", t:"bool", structural:true, l:"startupProbe", when:d=>!!d.probe,
+        hint:"Gibt der Anwendung Zeit zum Hochfahren. Solange sie läuft, greifen die anderen beiden nicht.|Gives the app time to come up. While it runs, the other two stay out of the way."},
+      {k:"livenessPath", t:"text", adv:true, l:"livenessProbe · abweichender Pfad|livenessProbe · different path",
+        ph:"= readinessProbe", when:d=>d.probe==="http" && d.probeLiveness!==false},
+      {k:"probeDelay", t:"number", adv:true, l:"initialDelaySeconds", ph:"15", min:0, half:true, when:d=>!!d.probe},
+      {k:"probePeriod", t:"number", adv:true, l:"periodSeconds", ph:"10", min:1, half:true, when:d=>!!d.probe},
+      {k:"probeTimeout", t:"number", adv:true, l:"timeoutSeconds", ph:"1", min:1, half:true, when:d=>!!d.probe},
+      {k:"probeFailures", t:"number", adv:true, l:"failureThreshold", ph:"3", min:1, half:true, when:d=>!!d.probe},
+      {k:"startupPeriod", t:"number", adv:true, l:"startupProbe · periodSeconds", ph:"10", min:1, half:true, when:d=>d.probeStartup},
+      {k:"startupFailures", t:"number", adv:true, l:"startupProbe · failureThreshold", ph:"30", min:1, half:true, when:d=>d.probeStartup,
+        hint:"periodSeconds mal failureThreshold ist das Startbudget — 10 × 30 sind fünf Minuten.|periodSeconds times failureThreshold is the startup budget — 10 × 30 is five minutes."}
      ]},
     {id:"adv", adv:true, title:"Erweitert|Advanced", desc:"Optional. Leere Felder landen nicht im YAML.|Optional. Empty fields never reach the YAML.",
      fields:[
@@ -1087,6 +1106,8 @@ RES._stack = {
       {k:"probe", t:"select", l:"Health check|Health check", def:"http", structural:true,
         opts:[["http","httpGet"],["tcp","tcpSocket"],["","keiner|none"]]},
       {k:"probePath", t:"text", l:"Pfad|Path", ph:"/healthz", def:"/healthz", when:d=>d.probe==="http"},
+      {k:"probeStartup", t:"bool", l:"startupProbe zusätzlich|Add a startupProbe as well", when:d=>!!d.probe,
+        hint:"Deckt das Hochfahren ab, damit die livenessProbe eine langsam startende Anwendung nicht im Kreis neu startet.|Covers the startup phase so the liveness probe does not restart a slow-starting app in a loop."},
       {k:"sa", t:"text", l:"serviceAccountName", ph:"default", half:true},
       {k:"stdLabels", t:"bool", structural:true, def:true,
         l:"Empfohlene app.kubernetes.io-Labels setzen|Add the recommended app.kubernetes.io labels",
@@ -1157,7 +1178,7 @@ RES._stack = {
       volumes: (files.length && d.filesPath) ? [{cm:fileName, path:d.filesPath}] : [],
       pvc: d.storage ? pvcName : "", pvcPath: d.storage ? d.mountPath : "",
       cpuReq:d.cpuReq, memReq:d.memReq, cpuLim:d.cpuLim, memLim:d.memLim,
-      probe:d.probe, probePath:d.probePath, probePort:d.port,
+      probe:d.probe, probePath:d.probePath, probePort:d.port, probeStartup:d.probeStartup,
       sa:d.sa, runAsNonRoot:d.runAsNonRoot, hardened:d.hardened
     };
     if (isSts){
@@ -1280,8 +1301,12 @@ function containerOf(d, extraMounts){
       limits:{cpu:d.cpuLim, memory:d.memLim}
     }
   };
-  const pr = probe(d);
-  if (pr){ c.readinessProbe = pr; c.livenessProbe = Object.assign({}, pr, {initialDelaySeconds:15, periodSeconds:20}); }
+  const pr = probesOf(d);
+  if (pr){
+    if (pr.readinessProbe) c.readinessProbe = pr.readinessProbe;
+    if (pr.livenessProbe) c.livenessProbe = pr.livenessProbe;
+    if (pr.startupProbe) c.startupProbe = pr.startupProbe;
+  }
   if (d.hardened){
     c.securityContext = {
       allowPrivilegeEscalation:false, readOnlyRootFilesystem:true, runAsNonRoot:true,
@@ -1332,11 +1357,49 @@ function envFrom(d){
   if (d.envSec) a.push({secretRef:{name:d.envSec}});
   return a.length ? a : undefined;
 }
-function probe(d){
+function probe(d, path){
   const port = num(d.probePort);
-  if (d.probe === "http") return {httpGet:{path:d.probePath||"/healthz", port:port===undefined?80:port}};
+  if (d.probe === "http") return {httpGet:{path:path || d.probePath || "/healthz", port:port===undefined?80:port}};
   if (d.probe === "tcp") return {tcpSocket:{port:port===undefined?80:port}};
+  if (d.probe === "exec") return {exec:{command:lines(d.probeCmd)}};
   return null;
+}
+
+/* readiness, liveness und startup aus einer Definition. Fehlende Schalter
+   bedeuten an — so bleiben ältere gespeicherte Dateien bei ihrem Verhalten. */
+function probesOf(d){
+  if (!probe(d)) return null;
+  const delay = num(d.probeDelay), per = num(d.probePeriod),
+        to = num(d.probeTimeout), fail = num(d.probeFailures);
+  const timings = p => {
+    if (per !== undefined) p.periodSeconds = per;
+    if (to !== undefined) p.timeoutSeconds = to;
+    if (fail !== undefined) p.failureThreshold = fail;
+    return p;
+  };
+  const out = {};
+  if (d.probeReadiness !== false){
+    const p = timings(probe(d));
+    if (delay !== undefined) p.initialDelaySeconds = delay;
+    out.readinessProbe = p;
+  }
+  if (d.probeLiveness !== false){
+    const p = timings(probe(d, d.probe === "http" ? d.livenessPath : ""));
+    /* Der Vorlauf ist nur nötig, solange keine startupProbe den Start abdeckt. */
+    if (delay !== undefined) p.initialDelaySeconds = delay;
+    else if (!d.probeStartup) p.initialDelaySeconds = 15;
+    if (per === undefined && !d.probeStartup) p.periodSeconds = 20;
+    out.livenessProbe = p;
+  }
+  if (d.probeStartup){
+    const sp = num(d.startupPeriod), sf = num(d.startupFailures);
+    const p = probe(d);
+    p.periodSeconds = sp === undefined ? 10 : sp;
+    p.failureThreshold = sf === undefined ? 30 : sf;
+    if (to !== undefined) p.timeoutSeconds = to;
+    out.startupProbe = p;
+  }
+  return out;
 }
 function b64(s){
   try { return btoa(unescape(encodeURIComponent(s))); } catch(e){ return ""; }
@@ -1410,9 +1473,12 @@ function validate(docs){
         if (isPrivateHost && !pullSecs.length)
           warn(nm + ": " + t("Image von|image from") + " " + host + " " + t("ohne imagePullSecrets — schlägt fehl, wenn die Registry Anmeldung verlangt|without imagePullSecrets — fails if the registry requires credentials"), "image");
 
+        if (c.livenessProbe && !c.readinessProbe)
+          warn(nm + ": " + t("livenessProbe ohne readinessProbe — der Service schickt Anfragen an einen Container, der noch startet|livenessProbe without a readinessProbe — the service sends requests to a container that is still starting"), "probeReadiness");
+
         /* Probe-Port muss zu einem deklarierten containerPort passen */
         const declared = (c.ports||[]).map(p => p.containerPort).filter(p => typeof p === "number");
-        ["readinessProbe","livenessProbe"].forEach(pk => {
+        ["readinessProbe","livenessProbe","startupProbe"].forEach(pk => {
           const pr = c[pk]; if (!pr) return;
           const pp = ((pr.httpGet || pr.tcpSocket || {}).port);
           if (typeof pp === "number" && declared.length && declared.indexOf(pp) === -1)
@@ -3304,6 +3370,63 @@ function runSelfTests(){
     regServer:"h.de", regUser:"u", regPass:"p"});
   ok("Secret: auth ist base64 von user:pass",
     has(sec.stringData[".dockerconfigjson"], b64("u:p")), sec.stringData[".dockerconfigjson"]);
+
+  /* --- Probes --- */
+  const cOf = d => RES.Deployment.build(Object.assign({name:"a", image:"x:1",
+    ports:[{containerPort:8080}], cpuLim:"1", memLim:"1Gi"}, d)).spec.template.spec.containers[0];
+
+  const pOld = cOf({probe:"http", probePath:"/healthz", probePort:8080});
+  ok("Probes: alte Daten ohne Schalter bleiben bei readiness und liveness",
+    !!pOld.readinessProbe && !!pOld.livenessProbe && !pOld.startupProbe &&
+    pOld.livenessProbe.initialDelaySeconds === 15 && pOld.livenessProbe.periodSeconds === 20,
+    JSON.stringify(pOld.livenessProbe));
+
+  const pStart = cOf({probe:"http", probePath:"/healthz", probePort:8080, probeStartup:true});
+  ok("startupProbe wird erzeugt, mit Budget",
+    pStart.startupProbe.periodSeconds === 10 && pStart.startupProbe.failureThreshold === 30,
+    JSON.stringify(pStart.startupProbe));
+  ok("Mit startupProbe entfällt der Vorlauf der livenessProbe",
+    pStart.livenessProbe.initialDelaySeconds === undefined, JSON.stringify(pStart.livenessProbe));
+  ok("startupProbe prüft denselben Endpunkt",
+    pStart.startupProbe.httpGet.path === "/healthz" && pStart.startupProbe.httpGet.port === 8080,
+    JSON.stringify(pStart.startupProbe));
+
+  ok("readinessProbe lässt sich abschalten",
+    !cOf({probe:"http", probePort:8080, probeReadiness:false}).readinessProbe, "");
+  ok("livenessProbe lässt sich abschalten",
+    !cOf({probe:"http", probePort:8080, probeLiveness:false}).livenessProbe, "");
+  ok("livenessProbe ohne readinessProbe wird gewarnt",
+    val([RES.Deployment.build({name:"a", image:"x:1", cpuLim:"1", memLim:"1Gi",
+      ports:[{containerPort:8080}], probe:"http", probePort:8080, probeReadiness:false})])
+      .some(x => x.indexOf("warn:probeReadiness") === 0), "");
+
+  const pExec = cOf({probe:"exec", probeCmd:"pg_isready\n-U\npostgres"});
+  ok("exec-Probe übernimmt den Befehl zeilenweise",
+    pExec.readinessProbe.exec.command.length === 3 &&
+    pExec.readinessProbe.exec.command[0] === "pg_isready", JSON.stringify(pExec.readinessProbe));
+
+  const pSplit = cOf({probe:"http", probePath:"/readyz", livenessPath:"/healthz", probePort:8080});
+  ok("livenessProbe darf einen eigenen Pfad haben",
+    pSplit.readinessProbe.httpGet.path === "/readyz" &&
+    pSplit.livenessProbe.httpGet.path === "/healthz", JSON.stringify(pSplit.livenessProbe));
+
+  const pTime = cOf({probe:"tcp", probePort:5432, probeDelay:5, probePeriod:15,
+    probeTimeout:3, probeFailures:6});
+  ok("Zeiten landen in beiden Probes",
+    pTime.readinessProbe.periodSeconds === 15 && pTime.readinessProbe.timeoutSeconds === 3 &&
+    pTime.readinessProbe.failureThreshold === 6 && pTime.livenessProbe.initialDelaySeconds === 5,
+    JSON.stringify(pTime.readinessProbe));
+
+  ok("startupProbe auf undeklariertem Port warnt",
+    val([RES.Deployment.build({name:"a", image:"x:1", cpuLim:"1", memLim:"1Gi",
+      ports:[{containerPort:8080}], probe:"http", probePort:3000,
+      probeReadiness:false, probeLiveness:false, probeStartup:true})])
+      .some(x => x.indexOf("warn:probePort") === 0), "");
+
+  ok("Komplett-Modus reicht die startupProbe durch",
+    !!RES._stack.build({name:"s", image:"nginx:1.27", port:8080, probe:"http", probePath:"/z",
+      probeStartup:true, cpuReq:"100m", cpuLim:"500m", memReq:"128Mi", memLim:"512Mi"})
+      .filter(x => x.kind === "Deployment")[0].spec.template.spec.containers[0].startupProbe, "");
 
   /* --- PersistentVolume und statische Bindung --- */
   const pvLocal = RES.PersistentVolume.build({name:"data-pv-01", size:"10Gi", class:"manual",
