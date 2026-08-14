@@ -557,7 +557,7 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
 /* ---------- Schmale Fenster ---------- */
 @media (max-width:960px){
   .shell{grid-template-columns:1fr}
-  .pane--form{padding:20px 16px 100px}
+  .pane--form{padding:20px 16px 130px}
   .pane--yaml{position:static;height:auto;margin:0 14px 20px}
   .code{max-height:60vh}
   .stepnav{width:calc(100% - 28px)}
@@ -569,9 +569,28 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   .fields{grid-template-columns:1fr}
   .top{padding:10px 14px;gap:7px}
   .brand em{display:none}
+  /* Vier Knoepfe passen bei dieser Breite nicht nebeneinander. */
+  .pane--form{padding-bottom:200px}
+  .stepnav{flex-wrap:wrap;row-gap:8px}
+  .stepnav .nav-sp{display:none}
+  .stepnav .btn{flex:1 1 auto;justify-content:center;text-align:center;white-space:nowrap}
+  .stepnav .btn--go,.stepnav [data-nav="commit"]{flex-basis:100%;order:3}
+  .stepnav .jump{flex:0 0 auto}
 }
 @media (min-width:961px){
   .wikipanel,.profilepanel{left:auto;width:56%;border-left:1px solid var(--glass-brd)}
+  /* Die Anleitung ist ein Dokument: volle Breite, Angaben links stehend. */
+  #clusterPanel{
+    left:0;width:100%;border-left:0;
+    display:grid;grid-template-columns:360px minmax(0,1fr);
+    column-gap:30px;align-items:start;
+  }
+  #clusterPanel .wikihead,#clusterPanel > .stepdesc{grid-column:1/-1}
+  #clusterFields{
+    position:sticky;top:0;align-self:start;
+    max-height:calc(86vh - 130px);overflow:auto;padding-right:8px;
+  }
+  #clusterOut{margin-top:0}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}

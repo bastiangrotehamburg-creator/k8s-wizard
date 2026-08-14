@@ -2466,6 +2466,20 @@ $("resetAll").addEventListener("click", () => {
 });
 
 
+/* Alle Panels liegen auf derselben Ebene — zwei gleichzeitig offen heisst,
+   dass das obere die Klicks des unteren abfängt. Also immer nur eines. */
+const PANELS = ["wikiPanel","clusterPanel","profilePanel","envPanel","testPanel","searchPanel"];
+function closePanels(except){
+  PANELS.forEach(id => { if (id !== except) $(id).hidden = true; });
+}
+/* Gibt zurück, ob das Panel danach offen ist. */
+function togglePanel(id){
+  const open = $(id).hidden;
+  closePanels(id);
+  $(id).hidden = !open;
+  return open;
+}
+
 let PROFILE = null;
 
 const PROFILE_EXAMPLE = {
@@ -2507,9 +2521,7 @@ function profileTexts(){
 }
 
 $("profileBtn").addEventListener("click", () => {
-  const p = $("profilePanel");
-  p.hidden = !p.hidden;
-  if (!p.hidden){
+  if (togglePanel("profilePanel")){
     $("profileText").value = JSON.stringify(PROFILE || PROFILE_EXAMPLE, null, 2);
     $("profileText").focus();
   }
@@ -2628,10 +2640,9 @@ function renderWiki(){
 }
 
 $("wikiBtn").addEventListener("click", () => {
-  const p = $("wikiPanel");
-  p.hidden = !p.hidden;
-  $("wikiBtn").setAttribute("aria-expanded", !p.hidden);
-  if (!p.hidden){ setWikiTab(WIKI_TAB); if (WIKI_TAB === "ref") $("wikiFilter").focus(); }
+  const open = togglePanel("wikiPanel");
+  $("wikiBtn").setAttribute("aria-expanded", open);
+  if (open){ setWikiTab(WIKI_TAB); if (WIKI_TAB === "ref") $("wikiFilter").focus(); }
 });
 $("wikiClose").addEventListener("click", () => { $("wikiPanel").hidden = true; });
 $("wikiFilter").addEventListener("input", renderWiki);
@@ -2766,6 +2777,7 @@ function openEnv(){
   h += '<div class="f"><label for="envHost">' + (de ? "Ingress-Host" : "Ingress host") +
        '</label><input type="text" id="envHost" placeholder="shop.staging.example.com"></div>';
   $("envFields").innerHTML = h;
+  closePanels("envPanel");
   $("envPanel").hidden = false;
   $("envNs").focus();
 }
@@ -4124,9 +4136,7 @@ function renderTests(){
 }
 
 $("testBtn").addEventListener("click", () => {
-  const p = $("testPanel");
-  p.hidden = !p.hidden;
-  if (!p.hidden) renderTests();
+  if (togglePanel("testPanel")) renderTests();
 });
 $("testClose").addEventListener("click", () => { $("testPanel").hidden = true; });
 
@@ -4395,9 +4405,7 @@ function clusterMarkdown(){
 function renderCluster(){ renderClusterFields(); renderClusterOut(); }
 
 $("clusterBtn").addEventListener("click", () => {
-  const p = $("clusterPanel");
-  p.hidden = !p.hidden;
-  if (!p.hidden) renderCluster();
+  if (togglePanel("clusterPanel")) renderCluster();
 });
 $("clusterClose").addEventListener("click", () => { $("clusterPanel").hidden = true; });
 $("clusterFields").addEventListener("input", e => {
@@ -4555,13 +4563,13 @@ $("searchResults").addEventListener("click", e => {
 });
 $("searchInput").addEventListener("input", renderSearch);
 function openSearch(){
+  closePanels("searchPanel");
   $("searchPanel").hidden = false;
   $("searchInput").select();
   $("searchInput").focus();
 }
 $("searchBtn").addEventListener("click", () => {
-  const p = $("searchPanel");
-  if (p.hidden) openSearch(); else p.hidden = true;
+  if ($("searchPanel").hidden) openSearch(); else $("searchPanel").hidden = true;
 });
 $("searchClose").addEventListener("click", () => { $("searchPanel").hidden = true; });
 
