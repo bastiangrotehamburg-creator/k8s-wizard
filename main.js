@@ -127,6 +127,7 @@ const WHY = {
   cpuLim:"limits sind die harte Obergrenze. Bei CPU wird gedrosselt — die Anwendung wird langsam, läuft aber weiter. Ohne Limit kann ein einzelner Container einen Node auslasten.|limits are the hard ceiling. CPU gets throttled — the app slows down but keeps running. Without a limit a single container can saturate a node.",
   memLim:"Beim Speicher gibt es kein Drosseln: Wer sein Limit überschreitet, wird ohne Vorwarnung beendet. Im Status steht dann OOMKilled, und der Pod startet neu.|There is no throttling for memory: exceed the limit and the container is killed without warning. The status reads OOMKilled and the pod restarts.",
   probe:"readinessProbe entscheidet, ob der Pod Traffic bekommt. livenessProbe entscheidet, ob er neu gestartet wird. Ohne readiness schickt der Service sofort Anfragen an einen Container, der noch startet. Eine zu strenge liveness startet gesunde Pods im Kreis neu.|The readiness probe decides whether the pod receives traffic. The liveness probe decides whether it gets restarted. Without readiness the service sends requests to a container that is still starting. An over-strict liveness probe restarts healthy pods in a loop.",
+  initContainers:"Init-Container laufen der Reihe nach, jeder muss sich erfolgreich beenden, bevor der nächste startet — der Hauptcontainer beginnt erst danach. Der übliche Einsatz: eine Datenbankmigration, das Warten auf einen anderen Dienst, das Vorbereiten eines Volumes. Ein Sidecar ist derselbe Eintrag mit restartPolicy Always. Der Unterschied ist entscheidend: Kubernetes wartet dann nicht auf sein Ende, sondern nur darauf, dass es gestartet ist — und beendet es später sauber mit dem Pod. Ein dauerhaft laufender Container als gewöhnlicher Init-Container würde den Pod dagegen für immer im Zustand Init blockieren.|Init containers run one after another, each has to finish successfully before the next starts — the main container only begins afterwards. The usual cases: a database migration, waiting for another service, preparing a volume. A sidecar is the same entry with restartPolicy Always. That difference matters: Kubernetes then does not wait for it to finish, only for it to have started — and shuts it down cleanly with the pod later. A long-running container as an ordinary init container would instead block the pod in Init forever.",
   probeStartup:"Die startupProbe deckt genau die Phase ab, in der die Anwendung noch hochfährt: Solange sie läuft, greifen readiness und liveness nicht. Ihr Budget ist periodSeconds mal failureThreshold — großzügig gesetzt, ohne dass die liveness danach träge wird. Das ist der saubere Ersatz für ein hohes initialDelaySeconds, das man sonst raten muss und das im laufenden Betrieb nichts mehr bringt. Ohne sie ist die Reihenfolge tückisch: Startet die Anwendung langsamer als gedacht, tötet die liveness sie mitten im Hochfahren, wieder und wieder.|The startup probe covers exactly the phase while the app is still coming up: as long as it runs, readiness and liveness stay out of the way. Its budget is periodSeconds times failureThreshold — set generously without making the liveness probe sluggish afterwards. That is the clean replacement for a high initialDelaySeconds, which you otherwise have to guess and which does nothing once the app is running. Without it the ordering bites: if the app starts slower than expected, the liveness probe kills it mid-startup, over and over.",
   probeCmd:"Der Befehl läuft im Container selbst, ohne Shell — jedes Argument in eine eigene Zeile. Gewertet wird allein der Rückgabewert, die Ausgabe interessiert niemanden. Für Anwendungen ohne HTTP-Endpunkt ist das der Weg, etwa ein pg_isready oder eine Datei, die der Prozess anlegt, sobald er bereit ist.|The command runs inside the container itself, without a shell — one argument per line. Only the exit code counts, the output goes nowhere. For applications without an HTTP endpoint this is the way, for instance a pg_isready or a file the process creates once it is ready.",
   probePath:"Der Endpunkt sollte nur prüfen, ob der eigene Prozess antwortet — keine Datenbank, keine fremden Dienste. Sonst reißt ein Ausfall der Datenbank sämtliche Pods mit in den Neustart.|The endpoint should only check that your own process responds — no database, no third-party services. Otherwise a database outage drags every pod into a restart loop.",
@@ -264,6 +265,19 @@ RES.Deployment = {
       {k:"startupFailures", t:"number", adv:true, l:"startupProbe · failureThreshold", ph:"30", min:1, half:true, when:d=>d.probeStartup,
         hint:"periodSeconds mal failureThreshold ist das Startbudget — 10 × 30 sind fünf Minuten.|periodSeconds times failureThreshold is the startup budget — 10 × 30 is five minutes."}
      ]},
+    {id:"init", title:"Init & Sidecars|Init & sidecars",
+     desc:"Init-Container laufen der Reihe nach vor dem Hauptcontainer und müssen sich beenden. Ein Sidecar ist technisch derselbe Eintrag, nur mit restartPolicy Always — es startet vorher und läuft dann daneben weiter.|Init containers run one after another before the main container and have to finish. A sidecar is technically the same entry, only with restartPolicy Always — it starts first and then keeps running alongside.",
+     fields:[
+      {k:"initContainers", t:"list", l:"Container davor|Containers before", item:[
+        {k:"name", t:"text", l:"Name", ph:"migrate"},
+        {k:"image", t:"text", l:"Image", ph:"busybox:1.36"},
+        {k:"mode", t:"select", l:"Art|Kind",
+          opts:[["","Init — läuft vorher zu Ende|Init — runs to completion first"],
+                ["sidecar","Sidecar — läuft daneben weiter|Sidecar — keeps running alongside"]]},
+        {k:"mounts", t:"bool", l:"Volumes mitnehmen|Take the volumes"},
+        {k:"command", t:"textarea", l:"command", full:true, ph:"sh\n-c\nsleep 5"}
+      ], hint:"Eine Zeile pro Argument im command. Ohne Volumes bleibt der Container für sich — wer Daten weiterreichen will, hängt dieselben Volumes ein wie der Hauptcontainer.|One line per argument in the command. Without volumes the container stays to itself — to hand data over, mount the same volumes as the main container."}
+     ]},
     {id:"adv", adv:true, title:"Erweitert|Advanced", desc:"Optional. Leere Felder landen nicht im YAML.|Optional. Empty fields never reach the YAML.",
      fields:[
       {k:"sa", t:"text", l:"serviceAccountName", ph:"default"},
@@ -324,7 +338,8 @@ RES.StatefulSet = {
      ]},
     RES.Deployment.steps[2],
     RES.Deployment.steps[3],
-    RES.Deployment.steps[4]
+    RES.Deployment.steps[4],
+    RES.Deployment.steps[5]
   ],
   build(d){
     const sel = d.name ? {app:d.name} : undefined;
@@ -371,8 +386,9 @@ RES.Pod = {
      fields: podFields},
     RES.Deployment.steps[2],
     RES.Deployment.steps[3],
+    RES.Deployment.steps[4],
     {id:"adv", adv:true, title:"Erweitert|Advanced", desc:"Optional. Leere Felder landen nicht im YAML.|Optional. Empty fields never reach the YAML.",
-     fields: RES.Deployment.steps[4].fields.filter(f => f.k !== "strategy")}
+     fields: RES.Deployment.steps[5].fields.filter(f => f.k !== "strategy")}
   ],
   build(d){
     const sel = d.name ? {app:d.name} : undefined;
@@ -1317,7 +1333,29 @@ function containerOf(d, extraMounts){
   return c;
 }
 
+/* Ein Sidecar ist ein initContainer mit restartPolicy Always: Er startet vor dem
+   Hauptcontainer, blockiert ihn aber nicht und läuft dann daneben weiter. */
+function initContainersOf(d, mainMounts){
+  return (d.initContainers||[]).filter(c => c.name && c.image).map(c => {
+    const out = {
+      name: c.name,
+      image: c.image,
+      command: lines(c.command),
+      restartPolicy: c.mode === "sidecar" ? "Always" : undefined,
+      volumeMounts: c.mounts ? mainMounts : undefined
+    };
+    /* readOnlyRootFilesystem bleibt aussen vor — der Pod Security Standard
+       restricted verlangt es nicht, und Init-Container schreiben oft. */
+    if (d.hardened) out.securityContext = {
+      allowPrivilegeEscalation:false, runAsNonRoot:true, capabilities:{drop:["ALL"]}
+    };
+    return out;
+  });
+}
+
 function podSpecOf(d, extraMounts){
+  const main = containerOf(d, extraMounts);
+  const inits = initContainersOf(d, main.volumeMounts);
   return {
     serviceAccountName: d.sa || undefined,
     imagePullSecrets: d.pullSecret ? [{name:d.pullSecret}] : undefined,
@@ -1325,7 +1363,8 @@ function podSpecOf(d, extraMounts){
     securityContext: d.hardened
       ? {runAsNonRoot:true, seccompProfile:{type:"RuntimeDefault"}}
       : (d.runAsNonRoot ? {runAsNonRoot:true} : undefined),
-    containers:[containerOf(d, extraMounts)],
+    initContainers: inits.length ? inits : undefined,
+    containers:[main],
     volumes: volEntries(d).map(v => v.vol)
       .concat(d.pvc && d.pvcPath ? [{name:"data", persistentVolumeClaim:{claimName:d.pvc}}] : [])
       .concat(d.hardened ? [{name:"tmp", emptyDir:EMPTY_MAP}] : [])
@@ -1502,7 +1541,18 @@ function validate(docs){
         if (lim && qty(lim) === null)
           err(nm + ": emptyDir " + v.name + " — sizeLimit " + lim + " " + t("ist keine gültige Mengenangabe|is not a valid quantity"), "volumes");
       });
-      cs.forEach(c => {
+      /* Container- und Init-Container-Namen teilen sich einen Namensraum. */
+      const inits = ((tpl.spec||{}).initContainers)||[];
+      const seenNames = {};
+      cs.concat(inits).forEach(c => {
+        if (!c.name) return;
+        if (seenNames[c.name])
+          err(nm + ": " + t("zwei Container heißen|two containers are named") + " " + c.name +
+            " — " + t("Container und Init-Container teilen sich einen Namensraum|containers and init containers share one namespace"), "initContainers");
+        seenNames[c.name] = true;
+      });
+
+      cs.concat(inits).forEach(c => {
         const names = ((tpl.spec||{}).volumes||[]).map(v => v.name)
           .concat((((doc.spec||{}).volumeClaimTemplates)||[]).map(v => v.metadata.name));
         (c.volumeMounts||[]).forEach(m => {
@@ -3370,6 +3420,52 @@ function runSelfTests(){
     regServer:"h.de", regUser:"u", regPass:"p"});
   ok("Secret: auth ist base64 von user:pass",
     has(sec.stringData[".dockerconfigjson"], b64("u:p")), sec.stringData[".dockerconfigjson"]);
+
+  /* --- Init-Container und Sidecars --- */
+  const withInit = RES.Deployment.build({name:"api", image:"nginx:1.27", cpuLim:"1", memLim:"1Gi",
+    volumes:[{type:"", cm:"app-config", path:"/etc/app"}],
+    initContainers:[
+      {name:"migrate", image:"migrate:2.1", command:"migrate\nup", mounts:true},
+      {name:"proxy", image:"envoy:1.31", mode:"sidecar"},
+      {name:"", image:"wird-verworfen:1"}
+    ]});
+  const initList = withInit.spec.template.spec.initContainers;
+  ok("Init: unvollständige Einträge fallen weg", initList.length === 2, JSON.stringify(initList));
+  ok("Init: gewöhnlicher Init-Container ohne restartPolicy",
+    initList[0].restartPolicy === undefined, JSON.stringify(initList[0]));
+  ok("Sidecar: restartPolicy Always",
+    initList[1].restartPolicy === "Always", JSON.stringify(initList[1]));
+  ok("Init: command wird zeilenweise übernommen",
+    initList[0].command.join(" ") === "migrate up", JSON.stringify(initList[0].command));
+  ok("Init: Volumes des Hauptcontainers werden mitgenommen",
+    initList[0].volumeMounts[0].mountPath === "/etc/app" && initList[1].volumeMounts === undefined,
+    JSON.stringify(initList[0].volumeMounts));
+  ok("initContainers stehen vor containers im YAML",
+    toYaml(withInit).indexOf("initContainers:") < toYaml(withInit).indexOf("containers:"), "");
+  ok("Init-Container mit eigenem Volume-Mount ist kein Fehler",
+    !val([withInit]).some(x => x.indexOf("err:volumes") === 0), val([withInit]).join(" | "));
+
+  const hardInit = RES.Deployment.build({name:"a", image:"x:1", hardened:true,
+    initContainers:[{name:"prep", image:"busybox:1.36"}]}).spec.template.spec.initContainers[0];
+  ok("Init: Härtung gilt auch hier",
+    hardInit.securityContext.allowPrivilegeEscalation === false &&
+    hardInit.securityContext.capabilities.drop[0] === "ALL", JSON.stringify(hardInit.securityContext));
+  ok("Init: readOnlyRootFilesystem bleibt aus",
+    hardInit.securityContext.readOnlyRootFilesystem === undefined, JSON.stringify(hardInit.securityContext));
+
+  ok("Doppelter Containername ist ein Fehler",
+    val([RES.Deployment.build({name:"api", image:"x:1", cpuLim:"1", memLim:"1Gi",
+      probe:"http", probePort:80, initContainers:[{name:"api", image:"y:1"}]})])
+      .some(x => x.indexOf("err:initContainers") === 0), "");
+
+  ok("Init-Container ohne Tag wird gewarnt",
+    val([RES.Deployment.build({name:"a", image:"x:1", cpuLim:"1", memLim:"1Gi",
+      probe:"http", probePort:80, initContainers:[{name:"prep", image:"busybox"}]})])
+      .some(x => x.indexOf("warn:image") === 0), "");
+
+  ok("Pod und StatefulSet kennen den Schritt ebenfalls",
+    stepOf("Pod", "initContainers") >= 0 && stepOf("StatefulSet", "initContainers") >= 0 &&
+    stepOf("Pod", "hardened") >= 0 && stepOf("StatefulSet", "strategy") >= 0, "");
 
   /* --- Probes --- */
   const cOf = d => RES.Deployment.build(Object.assign({name:"a", image:"x:1",
