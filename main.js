@@ -92,6 +92,7 @@ const UI = {
   save:      "Änderungen übernehmen|Save changes",
   editHint:  "Zum Bearbeiten klicken|Click to edit",
   why:       "Wozu?|Why?",
+  best:      "Best Practice|Best practice",
   sealHint:  "Kopieren, ausführen, Wert eingeben, Strg+D — die Ausgabe unter encryptedData einsetzen|Copy, run, type the value, Ctrl+D — put the output under encryptedData",
   modeFull:  "alle Felder zeigen|show all fields",
   modeShort: "nur das Nötigste|essentials only",
@@ -127,6 +128,17 @@ const WHY = {
   cpuLim:"limits sind die harte Obergrenze. Bei CPU wird gedrosselt — die Anwendung wird langsam, läuft aber weiter. Ohne Limit kann ein einzelner Container einen Node auslasten.|limits are the hard ceiling. CPU gets throttled — the app slows down but keeps running. Without a limit a single container can saturate a node.",
   memLim:"Beim Speicher gibt es kein Drosseln: Wer sein Limit überschreitet, wird ohne Vorwarnung beendet. Im Status steht dann OOMKilled, und der Pod startet neu.|There is no throttling for memory: exceed the limit and the container is killed without warning. The status reads OOMKilled and the pod restarts.",
   probe:"readinessProbe entscheidet, ob der Pod Traffic bekommt. livenessProbe entscheidet, ob er neu gestartet wird. Ohne readiness schickt der Service sofort Anfragen an einen Container, der noch startet. Eine zu strenge liveness startet gesunde Pods im Kreis neu.|The readiness probe decides whether the pod receives traffic. The liveness probe decides whether it gets restarted. Without readiness the service sends requests to a container that is still starting. An over-strict liveness probe restarts healthy pods in a loop.",
+  pullPolicy:"IfNotPresent nimmt das Image vom Node, wenn es dort schon liegt — schnell, aber ein neu gebautes Image unter demselben Tag kommt so nie an. Always holt bei jedem Start die Registry, kostet Startzeit und macht den Pod von deren Verfügbarkeit abhängig. Bei einem Tag, der sich nie ändert, ist IfNotPresent richtig; wer denselben Tag überschreibt, braucht Always — und sollte stattdessen lieber den Tag wechseln.|IfNotPresent takes the image from the node if it is already there — fast, but a freshly built image under the same tag never arrives. Always contacts the registry on every start, costs startup time and makes the pod depend on its availability. For a tag that never changes, IfNotPresent is right; whoever overwrites the same tag needs Always — and would be better off changing the tag instead.",
+  restartPolicy:"OnFailure startet den Container im selben Pod neu — der Pod bleibt, die Logs der Fehlversuche gehen dabei verloren. Never legt für jeden Versuch einen neuen Pod an: Das häuft Pods an, dafür bleibt jeder Fehlversuch samt Ausgabe erhalten. Für alles, was man hinterher untersuchen können will, ist Never die bessere Wahl.|OnFailure restarts the container inside the same pod — the pod stays, and the logs of the failed attempts are lost. Never creates a new pod per attempt: that piles up pods, but every failed attempt survives with its output. For anything you may want to investigate afterwards, Never is the better choice.",
+  headless:"Ohne ClusterIP verteilt der Service keine Anfragen, sondern gibt im DNS direkt die Pod-IPs zurück. Das braucht ein StatefulSet, damit jeder Pod unter seinem eigenen Namen erreichbar ist. Auch Client-Bibliotheken, die selbst zwischen Endpunkten wählen wollen — etwa Datenbanktreiber mit eigenem Pooling —, brauchen genau das.|Without a cluster IP the service distributes nothing; it returns the pod IPs directly in DNS. A StatefulSet needs this so every pod is reachable under its own name. Client libraries that want to pick between endpoints themselves — database drivers with their own pooling, for instance — need exactly this too.",
+  externalName:"Erzeugt nur einen DNS-Alias auf einen Namen außerhalb des Clusters, ohne Proxy und ohne Endpoints. Praktisch, um eine verwaltete Datenbank hinter einem clusterinternen Namen zu verstecken — die Anwendung spricht immer denselben Namen an, gleich ob der Dienst später ins Cluster zieht. TLS-Zertifikate prüfen allerdings den echten Namen, nicht den Alias.|Creates nothing but a DNS alias to a name outside the cluster, with no proxying and no endpoints. Handy for hiding a managed database behind a cluster-internal name — the app always addresses the same name, whether or not the service moves into the cluster later. TLS certificates, however, validate the real name, not the alias.",
+  class:"Leer bedeutet: die als Standard markierte Klasse des Clusters. Gibt es dort keine, bleibt der Claim für immer Pending, ohne dass etwas kaputt aussieht. Ausdrücklich genannt ist die Klasse dokumentiert und der Cluster austauschbar — Klassennamen unterscheiden sich allerdings zwischen Anbietern.|Empty means the class the cluster marks as default. If there is none, the claim stays Pending forever without anything looking broken. Named explicitly, the class is documented and the cluster interchangeable — though class names differ between providers.",
+  "PersistentVolumeClaim.mode":"Filesystem ist der Normalfall: Kubernetes formatiert und hängt ein, im Container liegt ein Verzeichnis. Block reicht das rohe Gerät durch, ohne Dateisystem — nur für Anwendungen, die selbst darauf schreiben, etwa Datenbanken mit eigener Speicherverwaltung.|Filesystem is the normal case: Kubernetes formats and mounts it, and the container sees a directory. Block passes the raw device through with no filesystem — only for applications that write to it themselves, such as databases with their own storage engine.",
+  "PodDisruptionBudget.mode":"minAvailable nennt die absolute Untergrenze, maxUnavailable die Obergrenze der gleichzeitigen Ausfälle. Der Unterschied zeigt sich beim Skalieren: minAvailable 2 lässt bei drei Replicas eine gehen, bei zehn Replicas aber acht — maxUnavailable wächst dagegen mit. Für Anwendungen, deren Replica-Zahl sich ändert, ist maxUnavailable die robustere Angabe.|minAvailable states the absolute floor, maxUnavailable the ceiling on simultaneous outages. The difference shows when scaling: minAvailable 2 lets one go at three replicas but eight at ten — maxUnavailable scales along. For applications whose replica count changes, maxUnavailable is the more robust choice.",
+  app:"Die Auswahl läuft ausschließlich über dieses Label, nicht über den Namen der Ressource. Heißt das Deployment anders, als seine Pods beschriftet sind, greift die Regel ins Leere — ohne Fehlermeldung, weil ein leerer Treffer in Kubernetes kein Fehler ist.|The selection runs purely on this label, never on the resource's name. If the deployment is named differently from how its pods are labelled, the rule matches nothing — with no error, because an empty match is not an error in Kubernetes.",
+  targetName:"Muss auf ein vorhandenes Deployment oder StatefulSet zeigen. Findet der HPA das Ziel nicht, bleibt er still: kein Fehler im Manifest, nur eine Bedingung im Status, die niemand liest.|Has to point at an existing Deployment or StatefulSet. If the HPA cannot find its target it stays quiet: no error in the manifest, just a condition in the status that nobody reads.",
+  suspend:"Legt den CronJob an, ohne dass er läuft. Der Weg, einen Zeitplan im Manifest zu haben und ihn erst nach einer Prüfung scharfzuschalten — und die Notbremse, wenn ein Job Amok läuft, ohne ihn zu löschen.|Creates the CronJob without letting it run. The way to have a schedule in the manifest and only arm it after review — and the emergency brake when a job runs amok, without deleting it.",
+  "Secret.type":"Opaque ist der Normalfall für eigene Schlüssel und Werte. Die anderen Typen erzwingen bestimmte Feldnamen, damit Kubernetes sie versteht: kubernetes.io/tls braucht tls.crt und tls.key und wird so vom Ingress gefunden, kubernetes.io/dockerconfigjson braucht .dockerconfigjson und taugt damit als imagePullSecret.|Opaque is the normal case for your own keys and values. The other types enforce particular field names so Kubernetes understands them: kubernetes.io/tls needs tls.crt and tls.key and is then found by the ingress, kubernetes.io/dockerconfigjson needs .dockerconfigjson and thereby works as an imagePullSecret.",
   tolerations:"Ein Taint auf dem Node sagt ab, die toleration im Pod hebt die Absage auf — beides muss in Schlüssel, Wert und Effekt zusammenpassen. Wichtig ist, was sie nicht tut: Sie zieht den Pod nicht auf den Node, sie erlaubt ihn dort nur. Wer gezielt auf reservierten Nodes landen will, braucht zusätzlich nodeSelector oder nodeAffinity auf ein Label. Bleibt der effect leer, gilt die toleration für alle Effekte desselben Schlüssels. tolerationSeconds greift ausschließlich bei NoExecute und legt fest, wie lange der Pod nach dem Setzen des Taints noch bleiben darf.|A taint on the node refuses, the toleration in the pod lifts that refusal — key, value and effect have to line up. What matters is what it does not do: it does not pull the pod onto the node, it merely permits it there. To land on reserved nodes deliberately you also need a nodeSelector or nodeAffinity on a label. If the effect is left empty, the toleration covers every effect of that key. tolerationSeconds applies only to NoExecute and sets how long the pod may stay after the taint appears.",
   initContainers:"Init-Container laufen der Reihe nach, jeder muss sich erfolgreich beenden, bevor der nächste startet — der Hauptcontainer beginnt erst danach. Der übliche Einsatz: eine Datenbankmigration, das Warten auf einen anderen Dienst, das Vorbereiten eines Volumes. Ein Sidecar ist derselbe Eintrag mit restartPolicy Always. Der Unterschied ist entscheidend: Kubernetes wartet dann nicht auf sein Ende, sondern nur darauf, dass es gestartet ist — und beendet es später sauber mit dem Pod. Ein dauerhaft laufender Container als gewöhnlicher Init-Container würde den Pod dagegen für immer im Zustand Init blockieren.|Init containers run one after another, each has to finish successfully before the next starts — the main container only begins afterwards. The usual cases: a database migration, waiting for another service, preparing a volume. A sidecar is the same entry with restartPolicy Always. That difference matters: Kubernetes then does not wait for it to finish, only for it to have started — and shuts it down cleanly with the pod later. A long-running container as an ordinary init container would instead block the pod in Init forever.",
   probeStartup:"Die startupProbe deckt genau die Phase ab, in der die Anwendung noch hochfährt: Solange sie läuft, greifen readiness und liveness nicht. Ihr Budget ist periodSeconds mal failureThreshold — großzügig gesetzt, ohne dass die liveness danach träge wird. Das ist der saubere Ersatz für ein hohes initialDelaySeconds, das man sonst raten muss und das im laufenden Betrieb nichts mehr bringt. Ohne sie ist die Reihenfolge tückisch: Startet die Anwendung langsamer als gedacht, tötet die liveness sie mitten im Hochfahren, wieder und wieder.|The startup probe covers exactly the phase while the app is still coming up: as long as it runs, readiness and liveness stay out of the way. Its budget is periodSeconds times failureThreshold — set generously without making the liveness probe sluggish afterwards. That is the clean replacement for a high initialDelaySeconds, which you otherwise have to guess and which does nothing once the app is running. Without it the ordering bites: if the app starts slower than expected, the liveness probe kills it mid-startup, over and over.",
@@ -1255,6 +1267,113 @@ RES._stack = {
   }
 };
 
+/* Empfehlungen je Ressource. Bewusst kurz und bewusst wertend — was ohnehin
+   im Feld danebensteht, gehört hier nicht noch einmal hin. */
+const BEST = {
+Namespace:[
+ "Ein Namespace je Team oder Umgebung, nicht je Anwendung — sonst wächst die Zahl schneller als die Übersicht.|One namespace per team or environment, not per application — otherwise the count grows faster than the overview.",
+ "`pod-security.kubernetes.io/enforce` als Label setzen, dann weist der Cluster unsichere Pods von sich aus ab.|Set `pod-security.kubernetes.io/enforce` as a label and the cluster rejects unsafe pods on its own.",
+ "ResourceQuota und LimitRange gehören dazu, sonst kann eine einzelne Anwendung den ganzen Cluster belegen.|A ResourceQuota and a LimitRange belong with it, otherwise a single application can occupy the whole cluster.",
+ "Steht der Namespace im selben Manifest, erledigt `kubectl apply` die Reihenfolge von allein.|If the namespace is in the same manifest, `kubectl apply` handles the ordering by itself."],
+
+Deployment:[
+ "Ab zwei Replicas übersteht die Anwendung Node-Ausfälle und Updates ohne Unterbrechung.|From two replicas upwards the app survives node failures and updates without downtime.",
+ "Fester Tag oder Digest im Image — niemals `:latest`, sonst laufen zwei Pods auf verschiedenen Ständen.|A fixed tag or digest in the image — never `:latest`, or two pods end up on different builds.",
+ "`requests` immer setzen, `limits` mindestens für Speicher: ohne requests plant der Scheduler blind.|Always set `requests`, and `limits` at least for memory: without requests the scheduler is flying blind.",
+ "readinessProbe ist Pflicht, livenessProbe nur bei echten Hängern — eine zu strenge startet gesunde Pods im Kreis neu.|A readiness probe is mandatory, a liveness probe only against genuine deadlocks — an over-strict one restarts healthy pods in a loop.",
+ "In `matchLabels` nur `app`, niemals die Version: der Selector lässt sich nachträglich nicht ändern.|Only `app` in `matchLabels`, never the version: the selector cannot be changed later."],
+
+StatefulSet:[
+ "Nur nehmen, wenn die Pods wirklich nicht austauschbar sind — alles andere ist ein Deployment.|Only use it when the pods genuinely are not interchangeable — everything else is a Deployment.",
+ "Den headless Service zuerst anlegen, sonst haben die Pods keine eigenen DNS-Namen.|Create the headless service first, otherwise the pods have no individual DNS names.",
+ "`volumeClaimTemplates` sind unveränderlich: knapp anfangen, vergrößern geht später, verkleinern nie.|`volumeClaimTemplates` are immutable: start small, growing works later, shrinking never does.",
+ "Die PVCs überleben das Löschen des StatefulSet. Das ist Absicht — und der häufigste Grund für verwaisten Speicher.|The PVCs survive deleting the StatefulSet. That is intentional — and the most common source of orphaned storage."],
+
+Pod:[
+ "Für alles, was laufen bleiben soll, ein Deployment nehmen: einen Pod ersetzt nach einem Node-Ausfall niemand.|For anything meant to keep running, use a Deployment: nobody replaces a pod after a node failure.",
+ "Zum kurzen Ausprobieren ist `kubectl run --rm -it` schneller als ein Manifest.|For a quick try, `kubectl run --rm -it` beats writing a manifest.",
+ "`restartPolicy: Never`, wenn der Pod eine Aufgabe einmal erledigen soll — sonst startet der Container endlos neu.|`restartPolicy: Never` when the pod should do one job — otherwise the container restarts forever.",
+ "Als Debug-Werkzeug im Cluster besser `kubectl debug`: der hängt sich an den laufenden Pod, statt einen zweiten daneben zu stellen.|As an in-cluster debug tool, `kubectl debug` is better: it attaches to the running pod instead of placing a second one beside it."],
+
+Service:[
+ "ClusterIP ist die Voreinstellung und fast immer richtig; LoadBalancer kostet beim Anbieter Geld und fehlt lokal ganz.|ClusterIP is the default and almost always right; LoadBalancer costs money at your provider and does not exist locally.",
+ "Ports benennen und `targetPort` auf den Namen zeigen lassen — dann bricht nichts, wenn sich die Nummer ändert.|Name the ports and point `targetPort` at the name — then nothing breaks when the number changes.",
+ "Nach dem Anlegen `kubectl get endpoints` prüfen: ein Service ohne Endpoints meldet keinen Fehler.|Check `kubectl get endpoints` afterwards: a service without endpoints reports no error.",
+ "Für Datenbanken und andere Nicht-HTTP-Dienste braucht es keinen Ingress — der Service reicht clusterintern.|Databases and other non-HTTP services need no ingress — the service is enough inside the cluster."],
+
+ConfigMap:[
+ "Nur Unkritisches. Alles Vertrauliche gehört ins Secret, auch wenn es hier bequemer wäre.|Non-sensitive data only. Anything confidential belongs in a Secret, however much more convenient this is.",
+ "`immutable` setzen, wenn die Werte fest sind: schützt vor Versehen und entlastet die API.|Set `immutable` when the values are fixed: it guards against mistakes and takes load off the API.",
+ "Laufende Pods lesen Änderungen nicht von selbst. Sicher wirkt nur `kubectl rollout restart`.|Running pods do not pick up changes by themselves. Only `kubectl rollout restart` reliably applies them.",
+ "Größere Dateien gehören ins Image oder auf ein Volume — bei etwa 1 MB ist Schluss.|Larger files belong in the image or on a volume — the limit sits around 1 MB."],
+
+Secret:[
+ "base64 ist keine Verschlüsselung. Ein gewöhnliches Secret gehört nicht in ein Repository.|base64 is not encryption. A plain Secret does not belong in a repository.",
+ "Sobald das Manifest versioniert wird: SealedSecret oder ExternalSecret statt Klartext.|As soon as the manifest is versioned: SealedSecret or ExternalSecret instead of plaintext.",
+ "Lieber als Volume einhängen als über `env`: Umgebungsvariablen landen in Prozesslisten und Fehlerberichten.|Prefer mounting as a volume over `env`: environment variables end up in process listings and crash reports.",
+ "Je Anwendung ein eigenes Secret, nicht ein gemeinsames für den ganzen Namespace.|One Secret per application, not a shared one for the whole namespace."],
+
+Ingress:[
+ "`ingressClassName` immer setzen — passt die Klasse nicht, passiert schlicht gar nichts.|Always set `ingressClassName` — if the class does not match, nothing happens at all.",
+ "Zertifikate von cert-manager ausstellen lassen statt von Hand gepflegter Secrets.|Let cert-manager issue the certificates instead of hand-maintained secrets.",
+ "Ein Ingress je Anwendung. Sammel-Ingresses mit vielen Regeln werden schnell unwartbar.|One ingress per application. Collective ingresses with many rules quickly become unmaintainable.",
+ "Der Backend-Port ist der des Service, nicht der des Containers — eine der häufigsten Verwechslungen.|The backend port is the service's, not the container's — one of the most common mix-ups."],
+
+Job:[
+ "`ttlSecondsAfterFinished` setzen, sonst bleiben abgeschlossene Jobs samt Pods für immer liegen.|Set `ttlSecondsAfterFinished`, otherwise finished jobs and their pods stay around forever.",
+ "`restartPolicy: Never` legt für jeden Versuch einen neuen Pod an — die Logs der Fehlversuche bleiben dadurch erhalten.|`restartPolicy: Never` creates a new pod per attempt — which is what preserves the logs of the failed ones.",
+ "`backoffLimit` niedrig halten: was zwanzigmal scheitert, scheitert auch beim einundzwanzigsten Mal.|Keep `backoffLimit` low: what fails twenty times will fail the twenty-first time too.",
+ "`activeDeadlineSeconds` als Notbremse für alles, was hängen bleiben kann.|`activeDeadlineSeconds` as the emergency brake for anything that can get stuck."],
+
+CronJob:[
+ "`concurrencyPolicy: Forbid` für alles, was sich nicht überlappen darf — Backups vor allem.|`concurrencyPolicy: Forbid` for anything that must not overlap — backups above all.",
+ "`timeZone` setzen, sonst gilt UTC und der nächtliche Lauf wandert mit der Sommerzeit.|Set `timeZone`, otherwise UTC applies and the nightly run drifts with daylight saving.",
+ "Vor dem ersten Termin einmal von Hand auslösen: `kubectl create job --from=cronjob/name test`.|Trigger it by hand once before the first scheduled run: `kubectl create job --from=cronjob/name test`.",
+ "Die History-Limits klein halten, sonst sammeln sich Job-Objekte über Wochen an.|Keep the history limits small, otherwise job objects pile up over weeks."],
+
+PersistentVolume:[
+ "Von Hand nur schreiben, wenn der Speicher schon existiert. Sonst die StorageClass arbeiten lassen.|Only write one by hand when the storage already exists. Otherwise let the storage class do the work.",
+ "`reclaimPolicy: Retain`, damit ein gelöschter Claim nicht die Daten mitnimmt.|`reclaimPolicy: Retain`, so a deleted claim does not take the data with it.",
+ "`claimRef` setzen, sonst greift sich der erste passende Claim das Volume — auch einer aus einem fremden Namespace.|Set `claimRef`, otherwise the first matching claim takes the volume — including one from someone else's namespace.",
+ "`local` ohne nodeAffinity ist ein Pod, der ewig Pending bleibt.|`local` without a nodeAffinity is a pod that stays Pending forever."],
+
+PersistentVolumeClaim:[
+ "Eher knapp anfangen: vergrößern geht bei den meisten Klassen, verkleinern bei keiner.|Start small: growing works with most classes, shrinking with none.",
+ "Der accessMode beschreibt Nodes, nicht Pods. ReadWriteOnce und zwei Replicas auf verschiedenen Nodes vertragen sich nicht.|The access mode describes nodes, not pods. ReadWriteOnce and two replicas on different nodes do not mix.",
+ "Leerer `storageClassName` heißt Standardklasse — auf Clustern ohne Standard bleibt der Claim für immer Pending.|An empty `storageClassName` means the default class — on clusters without a default the claim stays Pending forever.",
+ "Bei statischer Bindung `storageClassName` ausdrücklich leer setzen, sonst wird zusätzlich dynamisch bereitgestellt.|For static binding set `storageClassName` to empty explicitly, otherwise something is provisioned dynamically on top."],
+
+NetworkPolicy:[
+ "Mit einer Default-Deny-Policy je Namespace anfangen und dann gezielt öffnen.|Start with a default-deny policy per namespace and then open up deliberately.",
+ "Den Namespace des Ingress-Controllers ausdrücklich erlauben, sonst ist die Anwendung von außen tot.|Explicitly allow the ingress controller's namespace, otherwise the app is dead from outside.",
+ "Egress erst sperren, wenn DNS ausdrücklich freigegeben ist — sonst sieht jeder Fehler nach kaputter Namensauflösung aus.|Only deny egress once DNS is explicitly allowed — otherwise every error looks like broken name resolution.",
+ "Policies addieren sich. Eine zusätzliche Regel kann nie etwas verbieten, immer nur mehr erlauben.|Policies are additive. An extra rule can never forbid anything, only allow more."],
+
+PodDisruptionBudget:[
+ "Erst ab zwei Replicas sinnvoll: bei einer blockiert `minAvailable: 1` jeden Node-Drain auf Dauer.|Only useful from two replicas up: with one, `minAvailable: 1` blocks every node drain indefinitely.",
+ "`maxUnavailable` wächst mit der Replica-Zahl mit und ist deshalb meist die robustere Wahl.|`maxUnavailable` scales with the replica count and is therefore usually the more robust choice.",
+ "Gilt nur bei freiwilligen Störungen. Gegen Abstürze und harte Node-Ausfälle hilft es nicht.|Applies only to voluntary disruptions. It does not help against crashes or hard node failures."],
+
+HorizontalPodAutoscaler:[
+ "Ohne `requests.cpu` rechnet der HPA nie — die Auslastung ist ein Prozentsatz davon.|Without `requests.cpu` the HPA never computes anything — utilisation is a percentage of it.",
+ "`replicas` aus dem Deployment-Manifest nehmen, sonst überschreiben sich beide bei jedem Apply.|Remove `replicas` from the Deployment manifest, otherwise the two overwrite each other on every apply.",
+ "`minReplicas` mindestens zwei: aus einem einzelnen Pod heraus skaliert es sich schlecht.|`minReplicas` at least two: scaling out of a single pod works badly.",
+ "Speicher als Metrik taugt selten, weil viele Laufzeiten Speicher nie zurückgeben.|Memory as a metric is rarely useful because many runtimes never hand memory back."],
+
+RBAC:[
+ "Mit `view` anfangen und nur ergänzen, was tatsächlich fehlt.|Start with `view` and add only what is actually missing.",
+ "Eine ClusterRole per RoleBinding einbinden, wenn die Rechte nur in einem Namespace gelten sollen.|Bind a ClusterRole with a RoleBinding when the rights should apply in one namespace only.",
+ "Je Anwendung ein eigener ServiceAccount — `default` teilt sich seine Rechte mit allem im Namespace.|One service account per application — `default` shares its rights with everything in the namespace.",
+ "`cluster-admin` niemals an einen ServiceAccount binden. Wer das darf, darf sich alles Weitere selbst geben.|Never bind `cluster-admin` to a service account. Whoever may do that can grant themselves everything else."],
+
+_stack:[
+ "Der Name trägt sich durch alles: Labels, Selector, ConfigMap-Namen, Ingress. Einmal hier richtig, überall richtig.|The name carries through everything: labels, selector, ConfigMap names, ingress. Right here means right everywhere.",
+ "Erst Ressourcen und Probes sauber setzen, HPA und PDB danach ergänzen.|Get resources and probes right first, add the HPA and the PDB afterwards.",
+ "Die Härtung anlassen und nur abschalten, wenn der Container wirklich außerhalb von `/tmp` schreiben muss.|Leave the hardening on and switch it off only if the container really has to write outside `/tmp`.",
+ "Das Ergebnis ist ein Ausgangspunkt, kein fertiges Produktionsmanifest — die Prüfungen rechts sagen, was noch fehlt.|The result is a starting point, not a finished production manifest — the checks on the right say what is still missing."]
+};
+Object.keys(BEST).forEach(k => { if (RES[k]) RES[k].best = BEST[k]; });
+
 function kvObj(arr){
   const o = {};
   (arr||[]).forEach(p => { if (p.k) o[p.k] = p.v === undefined ? "" : p.v; });
@@ -1864,12 +1983,12 @@ function renderForm(){
   $("stepDesc").textContent = step.desc ? t(step.desc) : "";
   $("stepDesc").hidden = !step.desc;
 
-  let h = "";
+  const vis = visibleSteps(cur.kind, d);
+  let h = S.step === vis[0] ? bestHtml(cur.kind) : "";
   visibleFields(step, d).forEach(f => { h += renderField(f, d); });
   $("form").innerHTML = h;
 
   // rail
-  const vis = visibleSteps(cur.kind, d);
   if (vis.indexOf(S.step) === -1){ S.step = vis[0]; }
   let r = "";
   vis.forEach((i, n) => {
@@ -1895,6 +2014,13 @@ function renderForm(){
 }
 
 let EXPLAIN = false;
+
+function bestHtml(kind){
+  const b = (RES[kind] || {}).best;
+  if (!b || !b.length) return "";
+  return '<details class="best"' + (EXPLAIN ? " open" : "") + "><summary>" + esc(t(UI.best)) +
+    "</summary><ul>" + b.map(x => "<li>" + mdInline(t(x)) + "</li>").join("") + "</ul></details>";
+}
 
 function whyFor(f){
   const kind = S.current ? S.current.kind : "";
@@ -2581,6 +2707,11 @@ function toMarkdown(){
   S.docs.forEach(e => {
     const r = RES[e.kind];
     m += "### " + (r.label ? t(r.label) : e.kind) + " — `" + (e.data.name || "?") + "`\n\n";
+    if (r.best){
+      m += "**" + t(UI.best) + "**\n\n";
+      r.best.forEach(x => { m += "- " + t(x) + "\n"; });
+      m += "\n";
+    }
     r.steps.forEach(st => {
       const fs = st.fields.filter(f => (!f.when || f.when(e.data)) && fieldValueMd(f, e.data) !== null);
       if (!fs.length) return;
@@ -3853,6 +3984,30 @@ function runSelfTests(){
     RES.PersistentVolumeClaim.build({name:"d", size:"1Gi", class:"fast"}).spec.volumeName === undefined &&
     RES.PersistentVolumeClaim.build({name:"d", size:"1Gi", class:"fast"}).spec.storageClassName === "fast", "");
 
+  /* --- Best Practices --- */
+  const withBest = Object.keys(RES).filter(k => RES[k].best && RES[k].best.length);
+  ok("Jede Ressource hat Empfehlungen",
+    withBest.length === Object.keys(RES).length,
+    Object.keys(RES).filter(k => !RES[k].best).join(", "));
+  ok("Empfehlungen sind zweisprachig und nie leer",
+    withBest.every(k => RES[k].best.every(x => {
+      const keep = LANG; let good = true;
+      ["de","en"].forEach(l => { LANG = l; if (!String(t(x)).trim()) good = false; });
+      LANG = keep; return good;
+    })), "");
+  ok("Kein Eintrag hat mehr als einen Trenner",
+    withBest.every(k => RES[k].best.every(x => x.split("|").length === 2)),
+    withBest.filter(k => RES[k].best.some(x => x.split("|").length !== 2)).join(", "));
+  ok("Empfehlungen stehen in der Suche",
+    searchIndex().filter(x => x.g === "best").length === withBest.length, "");
+  ok("Der Block wird auf dem ersten Schritt gebaut",
+    bestHtml("Deployment").indexOf("<li>") !== -1 && bestHtml("Deployment").indexOf("<details") === 0,
+    bestHtml("Deployment").slice(0, 60));
+  ok("Unbekannte Ressource liefert leeren Block", bestHtml("GibtEsNicht") === "", "");
+  ok("Auszeichnungen werden umgesetzt, nicht ausgegeben",
+    bestHtml("Deployment").indexOf("<code>") !== -1 &&
+    bestHtml("Deployment").indexOf("`") === -1, "");
+
   /* --- Spickzettel --- */
   const cheatStrings = [];
   CHEATSHEET.forEach(sec => {
@@ -3934,6 +4089,10 @@ function searchIndex(){
     const label = r.label ? t(r.label) : kind;
     idx.push({g:"res", title:label, sub:t(r.desc), text:label + " " + kind + " " + t(r.desc),
       act:{type:"res", kind:kind}});
+    if (r.best) idx.push({g:"best", title:label, sub:t(UI.best),
+      text:label + " " + kind + " " + r.best.map(t).join(" "),
+      body:r.best.map(x => t(x).replace(/[`*]/g, "")).join(" · "),
+      act:{type:"res", kind:kind}});
     r.steps.forEach((st, si) => {
       st.fields.forEach(f => {
         const w = f.why || WHY[kind + "." + f.k] || WHY[f.k];
@@ -3974,7 +4133,8 @@ function searchIndex(){
 const SEARCH_GROUPS = {
   res:"Ressourcen|Resources", field:"Felder und Erklärungen|Fields and explanations",
   cmd:"kubectl-Befehle|kubectl commands", task:"Befehls-Assistent|Command builder",
-  wiki:"Speicher-Wiki|Storage wiki", cheat:"Spickzettel|Cheat sheet"
+  wiki:"Speicher-Wiki|Storage wiki", cheat:"Spickzettel|Cheat sheet",
+  best:"Best Practices|Best practices"
 };
 
 let SEARCH_HITS = [];
