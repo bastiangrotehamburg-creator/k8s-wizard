@@ -1,37 +1,43 @@
 
 :root{
   color-scheme:light;
-  --a1:#5b53e8; --a2:#8b5cf6; --a3:#06b6d4;
+  /* Blau trägt die Struktur, Orange ausschliesslich die Handlung — wie auf highq.de. */
+  --a1:#2c6eb5; --a2:#255f9e; --a3:#1f3a68;
   --grad:linear-gradient(135deg,var(--a1),var(--a2));
-  --grad-soft:linear-gradient(135deg,rgba(91,83,232,.13),rgba(139,92,246,.07));
+  --grad-soft:linear-gradient(135deg,rgba(44,110,181,.11),rgba(31,58,104,.05));
 
-  --bg:#eceff8;
-  --blob1:rgba(99,91,255,.20);
-  --blob2:rgba(6,182,212,.15);
-  --surface:rgba(255,255,255,.70);
+  --go:#ee8b22; --go-2:#dd7d15; --go-ink:#16233a;
+  --go-sh:rgba(238,139,34,.34); --go-sh-2:rgba(238,139,34,.46);
+
+  --bg:#eef3f9;
+  --blob1:rgba(44,110,181,.17);
+  --blob2:rgba(31,58,104,.10);
+  --surface:rgba(255,255,255,.74);
   --surface-solid:#fff;
-  --field:rgba(255,255,255,.85);
-  --glass-brd:rgba(255,255,255,.75);
-  --brd:rgba(16,19,28,.10);
-  --brd-2:rgba(16,19,28,.18);
-  --ink:#0f1220;
-  --ink-2:#39415a;
-  --muted:#66708a;
-  --accent:#5b53e8;
-  --accent-soft:rgba(91,83,232,.10);
-  --ok:#0d9668;   --ok-bg:rgba(13,150,104,.12);
-  --warn:#b45309; --warn-bg:rgba(180,83,9,.12);
-  --err:#dc2626;  --err-bg:rgba(220,38,38,.10);
+  --field:rgba(255,255,255,.88);
+  --glass-brd:rgba(255,255,255,.78);
+  --brd:rgba(20,35,58,.11);
+  --brd-2:rgba(20,35,58,.20);
+  --ink:#16233a;
+  --ink-2:#3b4a63;
+  --muted:#5f6d86;
+  --accent:#2c6eb5;
+  --accent-soft:rgba(44,110,181,.10);
+  --ok:#057757;   --ok-bg:rgba(5,119,87,.12);
+  --warn:#9f5602; --warn-bg:rgba(159,86,2,.12);
+  --err:#c62828;  --err-bg:rgba(198,40,40,.10);
 
-  --sh1:0 1px 2px rgba(16,19,28,.05), 0 4px 14px rgba(16,19,28,.05);
-  --sh2:0 2px 8px rgba(16,19,28,.07), 0 14px 38px rgba(16,19,28,.10);
-  --sh3:0 -8px 26px rgba(16,19,28,.09), 0 -30px 70px rgba(16,19,28,.14);
-  --ring:0 0 0 3px rgba(91,83,232,.22);
+  --sh1:0 1px 2px rgba(20,35,58,.05), 0 4px 14px rgba(20,35,58,.06);
+  --sh2:0 2px 8px rgba(20,35,58,.08), 0 14px 38px rgba(20,35,58,.11);
+  --sh3:0 -8px 26px rgba(20,35,58,.10), 0 -30px 70px rgba(20,35,58,.15);
+  --ring:0 0 0 3px rgba(44,110,181,.25);
 
-  --cs-bg:#12161f; --cs-bg2:#161b26;
-  --cs-fg:#d8deec; --cs-muted:#8595ad; --cs-dim:#5b6c86;
-  --cs-brd:rgba(255,255,255,.09); --cs-hover:rgba(255,255,255,.05);
-  --cs-key:#93b4ff; --cs-num:#f2bd8e; --cs-accent:#a99bff;
+  --cs-bg:#16233a; --cs-bg2:#1b2b45;
+  --cs-fg:#dbe4f0; --cs-muted:#93a6c2; --cs-dim:#647a99;
+  --cs-brd:rgba(255,255,255,.10); --cs-hover:rgba(255,255,255,.06);
+  --cs-key:#9cc4ee; --cs-num:#f2bd8e; --cs-accent:#f0a95c;
+  --cs-accent-soft:rgba(240,169,92,.13); --cs-accent-brd:rgba(240,169,92,.35);
+  --cs-accent-ink:#ffd9b0;
 
   --r:10px; --r-sm:8px; --r-lg:18px;
   --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono","Cascadia Mono",Menlo,Consolas,"Liberation Mono",monospace;
@@ -39,28 +45,33 @@
 }
 [data-theme="dark"]{
   color-scheme:dark;
-  --bg:#070911;
-  --blob1:rgba(112,101,255,.22);
-  --blob2:rgba(6,182,212,.13);
-  --surface:rgba(23,27,39,.66);
-  --surface-solid:#161b28;
-  --field:rgba(255,255,255,.045);
+  /* Dasselbe Blau, nur aufgehellt — auf dunklem Grund braucht es mehr Helligkeit. */
+  --a1:#3b7fc4; --a2:#2a5f9e;
+  --grad-soft:linear-gradient(135deg,rgba(59,127,196,.16),rgba(31,58,104,.08));
+  --go:#f59b3c; --go-2:#e78c2a;
+  --go-sh:rgba(245,155,60,.30); --go-sh-2:rgba(245,155,60,.42);
+  --bg:#08111d;
+  --blob1:rgba(44,110,181,.24);
+  --blob2:rgba(31,58,104,.20);
+  --surface:rgba(22,35,58,.68);
+  --surface-solid:#16233a;
+  --field:rgba(255,255,255,.05);
   --glass-brd:rgba(255,255,255,.09);
-  --brd:rgba(255,255,255,.10);
-  --brd-2:rgba(255,255,255,.20);
-  --ink:#e9edf8;
-  --ink-2:#bcc6da;
-  --muted:#8d9ab4;
-  --accent:#a293ff;
-  --accent-soft:rgba(162,147,255,.14);
+  --brd:rgba(255,255,255,.11);
+  --brd-2:rgba(255,255,255,.21);
+  --ink:#e6edf7;
+  --ink-2:#bac7dc;
+  --muted:#8c9ab4;
+  --accent:#7fb3e8;
+  --accent-soft:rgba(127,179,232,.15);
   --ok:#34d399;   --ok-bg:rgba(52,211,153,.13);
   --warn:#fbbf24; --warn-bg:rgba(251,191,36,.12);
   --err:#f87171;  --err-bg:rgba(248,113,113,.13);
   --sh1:0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.28);
   --sh2:0 2px 10px rgba(0,0,0,.45), 0 18px 44px rgba(0,0,0,.5);
   --sh3:0 -10px 34px rgba(0,0,0,.5), 0 -30px 80px rgba(0,0,0,.6);
-  --ring:0 0 0 3px rgba(162,147,255,.26);
-  --cs-bg:#0d111a; --cs-bg2:#111624;
+  --ring:0 0 0 3px rgba(127,179,232,.28);
+  --cs-bg:#0d1826; --cs-bg2:#122034;
 }
 
 *{box-sizing:border-box}
@@ -276,11 +287,15 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   transition:all .16s cubic-bezier(.22,1,.36,1);
 }
 .btn:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
+/* Dunkle Schrift statt weisser: Weiss auf diesem Orange kommt nur auf 2,4:1. */
 .btn--go{
-  background:var(--grad);border-color:transparent;color:#fff;font-weight:650;
-  box-shadow:0 2px 10px rgba(91,83,232,.35);
+  background:var(--go);border-color:transparent;color:var(--go-ink);font-weight:680;
+  box-shadow:0 2px 10px var(--go-sh);
 }
-.btn--go:hover{color:#fff;box-shadow:0 4px 18px rgba(91,83,232,.45);transform:translateY(-1px)}
+.btn--go:hover{
+  background:var(--go-2);color:var(--go-ink);
+  box-shadow:0 4px 18px var(--go-sh-2);transform:translateY(-1px);
+}
 .btn--ghost{border-style:dashed;background:transparent;color:var(--muted)}
 
 /* ---------- YAML-Fläche ---------- */
@@ -332,9 +347,9 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   padding:4px 11px;font-family:var(--mono);font-size:10.5px;cursor:pointer;transition:all .16s ease;
 }
 .cmd::before{content:"$ ";color:var(--cs-dim)}
-.cmd--seal{border-color:rgba(162,147,255,.35);color:var(--cs-accent)}
+.cmd--seal{border-color:var(--cs-accent-brd);color:var(--cs-accent)}
 .cmd--seal::before{content:"🔒 ";color:var(--cs-accent)}
-.cmd--seal:hover{background:rgba(162,147,255,.12)}
+.cmd--seal:hover{background:var(--cs-accent-soft)}
 .cmd:hover{border-color:var(--cs-accent);color:var(--cs-accent);background:var(--cs-hover)}
 
 .doclist{border-top:1px solid var(--cs-brd);padding:10px 15px 13px;display:flex;flex-wrap:wrap;gap:7px;align-items:center;background:var(--cs-bg2)}
@@ -344,7 +359,7 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   font-family:var(--mono);font-size:11px;color:var(--cs-muted);overflow:hidden;transition:all .16s ease;
 }
 .chip:hover{border-color:var(--cs-accent);background:var(--cs-hover)}
-.chip--on{border-color:var(--cs-accent);background:rgba(162,147,255,.14);color:#cfc6ff}
+.chip--on{border-color:var(--cs-accent);background:var(--cs-accent-soft);color:var(--cs-accent-ink)}
 .chip button{background:none;border:0;color:inherit;cursor:pointer;font:inherit;padding:4px 5px 4px 11px}
 .chip .chip-x{padding:4px 9px 4px 5px;color:var(--cs-dim);font-size:13px;line-height:1}
 .chip .chip-x:hover{color:#fca5a5}
