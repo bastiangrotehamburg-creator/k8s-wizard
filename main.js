@@ -127,6 +127,7 @@ const WHY = {
   cpuLim:"limits sind die harte Obergrenze. Bei CPU wird gedrosselt — die Anwendung wird langsam, läuft aber weiter. Ohne Limit kann ein einzelner Container einen Node auslasten.|limits are the hard ceiling. CPU gets throttled — the app slows down but keeps running. Without a limit a single container can saturate a node.",
   memLim:"Beim Speicher gibt es kein Drosseln: Wer sein Limit überschreitet, wird ohne Vorwarnung beendet. Im Status steht dann OOMKilled, und der Pod startet neu.|There is no throttling for memory: exceed the limit and the container is killed without warning. The status reads OOMKilled and the pod restarts.",
   probe:"readinessProbe entscheidet, ob der Pod Traffic bekommt. livenessProbe entscheidet, ob er neu gestartet wird. Ohne readiness schickt der Service sofort Anfragen an einen Container, der noch startet. Eine zu strenge liveness startet gesunde Pods im Kreis neu.|The readiness probe decides whether the pod receives traffic. The liveness probe decides whether it gets restarted. Without readiness the service sends requests to a container that is still starting. An over-strict liveness probe restarts healthy pods in a loop.",
+  tolerations:"Ein Taint auf dem Node sagt ab, die toleration im Pod hebt die Absage auf — beides muss in Schlüssel, Wert und Effekt zusammenpassen. Wichtig ist, was sie nicht tut: Sie zieht den Pod nicht auf den Node, sie erlaubt ihn dort nur. Wer gezielt auf reservierten Nodes landen will, braucht zusätzlich nodeSelector oder nodeAffinity auf ein Label. Bleibt der effect leer, gilt die toleration für alle Effekte desselben Schlüssels. tolerationSeconds greift ausschließlich bei NoExecute und legt fest, wie lange der Pod nach dem Setzen des Taints noch bleiben darf.|A taint on the node refuses, the toleration in the pod lifts that refusal — key, value and effect have to line up. What matters is what it does not do: it does not pull the pod onto the node, it merely permits it there. To land on reserved nodes deliberately you also need a nodeSelector or nodeAffinity on a label. If the effect is left empty, the toleration covers every effect of that key. tolerationSeconds applies only to NoExecute and sets how long the pod may stay after the taint appears.",
   initContainers:"Init-Container laufen der Reihe nach, jeder muss sich erfolgreich beenden, bevor der nächste startet — der Hauptcontainer beginnt erst danach. Der übliche Einsatz: eine Datenbankmigration, das Warten auf einen anderen Dienst, das Vorbereiten eines Volumes. Ein Sidecar ist derselbe Eintrag mit restartPolicy Always. Der Unterschied ist entscheidend: Kubernetes wartet dann nicht auf sein Ende, sondern nur darauf, dass es gestartet ist — und beendet es später sauber mit dem Pod. Ein dauerhaft laufender Container als gewöhnlicher Init-Container würde den Pod dagegen für immer im Zustand Init blockieren.|Init containers run one after another, each has to finish successfully before the next starts — the main container only begins afterwards. The usual cases: a database migration, waiting for another service, preparing a volume. A sidecar is the same entry with restartPolicy Always. That difference matters: Kubernetes then does not wait for it to finish, only for it to have started — and shuts it down cleanly with the pod later. A long-running container as an ordinary init container would instead block the pod in Init forever.",
   probeStartup:"Die startupProbe deckt genau die Phase ab, in der die Anwendung noch hochfährt: Solange sie läuft, greifen readiness und liveness nicht. Ihr Budget ist periodSeconds mal failureThreshold — großzügig gesetzt, ohne dass die liveness danach träge wird. Das ist der saubere Ersatz für ein hohes initialDelaySeconds, das man sonst raten muss und das im laufenden Betrieb nichts mehr bringt. Ohne sie ist die Reihenfolge tückisch: Startet die Anwendung langsamer als gedacht, tötet die liveness sie mitten im Hochfahren, wieder und wieder.|The startup probe covers exactly the phase while the app is still coming up: as long as it runs, readiness and liveness stay out of the way. Its budget is periodSeconds times failureThreshold — set generously without making the liveness probe sluggish afterwards. That is the clean replacement for a high initialDelaySeconds, which you otherwise have to guess and which does nothing once the app is running. Without it the ordering bites: if the app starts slower than expected, the liveness probe kills it mid-startup, over and over.",
   probeCmd:"Der Befehl läuft im Container selbst, ohne Shell — jedes Argument in eine eigene Zeile. Gewertet wird allein der Rückgabewert, die Ausgabe interessiert niemanden. Für Anwendungen ohne HTTP-Endpunkt ist das der Weg, etwa ein pg_isready oder eine Datei, die der Prozess anlegt, sobald er bereit ist.|The command runs inside the container itself, without a shell — one argument per line. Only the exit code counts, the output goes nowhere. For applications without an HTTP endpoint this is the way, for instance a pg_isready or a file the process creates once it is ready.",
@@ -283,6 +284,17 @@ RES.Deployment = {
       {k:"sa", t:"text", l:"serviceAccountName", ph:"default"},
       {k:"pullSecret", t:"text", l:"imagePullSecrets", ph:"registry-cred"},
       {k:"nodeSelector", t:"kv", l:"nodeSelector"},
+      {k:"tolerations", t:"list", l:"Tolerations|Tolerations", item:[
+        {k:"key", t:"text", l:"key", ph:"dedicated"},
+        {k:"op", t:"select", l:"operator",
+          opts:[["","Equal — Wert muss passen|Equal — the value has to match"],
+                ["Exists","Exists — Schlüssel genügt|Exists — the key is enough"]]},
+        {k:"value", t:"text", l:"value", ph:"gpu"},
+        {k:"effect", t:"select", l:"effect",
+          opts:[["","jeder Effekt|any effect"],["NoSchedule","NoSchedule"],
+                ["PreferNoSchedule","PreferNoSchedule"],["NoExecute","NoExecute"]]},
+        {k:"seconds", t:"number", l:"tolerationSeconds", ph:"300"}
+      ], hint:"Erlaubt dem Pod einen Node trotz Taint. Leerer key mit Exists toleriert alles — auch die Taints, mit denen Kubernetes kaputte Nodes markiert.|Lets the pod onto a node despite a taint. An empty key with Exists tolerates everything — including the taints Kubernetes uses to mark broken nodes."},
       {k:"strategy", t:"select", l:"Update-Strategie|Update strategy",
         opts:[["","RollingUpdate (Standard)|RollingUpdate (default)"],["Recreate","Recreate"]]},
       {k:"stdLabels", t:"bool", structural:true, l:"Empfohlene app.kubernetes.io-Labels setzen|Add the recommended app.kubernetes.io labels",
@@ -1353,6 +1365,20 @@ function initContainersOf(d, mainMounts){
   });
 }
 
+/* Das Gegenstück zum Taint auf dem Node: die Erlaubnis des Pods. */
+function tolerationsOf(d){
+  const out = (d.tolerations||[]).filter(x => x.key || x.op === "Exists").map(x => {
+    const tol = {key:x.key || undefined, operator:x.op || "Equal"};
+    /* Exists duldet keinen Wert — die API weist das ab. */
+    if (x.op !== "Exists" && x.value) tol.value = x.value;
+    if (x.effect) tol.effect = x.effect;
+    const s = num(x.seconds);
+    if (s !== undefined) tol.tolerationSeconds = s;
+    return tol;
+  });
+  return out.length ? out : undefined;
+}
+
 function podSpecOf(d, extraMounts){
   const main = containerOf(d, extraMounts);
   const inits = initContainersOf(d, main.volumeMounts);
@@ -1360,6 +1386,7 @@ function podSpecOf(d, extraMounts){
     serviceAccountName: d.sa || undefined,
     imagePullSecrets: d.pullSecret ? [{name:d.pullSecret}] : undefined,
     nodeSelector: kvObj(d.nodeSelector),
+    tolerations: tolerationsOf(d),
     securityContext: d.hardened
       ? {runAsNonRoot:true, seccompProfile:{type:"RuntimeDefault"}}
       : (d.runAsNonRoot ? {runAsNonRoot:true} : undefined),
@@ -1541,6 +1568,19 @@ function validate(docs){
         if (lim && qty(lim) === null)
           err(nm + ": emptyDir " + v.name + " — sizeLimit " + lim + " " + t("ist keine gültige Mengenangabe|is not a valid quantity"), "volumes");
       });
+      ((tpl.spec||{}).tolerations||[]).forEach(tol => {
+        if (tol.operator === "Exists" && tol.value !== undefined)
+          err(nm + ": toleration " + (tol.key || "") + " — " +
+            t("operator Exists verträgt keinen value|operator Exists must not carry a value"), "tolerations");
+        if (!tol.key && tol.operator !== "Exists")
+          err(nm + ": " + t("toleration ohne key braucht operator Exists|a toleration without a key needs operator Exists"), "tolerations");
+        if (!tol.key && tol.operator === "Exists" && !tol.effect)
+          warn(nm + ": " + t("toleriert jeden Taint — auch die, mit denen Kubernetes Nodes als nicht bereit oder überlastet markiert. Der Pod bleibt dann auf einem kaputten Node liegen.|tolerates every taint — including the ones Kubernetes uses to mark nodes as not ready or under pressure. The pod then stays put on a broken node."), "tolerations");
+        if (tol.tolerationSeconds !== undefined && tol.effect && tol.effect !== "NoExecute")
+          warn(nm + ": toleration " + (tol.key || "") + " — " +
+            t("tolerationSeconds wirkt nur bei NoExecute und wird hier ignoriert|tolerationSeconds only applies to NoExecute and is ignored here"), "tolerations");
+      });
+
       /* Container- und Init-Container-Namen teilen sich einen Namensraum. */
       const inits = ((tpl.spec||{}).initContainers)||[];
       const seenNames = {};
@@ -2386,6 +2426,9 @@ const KUBECTL = [
     {c:"kubectl apply -f manifest.yaml --dry-run=server", d:"Schickt das Manifest zur Prüfung an den API-Server, ohne etwas zu ändern. Findet Tippfehler in Feldnamen, die eine reine Syntaxprüfung nie sieht.|Sends the manifest to the API server for validation without changing anything. Catches typos in field names that a pure syntax check never sees."},
     {c:"kubectl diff -f manifest.yaml", d:"Zeigt vor dem Apply, was sich ändern würde. Der wichtigste Befehl vor jedem Eingriff in Produktion.|Shows what would change before you apply. The single most important command before touching production."},
     {c:"kubectl delete -f manifest.yaml", d:"Entfernt genau die Ressourcen aus der Datei. Achtung: Ein PVC nimmt je nach reclaimPolicy die Daten mit.|Removes exactly the resources in the file. Careful: depending on reclaimPolicy a PVC takes the data with it."},
+    {c:"kubectl label deploy/{app} tier=backend -n {ns} --overwrite", d:"Setzt ein Label am Objekt selbst. Nicht an seinen Pods — deren Labels stehen in spec.template und lassen sich nur über das Manifest ändern.|Sets a label on the object itself. Not on its pods — their labels live in spec.template and only change through the manifest."},
+    {c:"kubectl label deploy/{app} tier- -n {ns}", d:"Das angehängte Minus entfernt den Schlüssel wieder. Dieselbe Schreibweise wie beim Entfernen eines Taints.|The trailing minus removes the key again. The same notation as removing a taint."},
+    {c:"kubectl annotate deploy/{app} kubernetes.io/change-cause=\"Rollback auf 2.3\" -n {ns}", d:"Annotations trägt niemand als Auswahlkriterium heran; sie sind Beiwerk für Werkzeuge. Diese hier taucht in kubectl rollout history als Grund auf.|Nobody selects on annotations; they are metadata for tooling. This one shows up in kubectl rollout history as the reason."},
     {c:"kubectl apply -f manifest.yaml --prune -l app={app}", d:"Löscht zusätzlich Ressourcen mit diesem Label, die nicht mehr in der Datei stehen. Mächtig und entsprechend gefährlich.|Additionally deletes labelled resources that are no longer in the file. Powerful and correspondingly dangerous."}
   ]},
   {g:"Ansehen|Looking around", items:[
@@ -2909,6 +2952,49 @@ const CMDTASKS = [
     if (!o.overwrite) r.push({lvl:"warn", m:t("Ein bereits vorhandenes Label ändert sich nur mit --overwrite, sonst bricht der Befehl ab.|An existing label only changes with --overwrite, otherwise the command fails.")});
   }
 
+  return {c:c, f:f, r:r};
+ }},
+
+{id:"label", l:"Beschriften|Labels", d:"Labels und Annotations an jeder Ressource|Labels and annotations on any resource",
+ fields:[
+  {k:"what", t:"select", l:"Art|Kind", structural:true,
+   opts:[["","Label — danach lässt sich auswählen|Label — can be selected on"],
+         ["annotate","Annotation — nur Beiwerk für Werkzeuge|Annotation — metadata for tools only"]]},
+  {k:"kind", t:"select", l:"Typ|Type", opts:K_KINDS},
+  {k:"name", t:"text", l:"Name", ph:"my-app", half:true},
+  {k:"selector", t:"text", l:"…oder Label-Filter|…or label filter", ph:"app=my-app", half:true},
+  {k:"ns", t:"text", l:"Namespace", ph:"default", half:true},
+  {k:"allNs", t:"bool", l:"über alle Namespaces|across all namespaces"},
+  {k:"pairs", t:"text", l:"Schlüssel=Wert|Key=value", ph:"tier=backend",
+   hint:"Mehrere durch Leerzeichen getrennt.|Several separated by spaces."},
+  {k:"remove", t:"bool", structural:true, l:"entfernen statt setzen|remove instead of set"},
+  {k:"overwrite", t:"bool", l:"--overwrite", when:o=>!o.remove}
+ ],
+ build(o){
+  const verb = o.what === "annotate" ? "annotate" : "label";
+  const pairs = (o.pairs || "tier=backend").trim();
+  let c = "kubectl " + verb + ctxF() + " " + (o.kind || "pods");
+  if (o.selector) c += " -l " + o.selector; else c += " " + (o.name || "NAME");
+  c += nsF(o);
+  c += " " + (o.remove
+    ? pairs.split(/\s+/).map(x => x.split("=")[0] + "-").join(" ")
+    : pairs);
+  if (o.overwrite && !o.remove) c += " --overwrite";
+
+  const f = [], r = [];
+  if (verb === "label") f.push(["label", "Labels sind zum Auswählen da: Services finden ihre Pods darüber, kubectl filtert damit, Dashboards gruppieren danach.|Labels exist to be selected on: services find their pods through them, kubectl filters by them, dashboards group by them."]);
+  else f.push(["annotate", "Annotations wählt niemand aus. Sie tragen Beiwerk für Werkzeuge — cert-manager, Ingress-Controller, Deployment-Historie — und dürfen deutlich länger sein als ein Label.|Nobody selects on annotations. They carry metadata for tools — cert-manager, ingress controllers, rollout history — and may be considerably longer than a label."]);
+  if (o.remove) f.push(["-", "Das angehängte Minus entfernt den Schlüssel. Ohne Minus wird gesetzt.|The trailing minus removes the key. Without it, the key is set."]);
+  else if (o.overwrite) f.push(["--overwrite", "Nötig, sobald der Schlüssel schon existiert — sonst bricht der Befehl ab, statt still etwas zu überschreiben.|Required as soon as the key already exists — otherwise the command fails instead of quietly overwriting."]);
+
+  if (verb === "label" && (o.kind === "deploy" || o.kind === "sts" || !o.kind))
+    r.push({lvl:"warn", m:t("Das beschriftet das Objekt selbst, nicht seine Pods. Die Pod-Labels stehen in spec.template und ändern sich nur über das Manifest.|This labels the object itself, not its pods. Pod labels live in spec.template and only change through the manifest.")});
+  if (verb === "label" && !o.remove)
+    r.push({lvl:"warn", m:t("Ändert der Schlüssel ein Label, auf das ein Service-Selector zeigt, fällt die Ressource sofort aus dem Service — ohne Fehlermeldung, nur ohne Endpoints.|If the key changes a label a service selector points at, the resource drops out of the service immediately — no error, just no endpoints.")});
+  if (o.selector)
+    r.push({lvl:"warn", m:t("Mit -l trifft es alles, was passt. Dieselbe Auswahl vorher mit kubectl get prüfen.|With -l this hits everything that matches. Check the same selection with kubectl get first.")});
+  if (o.remove && !o.selector && !o.name)
+    r.push({lvl:"warn", m:t("Ohne Namen und ohne Filter fehlt das Ziel.|Without a name and without a filter there is no target.")});
   return {c:c, f:f, r:r};
  }},
 
@@ -3548,6 +3634,68 @@ function runSelfTests(){
   ok("Voreinstellung ohne Auswahl ist ein gültiger taint",
     nodeCmd({}) === "kubectl taint nodes NODE dedicated:NoSchedule", nodeCmd({}));
   CMD.ctx = keepCtx;
+
+  /* --- Tolerations --- */
+  const tolSpec = t2 => RES.Deployment.build({name:"a", image:"x:1", cpuLim:"1", memLim:"1Gi",
+    probe:"http", probePort:80, tolerations:t2}).spec.template.spec;
+  const tol1 = tolSpec([{key:"dedicated", value:"gpu", effect:"NoSchedule"}]).tolerations;
+  ok("Toleration: operator Equal steht ausdrücklich da",
+    tol1[0].operator === "Equal" && tol1[0].value === "gpu" && tol1[0].effect === "NoSchedule",
+    JSON.stringify(tol1));
+  ok("Toleration: Exists trägt keinen Wert",
+    tolSpec([{key:"gpu", op:"Exists", value:"wird-verworfen"}]).tolerations[0].value === undefined,
+    JSON.stringify(tolSpec([{key:"gpu", op:"Exists", value:"x"}]).tolerations));
+  ok("Toleration: tolerationSeconds wird übernommen",
+    tolSpec([{key:"k", op:"Exists", effect:"NoExecute", seconds:300}]).tolerations[0].tolerationSeconds === 300, "");
+  ok("Leere Einträge fallen weg",
+    tolSpec([{key:"", op:"", value:""}]).tolerations === undefined, "");
+  ok("Toleration ohne key und ohne Exists ist ein Fehler",
+    val([{apiVersion:"apps/v1", kind:"Deployment", metadata:{name:"a"}, spec:{template:{spec:{
+      tolerations:[{operator:"Equal", value:"x"}],
+      containers:[{name:"a", image:"x:1", resources:{limits:{cpu:"1", memory:"1Gi"}},
+        readinessProbe:{httpGet:{path:"/", port:80}}}]}}}}])
+      .some(x => x.indexOf("err:tolerations") === 0), "");
+  ok("Exists mit value ist ein Fehler",
+    val([{apiVersion:"apps/v1", kind:"Deployment", metadata:{name:"a"}, spec:{template:{spec:{
+      tolerations:[{key:"k", operator:"Exists", value:"x"}],
+      containers:[{name:"a", image:"x:1", resources:{limits:{cpu:"1", memory:"1Gi"}},
+        readinessProbe:{httpGet:{path:"/", port:80}}}]}}}}])
+      .some(x => x.indexOf("err:tolerations") === 0), "");
+  ok("Toleration für alles wird gewarnt",
+    val([RES.Deployment.build({name:"a", image:"x:1", cpuLim:"1", memLim:"1Gi",
+      probe:"http", probePort:80, tolerations:[{op:"Exists"}]})])
+      .some(x => x.indexOf("warn:tolerations") === 0), "");
+  ok("tolerationSeconds ohne NoExecute wird gewarnt",
+    val([RES.Deployment.build({name:"a", image:"x:1", cpuLim:"1", memLim:"1Gi", probe:"http", probePort:80,
+      tolerations:[{key:"k", op:"Exists", effect:"NoSchedule", seconds:30}]})])
+      .some(x => x.indexOf("warn:tolerations") === 0), "");
+  ok("Pod und StatefulSet kennen Tolerations auch",
+    stepOf("Pod", "tolerations") >= 0 && stepOf("StatefulSet", "tolerations") >= 0, "");
+
+  /* --- Befehls-Assistent: Beschriften --- */
+  const labelTask = CMDTASKS.filter(x => x.id === "label")[0];
+  const keepCtx2 = CMD.ctx;
+  CMD.ctx = "";
+  ok("label setzt Schlüssel und Wert",
+    labelTask.build({kind:"deploy", name:"api", ns:"prod", pairs:"tier=backend"}).c ===
+    "kubectl label deploy api -n prod tier=backend",
+    labelTask.build({kind:"deploy", name:"api", ns:"prod", pairs:"tier=backend"}).c);
+  ok("label entfernt mit angehängtem Minus",
+    labelTask.build({kind:"deploy", name:"api", pairs:"tier=backend", remove:true}).c ===
+    "kubectl label deploy api tier-",
+    labelTask.build({kind:"deploy", name:"api", pairs:"tier=backend", remove:true}).c);
+  ok("mehrere Schlüssel werden einzeln entfernt",
+    labelTask.build({kind:"pods", name:"p", pairs:"a=1 b=2", remove:true}).c === "kubectl label pods p a- b-",
+    labelTask.build({kind:"pods", name:"p", pairs:"a=1 b=2", remove:true}).c);
+  ok("annotate nutzt dasselbe Muster",
+    labelTask.build({what:"annotate", kind:"deploy", name:"api", pairs:"team=plattform"}).c ===
+    "kubectl annotate deploy api team=plattform",
+    labelTask.build({what:"annotate", kind:"deploy", name:"api", pairs:"team=plattform"}).c);
+  ok("label über Label-Filter warnt",
+    labelTask.build({kind:"pods", selector:"app=api", pairs:"tier=backend"}).r.some(x => x.lvl === "warn"), "");
+  ok("label am Deployment weist auf die Pods hin",
+    labelTask.build({kind:"deploy", name:"api", pairs:"tier=backend"}).r.length >= 2, "");
+  CMD.ctx = keepCtx2;
 
   /* --- Init-Container und Sidecars --- */
   const withInit = RES.Deployment.build({name:"api", image:"nginx:1.27", cpuLim:"1", memLim:"1Gi",
