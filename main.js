@@ -2792,7 +2792,7 @@ $("envClose").addEventListener("click", () => { $("envPanel").hidden = true; });
 
 document.addEventListener("keydown", e => {
   if (e.key === "Escape"){
-    ["wikiPanel","profilePanel","envPanel","testPanel","searchPanel"].forEach(id => { $(id).hidden = true; });
+    ["wikiPanel","profilePanel","envPanel","testPanel","searchPanel","clusterPanel"].forEach(id => { $(id).hidden = true; });
     if (!$("toast").hidden) hideToast();
     return;
   }
@@ -3984,6 +3984,55 @@ function runSelfTests(){
     RES.PersistentVolumeClaim.build({name:"d", size:"1Gi", class:"fast"}).spec.volumeName === undefined &&
     RES.PersistentVolumeClaim.build({name:"d", size:"1Gi", class:"fast"}).spec.storageClassName === "fast", "");
 
+  /* --- Cluster-Anleitung --- */
+  const guideOf = x => clusterGuide(x);
+  const allCmds = x => guideOf(x).map(s => s.items.map(i => i.c).join("\n")).join("\n");
+  const roles = x => guideOf(x).map(s => s.role).join(",");
+  const g1 = guideOf({});
+  ok("Anleitung trennt nach Rolle",
+    roles({}).indexOf("all") === 0 && roles({}).indexOf("worker") !== -1 && roles({}).indexOf("cp") !== -1,
+    roles({}));
+  ok("Jeder Abschnitt hat Überschrift, Rolle und Befehle",
+    g1.every(s => s.h && CLUSTER_ROLE[s.role] && s.items.length), "");
+  ok("init trägt das Pod-Netz des gewählten CNI",
+    allCmds({cni:"calico"}).indexOf("--pod-network-cidr=192.168.0.0/16") !== -1 &&
+    allCmds({cni:"flannel"}).indexOf("--pod-network-cidr=10.244.0.0/16") !== -1, "");
+  ok("Eigenes Pod-Netz sticht die Voreinstellung",
+    allCmds({cni:"calico", podCidr:"172.20.0.0/16"}).indexOf("172.20.0.0/16") !== -1, "");
+  ok("control-plane-endpoint nur mit Adresse",
+    allCmds({}).indexOf("--control-plane-endpoint") === -1 &&
+    allCmds({endpoint:"api.firma.de"}).indexOf("--control-plane-endpoint=api.firma.de:6443") !== -1, "");
+  ok("upload-certs nur bei Hochverfügbarkeit",
+    allCmds({}).indexOf("--upload-certs") === -1 && allCmds({ha:true}).indexOf("--upload-certs") !== -1, "");
+  ok("Hochverfügbarkeit ergänzt den Abschnitt für weitere Hauptserver",
+    guideOf({ha:true}).length === guideOf({}).length + 1 &&
+    allCmds({ha:true}).indexOf("--control-plane --certificate-key") !== -1, "");
+  ok("Ohne Hochverfügbarkeit wird gewarnt",
+    guideOf({}).some(s => (s.r||[]).some(x => x.lvl === "warn")) , "");
+  ok("Worker treten ohne --control-plane bei",
+    guideOf({}).filter(s => s.role === "worker")[0].items[0].c.indexOf("--control-plane") === -1, "");
+  ok("Paketquelle folgt der Version",
+    allCmds({version:"1.33"}).indexOf("stable:/v1.33/") !== -1 &&
+    allCmds({version:"v1.33"}).indexOf("stable:/v1.33/") !== -1, "");
+  ok("Betriebssystem schaltet zwischen apt und dnf um",
+    allCmds({os:"apt"}).indexOf("apt-mark hold") !== -1 && allCmds({os:"apt"}).indexOf("yum.repos.d") === -1 &&
+    allCmds({os:"dnf"}).indexOf("yum.repos.d") !== -1 && allCmds({os:"dnf"}).indexOf("apt-mark hold") === -1, "");
+  ok("containerd bekommt SystemdCgroup, CRI-O nicht",
+    allCmds({runtime:"containerd"}).indexOf("SystemdCgroup = true") !== -1 &&
+    allCmds({runtime:"crio"}).indexOf("SystemdCgroup") === -1, "");
+  ok("Einzelknoten entfernt den Taint des Hauptservers",
+    allCmds({singleNode:true}).indexOf("node-role.kubernetes.io/control-plane-") !== -1 &&
+    allCmds({}).indexOf("node-role.kubernetes.io/control-plane-") === -1, "");
+  ok("Firewall-Abschnitt nur auf Wunsch",
+    guideOf({firewall:true}).length === guideOf({}).length + 1, "");
+  ok("Anleitungstexte überstehen den Sprachwechsel",
+    g1.every(s => [s.h].concat(s.p||[]).every(x => x.split("|").length === 2) &&
+      s.items.every(i => i.d.split("|").length === 2)), "");
+  const guideMd = clusterMarkdown();
+  ok("Markdown enthält alle Abschnitte und Befehle",
+    g1.every(s => guideMd.indexOf(t(s.h)) !== -1) && guideMd.indexOf("```sh") !== -1 && guideMd.length > 2000,
+    String(guideMd.length));
+
   /* --- Best Practices --- */
   const withBest = Object.keys(RES).filter(k => RES[k].best && RES[k].best.length);
   ok("Jede Ressource hat Empfehlungen",
@@ -4081,6 +4130,298 @@ $("testBtn").addEventListener("click", () => {
 });
 $("testClose").addEventListener("click", () => { $("testPanel").hidden = true; });
 
+
+/* ---------- Cluster aufsetzen ---------- */
+
+const CLUSTER_FIELDS = [
+  {k:"version", t:"text", l:"Kubernetes-Version|Kubernetes version", ph:"1.34", half:true,
+   hint:"Nur Major.Minor — daraus entsteht die Paketquelle.|Major.minor only — the package repository is derived from it."},
+  {k:"os", t:"select", l:"Betriebssystem|Operating system", half:true, structural:true,
+   opts:[["apt","Debian / Ubuntu"],["dnf","RHEL / Rocky / AlmaLinux"]]},
+  {k:"runtime", t:"select", l:"Container-Runtime|Container runtime", half:true, structural:true,
+   opts:[["containerd","containerd"],["crio","CRI-O"]]},
+  {k:"cni", t:"select", l:"Netzwerk (CNI)|Networking (CNI)", half:true, structural:true,
+   opts:[["cilium","Cilium — eBPF, ohne kube-proxy möglich|Cilium — eBPF, can replace kube-proxy"],
+         ["calico","Calico — verbreitet, NetworkPolicy inklusive|Calico — widespread, network policy included"],
+         ["flannel","Flannel — einfach, ohne NetworkPolicy|Flannel — simple, no network policy"]]},
+  {k:"endpoint", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de",
+   hint:"Name oder VIP, unter dem der API-Server erreichbar ist. Leer lassen heißt: die IP des ersten Hauptservers — die lässt sich später nicht mehr ändern.|Name or VIP the API server answers on. Empty means the first control-plane node's IP — which cannot be changed later."},
+  {k:"ha", t:"bool", structural:true, l:"Mehrere Hauptserver (Hochverfügbarkeit)|Several control-plane nodes (high availability)",
+   hint:"Drei Hauptserver sind das Minimum, damit etcd eine Mehrheit bilden kann. Braucht einen Lastverteiler vor den API-Servern.|Three control-plane nodes are the minimum for etcd to form a majority. Requires a load balancer in front of the API servers."},
+  {k:"workers", t:"number", l:"Anzahl Worker|Number of workers", ph:"3", half:true},
+  {k:"podCidr", t:"text", l:"Pod-Netz|Pod network", ph:"10.244.0.0/16", half:true,
+   hint:"Darf sich mit keinem Netz überschneiden, das die Knoten sonst benutzen.|Must not overlap with any network the nodes already use."},
+  {k:"svcCidr", t:"text", adv:true, l:"Service-Netz|Service network", ph:"10.96.0.0/12", half:true},
+  {k:"singleNode", t:"bool", l:"Auch auf dem Hauptserver Pods zulassen|Run pods on the control plane too",
+   hint:"Für Testcluster ohne eigene Worker. Entfernt den Taint, den kubeadm setzt.|For test clusters without separate workers. Removes the taint kubeadm sets."},
+  {k:"firewall", t:"bool", l:"Firewall-Regeln mit ausgeben|Include firewall rules"}
+];
+
+const CNI_CIDR = {flannel:"10.244.0.0/16", calico:"192.168.0.0/16", cilium:"10.244.0.0/16"};
+
+function clusterOpts(o){
+  const cni = o.cni || "cilium";
+  return {
+    version: (o.version || "1.34").replace(/^v/, ""),
+    os: o.os || "apt",
+    runtime: o.runtime || "containerd",
+    cni: cni,
+    endpoint: (o.endpoint || "").trim(),
+    ha: !!o.ha,
+    workers: num(o.workers) === undefined ? 3 : num(o.workers),
+    podCidr: (o.podCidr || "").trim() || CNI_CIDR[cni],
+    svcCidr: (o.svcCidr || "").trim(),
+    singleNode: !!o.singleNode,
+    firewall: !!o.firewall
+  };
+}
+
+/* Die Anleitung. Jeder Abschnitt sagt zuerst, auf welchem Rechner er auszuführen ist. */
+function clusterGuide(raw){
+  const o = clusterOpts(raw);
+  const apt = o.os === "apt";
+  const api = o.endpoint || "IP-DES-HAUPTSERVERS";
+  const out = [];
+  const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
+
+  /* --- alle Knoten --- */
+  const prep = [];
+  prep.push({c:"sudo swapoff -a\nsudo sed -i '/ swap / s/^/#/' /etc/fstab",
+    d:"Der kubelet startet nicht, solange Swap aktiv ist. Die zweite Zeile sorgt dafür, dass es auch nach einem Neustart aus bleibt.|The kubelet refuses to start while swap is on. The second line keeps it off across reboots."});
+  prep.push({c:"cat <<'EOF' | sudo tee /etc/modules-load.d/k8s.conf\noverlay\nbr_netfilter\nEOF\nsudo modprobe overlay\nsudo modprobe br_netfilter",
+    d:"Ohne br_netfilter sieht der Node den Verkehr zwischen Pods nicht, und keine NetworkPolicy greift.|Without br_netfilter the node cannot see traffic between pods and no network policy takes effect."});
+  prep.push({c:"cat <<'EOF' | sudo tee /etc/sysctl.d/k8s.conf\nnet.bridge.bridge-nf-call-iptables  = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\nnet.ipv4.ip_forward                 = 1\nEOF\nsudo sysctl --system",
+    d:"Weiterleitung und Bridge-Filter dauerhaft einschalten.|Turns forwarding and bridge filtering on for good."});
+  if (o.os === "dnf") prep.push({c:"sudo setenforce 0\nsudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config",
+    d:"SELinux auf permissive, sonst kommt der kubelet nicht an die Container-Verzeichnisse. Wer SELinux behalten will, braucht passende Policies statt dieses Schritts.|SELinux to permissive, otherwise the kubelet cannot reach the container directories. Keeping SELinux means writing matching policies instead of this step."});
+
+  if (o.runtime === "containerd"){
+    prep.push({c: apt
+      ? "sudo apt-get update && sudo apt-get install -y containerd"
+      : "sudo dnf install -y containerd",
+      d:"Die Runtime, in der die Container tatsächlich laufen.|The runtime the containers actually run in."});
+    prep.push({c:"sudo mkdir -p /etc/containerd\ncontainerd config default | sudo tee /etc/containerd/config.toml >/dev/null\nsudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml\nsudo systemctl restart containerd && sudo systemctl enable containerd",
+      d:"Der wichtigste Schritt der ganzen Vorbereitung: containerd und kubelet müssen denselben cgroup-Treiber verwenden. Stimmt das nicht überein, startet kubeadm init scheinbar grundlos nicht durch.|The most important step of the whole preparation: containerd and the kubelet must use the same cgroup driver. If they disagree, kubeadm init stalls for no apparent reason."});
+  } else {
+    prep.push({c: apt
+      ? "sudo apt-get update && sudo apt-get install -y cri-o\nsudo systemctl enable --now crio"
+      : "sudo dnf install -y cri-o\nsudo systemctl enable --now crio",
+      d:"CRI-O bringt den systemd-cgroup-Treiber bereits richtig eingestellt mit.|CRI-O ships with the systemd cgroup driver already set correctly."});
+  }
+
+  prep.push(apt
+    ? {c:"sudo apt-get install -y apt-transport-https ca-certificates curl gpg\nsudo mkdir -p -m 755 /etc/apt/keyrings\ncurl -fsSL https://pkgs.k8s.io/core:/stable:/v" + o.version + "/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg\necho 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v" + o.version + "/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list\nsudo apt-get update\nsudo apt-get install -y kubelet kubeadm kubectl\nsudo apt-mark hold kubelet kubeadm kubectl",
+       d:"Die Paketquelle ist an die Minor-Version gebunden — für ein späteres Upgrade auf " + o.version + "+1 muss sie umgeschrieben werden. apt-mark hold verhindert, dass ein beiläufiges apt upgrade den Cluster mitreißt.|The repository is tied to the minor version — a later upgrade past " + o.version + " means rewriting it. apt-mark hold stops a casual apt upgrade from dragging the cluster along."}
+    : {c:"cat <<'EOF' | sudo tee /etc/yum.repos.d/kubernetes.repo\n[kubernetes]\nname=Kubernetes\nbaseurl=https://pkgs.k8s.io/core:/stable:/v" + o.version + "/rpm/\nenabled=1\ngpgcheck=1\ngpgkey=https://pkgs.k8s.io/core:/stable:/v" + o.version + "/rpm/repodata/repomd.xml.key\nexclude=kubelet kubeadm kubectl cri-tools kubernetes-cni\nEOF\nsudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes\nsudo systemctl enable --now kubelet",
+       d:"exclude in der Repo-Datei hält die Pakete von einem beiläufigen dnf update fern.|The exclude line in the repo file keeps the packages away from a casual dnf update."});
+
+  sec("Vorbereitung|Preparation", "all", {
+    p:["Diese Schritte laufen unverändert auf **jedem** Rechner — Hauptserver wie Worker. Am schnellsten geht es, wenn du sie parallel auf allen Knoten ausführst.|These steps run identically on **every** machine — control plane and workers alike. Fastest is to run them on all nodes in parallel."],
+    items:prep,
+    r:[{lvl:"warn", m:t("Alle Knoten brauchen unterschiedliche Hostnamen, MAC-Adressen und product_uuid. Geklonte VMs teilen sich diese Werte oft — dann treten Knoten dem Cluster bei und verdrängen sich gegenseitig.|Every node needs a distinct hostname, MAC address and product_uuid. Cloned VMs often share these — then nodes join and displace each other.")}]
+  });
+
+  if (o.firewall) sec("Firewall|Firewall", "all", {
+    p:["Nur nötig, wenn auf den Knoten eine Firewall läuft.|Only needed when a firewall runs on the nodes."],
+    items:[
+      {c:"# Hauptserver\nsudo firewall-cmd --permanent --add-port={6443,2379-2380,10250,10257,10259}/tcp",
+       d:"API-Server, etcd, kubelet, Controller-Manager und Scheduler.|API server, etcd, kubelet, controller manager and scheduler."},
+      {c:"# Worker\nsudo firewall-cmd --permanent --add-port={10250,30000-32767}/tcp",
+       d:"kubelet und der NodePort-Bereich.|The kubelet and the NodePort range."},
+      {c:"# " + (o.cni === "calico" ? "Calico" : o.cni === "flannel" ? "Flannel" : "Cilium") + "\nsudo firewall-cmd --permanent --add-port=" +
+         (o.cni === "calico" ? "179/tcp --permanent --add-port=4789/udp" : o.cni === "cilium" ? "8472/udp --permanent --add-port=4240/tcp" : "8472/udp") +
+         "\nsudo firewall-cmd --reload",
+       d:"Das Overlay-Netz des CNI. Fehlen diese Ports, sind Pods auf demselben Node erreichbar und über Node-Grenzen hinweg nicht — ein Fehlerbild, das lange in die Irre führt.|The CNI's overlay network. Without these ports pods reach each other on the same node but not across nodes — a symptom that misleads for a long time."}
+    ]
+  });
+
+  /* --- erster Hauptserver --- */
+  const initCmd = ["sudo kubeadm init",
+    "  --pod-network-cidr=" + o.podCidr,
+    o.svcCidr ? "  --service-cidr=" + o.svcCidr : "",
+    o.endpoint ? "  --control-plane-endpoint=" + o.endpoint + ":6443" : "",
+    o.ha ? "  --upload-certs" : "",
+    "  --kubernetes-version=v" + o.version + ".0"
+  ].filter(Boolean).join(" \\\n");
+
+  const cp = [{c:initCmd,
+    d:"Legt etcd, API-Server, Controller-Manager und Scheduler an. Am Ende gibt der Befehl die Beitrittsbefehle aus — **diese Ausgabe aufheben**, sie enthält Token und Prüfsumme.|Creates etcd, the API server, the controller manager and the scheduler. At the end it prints the join commands — **keep that output**, it contains the token and the checksum."}];
+  cp.push({c:"mkdir -p $HOME/.kube\nsudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config\nsudo chown $(id -u):$(id -g) $HOME/.kube/config",
+    d:"Erst danach funktioniert kubectl als normaler Benutzer.|Only after this does kubectl work as an ordinary user."});
+
+  if (o.cni === "cilium") cp.push({c:"CILIUM_CLI=v0.16.16   # aktuelle Version aus den Release Notes\ncurl -sL --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI}/cilium-linux-amd64.tar.gz\nsudo tar xzvfC cilium-linux-amd64.tar.gz /usr/local/bin\ncilium install\ncilium status --wait",
+    d:"Ohne CNI bleiben alle Knoten NotReady und die CoreDNS-Pods hängen in Pending. Das ist kein Fehler, sondern der normale Zwischenstand.|Without a CNI every node stays NotReady and the CoreDNS pods sit in Pending. That is not a fault, it is the normal intermediate state."});
+  if (o.cni === "calico") cp.push({c:"CALICO=v3.29.1   # aktuelle Version aus den Release Notes\nkubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/${CALICO}/manifests/calico.yaml",
+    d:"Calico übernimmt das Pod-Netz und bringt NetworkPolicy gleich mit. Das Pod-Netz muss zu dem passen, das oben bei kubeadm init steht.|Calico takes over the pod network and brings network policy with it. The pod network has to match the one given to kubeadm init above."});
+  if (o.cni === "flannel") cp.push({c:"kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml",
+    d:"Flannel erwartet zwingend 10.244.0.0/16 als Pod-Netz. Flannel kennt keine NetworkPolicy — dafür braucht es später zusätzlich Calico oder Cilium.|Flannel insists on 10.244.0.0/16 as the pod network. Flannel has no network policy — that needs Calico or Cilium alongside it later."});
+
+  if (o.singleNode) cp.push({c:"kubectl taint nodes --all node-role.kubernetes.io/control-plane-",
+    d:"Nimmt den Taint weg, mit dem kubeadm normale Arbeitslast vom Hauptserver fernhält. Für einen Testcluster richtig, für Produktion nicht.|Removes the taint with which kubeadm keeps ordinary workloads off the control plane. Right for a test cluster, not for production."});
+
+  sec("Erster Hauptserver|First control-plane node", "cp", {
+    p:["Ab hier unterscheiden sich die Rechner. Diese Schritte laufen **nur auf dem ersten Hauptserver**.|From here the machines differ. These steps run **only on the first control-plane node**."],
+    items:cp,
+    r:o.ha ? [] : [{lvl:"warn", m:t("Ein einzelner Hauptserver ist keine Hochverfügbarkeit: Fällt er aus, ist die API weg und nichts lässt sich mehr ändern. Bereits laufende Pods laufen weiter, aber niemand ersetzt sie.|A single control-plane node is not high availability: if it fails the API is gone and nothing can be changed. Pods already running keep running, but nobody replaces them.")}]
+  });
+
+  /* --- weitere Hauptserver --- */
+  if (o.ha) sec("Weitere Hauptserver|Further control-plane nodes", "cp", {
+    p:["Auf dem zweiten und dritten Hauptserver — nicht auf den Workern.|On the second and third control-plane node — not on the workers."],
+    items:[
+      {c:"sudo kubeadm join " + api + ":6443 \\\n  --token <TOKEN> \\\n  --discovery-token-ca-cert-hash sha256:<HASH> \\\n  --control-plane --certificate-key <KEY>",
+       d:"Genau der Befehl, den kubeadm init ausgegeben hat — mit --control-plane und dem Zertifikatsschlüssel.|Exactly the command kubeadm init printed — with --control-plane and the certificate key."},
+      {c:"sudo kubeadm init phase upload-certs --upload-certs",
+       d:"Der Zertifikatsschlüssel läuft nach zwei Stunden ab. Dieser Befehl auf dem ersten Hauptserver erzeugt einen neuen.|The certificate key expires after two hours. This command on the first control-plane node creates a new one."}
+    ],
+    r:[{lvl:"warn", m:t("Drei Hauptserver, nicht zwei: etcd braucht eine Mehrheit. Mit zwei Knoten steht der Cluster, sobald einer ausfällt — schlechter als mit einem einzelnen.|Three control-plane nodes, not two: etcd needs a majority. With two nodes the cluster stops as soon as one fails — worse than with a single one.")}]
+  });
+
+  /* --- Worker --- */
+  sec("Auf jedem Worker|On every worker", "worker", {
+    p:[(o.workers ? "Auf allen " + o.workers + " Workern" : "Auf jedem Worker") + " — nach der Vorbereitung ganz oben, aber ohne die Schritte des Hauptservers.|" +
+       (o.workers ? "On all " + o.workers + " workers" : "On every worker") + " — after the preparation above, but without any of the control-plane steps."],
+    items:[
+      {c:"sudo kubeadm join " + api + ":6443 \\\n  --token <TOKEN> \\\n  --discovery-token-ca-cert-hash sha256:<HASH>",
+       d:"Der Befehl aus der Ausgabe von kubeadm init, ohne --control-plane.|The command from the kubeadm init output, without --control-plane."},
+      {c:"kubeadm token create --print-join-command",
+       d:"Auf dem Hauptserver ausführen, wenn die Ausgabe verloren ging: Das Token aus kubeadm init läuft nach 24 Stunden ab. Der Befehl gibt einen vollständigen, frischen Beitrittsbefehl aus.|Run on the control-plane node when the output is lost: the token from kubeadm init expires after 24 hours. This prints a complete, fresh join command."}
+    ],
+    r:[{lvl:"err", m:t("kubectl gehört nicht auf die Worker und die admin.conf schon gar nicht. Wer sie dorthin kopiert, gibt jedem mit Zugang zum Worker die volle Kontrolle über den Cluster.|kubectl does not belong on the workers and admin.conf certainly does not. Copying it there hands anyone with access to that worker full control of the cluster.")}]
+  });
+
+  /* --- Prüfen --- */
+  sec("Prüfen|Checking", "cp", {
+    p:["Auf dem Hauptserver, sobald alle Knoten beigetreten sind.|On the control-plane node, once every node has joined."],
+    items:[
+      {c:"kubectl get nodes -o wide",
+       d:"Alle Knoten müssen Ready sein. NotReady direkt nach dem Beitritt ist normal, solange das CNI seine Pods noch verteilt.|Every node has to be Ready. NotReady right after joining is normal while the CNI is still distributing its pods."},
+      {c:"kubectl get pods -A",
+       d:"CoreDNS ist der beste Anzeiger: Läuft es, funktioniert das Pod-Netz.|CoreDNS is the best indicator: if it runs, the pod network works."},
+      {c:"kubectl run probe --image=nginx:1.27-alpine --restart=Never --rm -it -- sh",
+       d:"Ein Pod von Hand, um den Weg von der Registry bis in den Container einmal zu gehen.|A pod by hand, to walk the path from the registry into the container once."}
+    ]
+  });
+
+  sec("Danach|Afterwards", "cp", {
+    p:["Ein frischer Cluster kann noch nichts von außen annehmen und keinen Speicher bereitstellen. Diese drei Dinge fehlen praktisch immer.|A fresh cluster can neither accept anything from outside nor provide storage. These three are missing practically every time."],
+    items:[
+      {c:"kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml",
+       d:"Ein Ingress-Controller, sonst bleibt jeder Ingress wirkungslos. Auf eigener Hardware ist zusätzlich MetalLB nötig, damit ein Service vom Typ LoadBalancer eine Adresse bekommt.|An ingress controller, otherwise every Ingress stays inert. On your own hardware you also need MetalLB so a LoadBalancer service gets an address."},
+      {c:"kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml",
+       d:"Ohne metrics-server liefert kubectl top nichts und ein HorizontalPodAutoscaler skaliert nie.|Without metrics-server, kubectl top returns nothing and a HorizontalPodAutoscaler never scales."},
+      {c:"# StorageClass: auf eigener Hardware etwa Longhorn oder der local-path-provisioner",
+       d:"Ohne StorageClass bleibt jedes PersistentVolumeClaim für immer Pending.|Without a storage class every PersistentVolumeClaim stays Pending forever."}
+    ],
+    r:[{lvl:"warn", m:t("Beim Upgrade immer nur eine Minor-Version auf einmal, und kubeadm zuerst. kubelet darf höchstens eine Minor-Version hinter dem API-Server liegen, niemals davor.|When upgrading, only one minor version at a time, and kubeadm first. The kubelet may trail the API server by at most one minor version, and must never lead it.")}]
+  });
+
+  return out;
+}
+
+let CLUSTER = {};
+
+const CLUSTER_ROLE = {
+  all:  "auf allen Knoten|on every node",
+  cp:   "nur Hauptserver|control plane only",
+  worker:"nur Worker|workers only"
+};
+
+function renderClusterFields(){
+  let h = "";
+  CLUSTER_FIELDS.filter(f => !SHORT || !f.adv).forEach(f => {
+    const v = CLUSTER[f.k] === undefined ? "" : CLUSTER[f.k];
+    const cls = f.half ? "f f--in" : "f";
+    const hint = f.hint ? '<span class="hint">' + esc(t(f.hint)) + "</span>" : "";
+    if (f.t === "bool"){
+      h += '<div class="f"><label class="check"><input type="checkbox" data-cl="' + f.k + '"' +
+        (f.structural ? ' data-clstruct="1"' : "") + (v ? " checked" : "") + "><span>" + esc(t(f.l)) + "</span></label>" + hint + "</div>";
+    } else if (f.t === "select"){
+      h += '<div class="' + cls + '"><label>' + esc(t(f.l)) + '</label><select data-cl="' + f.k + '"' +
+        (f.structural ? ' data-clstruct="1"' : "") + ">";
+      f.opts.forEach(op => { h += '<option value="' + esc(op[0]) + '"' +
+        (String(v) === op[0] ? " selected" : "") + ">" + esc(t(op[1])) + "</option>"; });
+      h += "</select>" + hint + "</div>";
+    } else {
+      /* Das Pod-Netz hängt am CNI — der Platzhalter muss mitziehen. */
+      const ph = f.k === "podCidr" ? CNI_CIDR[CLUSTER.cni || "cilium"] : (f.ph ? t(f.ph) : "");
+      h += '<div class="' + cls + '"><label>' + esc(t(f.l)) + '</label><input type="' +
+        (f.t === "number" ? "number" : "text") + '" data-cl="' + f.k + '" value="' + esc(v) +
+        '" placeholder="' + esc(ph) + '">' + hint + "</div>";
+    }
+  });
+  $("clusterFields").innerHTML = h;
+}
+
+function renderClusterOut(){
+  let h = "";
+  clusterGuide(CLUSTER).forEach((s, i) => {
+    h += '<div class="cstep"><p class="hgroup">' + String(i+1).padStart(2,"0") + " · " + esc(t(s.h)) +
+         '<span class="crole crole--' + s.role + '">' + esc(t(CLUSTER_ROLE[s.role])) + "</span></p>";
+    (s.p||[]).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
+    if ((s.r||[]).length)
+      h += '<div class="crisks">' + s.r.map(x =>
+        '<p class="crisk crisk--' + x.lvl + '"><b>' + (x.lvl === "err" ? "!" : "?") + "</b>" + esc(x.m) + "</p>").join("") + "</div>";
+    h += '<div class="wikiitems">' + (s.items||[]).map(it =>
+      '<div class="wikiitem"><button class="cmd cmd--big" data-cmd="' + esc(it.c) + '"><span>' +
+      esc(it.c) + "</span></button><p>" + mdInline(t(it.d)) + "</p></div>").join("") + "</div></div>";
+  });
+  $("clusterOut").innerHTML = h;
+}
+
+function clusterMarkdown(){
+  const o = clusterOpts(CLUSTER), de = LANG === "de";
+  let m = "# " + (de ? "Kubernetes-Cluster aufsetzen" : "Setting up a Kubernetes cluster") + "\n\n";
+  m += "| " + (de ? "Angabe" : "Setting") + " | " + (de ? "Wert" : "Value") + " |\n|---|---|\n";
+  [[de?"Version":"Version", "v" + o.version],
+   [de?"Betriebssystem":"Operating system", o.os === "apt" ? "Debian / Ubuntu" : "RHEL / Rocky"],
+   ["Runtime", o.runtime === "crio" ? "CRI-O" : "containerd"],
+   ["CNI", o.cni],
+   [de?"API-Adresse":"API address", o.endpoint || (de?"IP des ersten Hauptservers":"first control-plane node's IP")],
+   [de?"Hauptserver":"Control-plane nodes", o.ha ? "3" : "1"],
+   ["Worker", String(o.workers)],
+   [de?"Pod-Netz":"Pod network", o.podCidr]
+  ].forEach(r => { m += "| " + r[0] + " | `" + r[1] + "` |\n"; });
+  m += "\n";
+  clusterGuide(CLUSTER).forEach((s, i) => {
+    m += "## " + (i+1) + ". " + t(s.h) + " — " + t(CLUSTER_ROLE[s.role]) + "\n\n";
+    (s.p||[]).forEach(x => { m += t(x) + "\n\n"; });
+    (s.r||[]).forEach(x => { m += "> **" + (x.lvl === "err" ? "Achtung" : "Hinweis") + "** — " + x.m + "\n\n"; });
+    (s.items||[]).forEach(it => { m += "```sh\n" + it.c + "\n```\n\n" + t(it.d) + "\n\n"; });
+  });
+  return m;
+}
+
+function renderCluster(){ renderClusterFields(); renderClusterOut(); }
+
+$("clusterBtn").addEventListener("click", () => {
+  const p = $("clusterPanel");
+  p.hidden = !p.hidden;
+  if (!p.hidden) renderCluster();
+});
+$("clusterClose").addEventListener("click", () => { $("clusterPanel").hidden = true; });
+$("clusterFields").addEventListener("input", e => {
+  if (!e.target.dataset.cl) return;
+  CLUSTER[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+  renderClusterOut();
+});
+$("clusterFields").addEventListener("change", e => {
+  if (!e.target.dataset.cl) return;
+  CLUSTER[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+  if (e.target.dataset.clstruct) renderClusterFields();
+  renderClusterOut();
+});
+$("clusterOut").addEventListener("click", e => {
+  const b = e.target.closest("button[data-cmd]");
+  if (!b) return;
+  copyText(b.dataset.cmd);
+  const s = b.querySelector("span"), old = s.textContent;
+  s.textContent = t(UI.copied);
+  setTimeout(()=>{ s.textContent = old; }, 1000);
+});
+$("clusterMd").addEventListener("click", () => {
+  download(clusterMarkdown(), "cluster-installation.md", "text/markdown");
+});
 
 function searchIndex(){
   const idx = [];
@@ -4274,6 +4615,13 @@ function setLang(l){
     ? "Zusicherungen gegen Emitter, Ressourcen und Prüfungen. Nach eigenen Änderungen an dieser Datei ausführen — was hier rot wird, ist beim Bearbeiten kaputtgegangen."
     : "Assertions against the emitter, the resources and the checks. Run after editing this file yourself — whatever turns red here broke while you were changing it.";
   $("docBtn").textContent = l === "de" ? "doku" : "docs";
+  $("clusterBtn").textContent = l === "de" ? "Cluster" : "Cluster";
+  $("clusterEyebrow").textContent = l === "de" ? "Cluster aufsetzen" : "Set up a cluster";
+  $("clusterMd").textContent = l === "de" ? "Anleitung herunterladen" : "Download the guide";
+  $("clusterDesc").textContent = l === "de"
+    ? "Erzeugt eine Anleitung mit kubeadm, getrennt danach, was auf jedem Knoten, was nur auf dem Hauptserver und was nur auf den Workern zu tun ist. Klick kopiert den Befehl."
+    : "Builds a kubeadm guide, separated into what runs on every node, what only on the control plane and what only on the workers. Click copies the command.";
+  if (!$("clusterPanel").hidden) renderCluster();
   profileTexts();
   setWikiTab(WIKI_TAB);
   render();

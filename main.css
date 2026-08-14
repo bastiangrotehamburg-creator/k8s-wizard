@@ -577,3 +577,19 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   *,*::before,*::after{animation:none!important;transition:none!important}
   .rescard:hover,.btn:hover,.ctask:hover,.sresult:hover,.tbtn:hover{transform:none}
 }
+
+/* ---------- Cluster-Anleitung ---------- */
+.clusterout{margin-top:22px}
+.cstep{margin:0 0 30px;padding-top:18px;border-top:1px solid var(--brd)}
+.cstep:first-child{border-top:0;padding-top:0}
+.cstep .hgroup{display:flex;align-items:center;gap:10px;color:var(--accent);font-size:11.5px;margin-bottom:9px}
+.cstep p{font-size:12.5px;line-height:1.65;color:var(--ink-2);margin:0 0 11px;max-width:76ch}
+.crole{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:none;
+  padding:2px 9px;border-radius:99px;font-weight:600;
+}
+.crole--all{background:var(--accent-soft);color:var(--accent)}
+.crole--cp{background:var(--go-sh);color:var(--go-ink)}
+.crole--worker{background:var(--ok-bg);color:var(--ok)}
+.clusterout .cmd--big{white-space:pre;font-size:12px;line-height:1.6}
+.clusterout .wikiitem p{margin:0;color:var(--muted);font-size:12px}
