@@ -2415,7 +2415,11 @@ const KUBECTL = [
   {g:"Skalieren und Nodes|Scaling and nodes", items:[
     {c:"kubectl scale deploy/{app} --replicas=3 -n {ns}", d:"Ändert die Anzahl sofort. Genau wie set image weicht das vom Manifest ab.|Changes the count immediately. Just like set image this drifts from the manifest."},
     {c:"kubectl drain NODE --ignore-daemonsets --delete-emptydir-data", d:"Räumt einen Node für Wartung. Genau hier greift ein PodDisruptionBudget und bremst, wenn zu viele Replicas gleichzeitig gingen.|Clears a node for maintenance. This is exactly where a PodDisruptionBudget kicks in and slows things down if too many replicas would go at once."},
-    {c:"kubectl cordon NODE", d:"Node bekommt keine neuen Pods mehr, laufende bleiben. uncordon nimmt es zurück.|The node accepts no new pods while running ones stay. uncordon reverses it."}
+    {c:"kubectl cordon NODE", d:"Node bekommt keine neuen Pods mehr, laufende bleiben. uncordon nimmt es zurück.|The node accepts no new pods while running ones stay. uncordon reverses it."},
+    {c:"kubectl taint nodes NODE dedicated=gpu:NoSchedule", d:"Sperrt den Node für alles, was keine passende toleration mitbringt. Anders als cordon wirkt das gezielt: Wer den Taint toleriert, darf weiterhin darauf. So reserviert man Nodes für bestimmte Arbeitslasten.|Keeps everything off the node that does not carry a matching toleration. Unlike cordon this is selective: whoever tolerates the taint may still run there. That is how you reserve nodes for particular workloads."},
+    {c:"kubectl taint nodes NODE dedicated=gpu:NoExecute", d:"NoExecute wirft zusätzlich alles hinaus, was bereits läuft und den Taint nicht toleriert — sofort, nicht bei nächster Gelegenheit.|NoExecute additionally throws out whatever is already running and does not tolerate the taint — immediately, not at the next opportunity."},
+    {c:"kubectl taint nodes NODE dedicated-", d:"Das angehängte Minus entfernt den Taint. Ohne Effekt entfernt es alle Taints mit diesem Schlüssel. Vergisst man den Bindestrich, legt derselbe Befehl den Taint stattdessen an.|The trailing minus removes the taint. Without an effect it removes every taint with that key. Forget the hyphen and the same command adds the taint instead."},
+    {c:"kubectl get nodes -o custom-columns=NAME:.metadata.name,UNSCHEDULABLE:.spec.unschedulable,TAINTS:.spec.taints[*].key", d:"Zeigt auf einen Blick, welcher Node gesperrt ist und welche Taints tatsächlich gesetzt sind. Bleibt ein Pod Pending, steht die Antwort oft in dieser Tabelle.|Shows at a glance which node is cordoned and which taints are actually set. If a pod stays Pending, the answer is often in this table."}
   ]},
   {g:"Kontext und Namespace|Context and namespace", items:[
     {c:"kubectl config get-contexts", d:"Welche Cluster konfiguriert sind und welcher gerade aktiv ist. Der Blick, der einen Apply im falschen Cluster verhindert.|Which clusters are configured and which is active. The check that prevents applying to the wrong cluster."},
@@ -2817,6 +2821,95 @@ const CMDTASKS = [
   const r = [{lvl:"warn", m:t("Wirkt sofort, weicht danach aber vom Manifest ab. Beim nächsten Apply gilt wieder der Wert aus der Datei.|Takes effect immediately but then drifts from the manifest. The next apply restores the value from the file.")}];
   if (String(o.replicas) === "0") r.push({lvl:"warn", m:t("Null Replicas heißt: Die Anwendung ist weg, aber das Deployment bleibt bestehen.|Zero replicas means the app is gone while the deployment stays.")});
   return {c:c, f:[], r:r};
+ }},
+
+{id:"node", l:"Nodes", d:"Sperren, räumen, Taints setzen|Cordon, drain, taints",
+ fields:[
+  {k:"action", t:"select", l:"Aktion|Action", structural:true,
+   opts:[["taint","taint setzen — Node reservieren|add a taint — reserve the node"],
+         ["untaint","taint entfernen|remove a taint"],
+         ["show","Taints und Zustand auflisten|list taints and state"],
+         ["cordon","cordon — keine neuen Pods|cordon — no new pods"],
+         ["uncordon","uncordon — wieder freigeben|uncordon — allow scheduling again"],
+         ["drain","drain — für Wartung räumen|drain — clear for maintenance"],
+         ["label","label — Node beschriften|label — label the node"]]},
+  {k:"name", t:"text", l:"Node", ph:"worker-01", half:true, when:o=>o.action!=="show"},
+  {k:"selector", t:"text", l:"…oder Label-Filter|…or label filter", ph:"disktype=ssd", half:true,
+   when:o=>!o.action||o.action==="taint"||o.action==="untaint"||o.action==="label"},
+  {k:"key", t:"text", l:"Schlüssel|Key", ph:"dedicated", half:true,
+   when:o=>!o.action||o.action==="taint"||o.action==="untaint"},
+  {k:"value", t:"text", l:"Wert|Value", ph:"gpu", half:true, when:o=>!o.action||o.action==="taint"},
+  {k:"effect", t:"select", l:"effect", when:o=>!o.action||o.action==="taint"||o.action==="untaint",
+   opts:[["NoSchedule","NoSchedule — keine neuen Pods|NoSchedule — no new pods"],
+         ["PreferNoSchedule","PreferNoSchedule — möglichst nicht|PreferNoSchedule — avoid if possible"],
+         ["NoExecute","NoExecute — auch laufende Pods hinaus|NoExecute — evict running pods too"],
+         ["","jeder Effekt — nur beim Entfernen|any effect — removal only"]]},
+  {k:"label", t:"text", l:"Label", ph:"disktype=ssd", when:o=>o.action==="label"},
+  {k:"overwrite", t:"bool", l:"--overwrite", when:o=>o.action==="label"},
+  {k:"ignoreDS", t:"bool", l:"--ignore-daemonsets", when:o=>o.action==="drain"},
+  {k:"emptyDir", t:"bool", l:"--delete-emptydir-data", when:o=>o.action==="drain"},
+  {k:"force", t:"bool", l:"--force", when:o=>o.action==="drain"},
+  {k:"timeout", t:"text", l:"--timeout", ph:"5m", half:true, when:o=>o.action==="drain"}
+ ],
+ build(o){
+  const a = o.action || "taint";
+  const byLabel = o.selector && (a === "taint" || a === "untaint" || a === "label");
+  const tgt = byLabel ? " -l " + o.selector : " " + (o.name || "NODE");
+  const eff = o.effect === undefined ? "NoSchedule" : o.effect;
+  const key = o.key || "dedicated";
+  let c = "";
+  const f = [], r = [];
+
+  if (a === "taint"){
+    c = "kubectl taint nodes" + ctxF() + tgt + " " + key + (o.value ? "=" + o.value : "") + ":" + (eff || "NoSchedule");
+    f.push(["key=value:Effect", "Der Taint besteht aus Schlüssel, optionalem Wert und Effekt. Auf den Node darf nur noch, wer in seiner toleration genau dazu passt — der Taint ist die Absage des Nodes, die toleration die Erlaubnis des Pods.|A taint is a key, an optional value and an effect. Only pods whose toleration matches exactly may still land there — the taint is the node's refusal, the toleration the pod's permission."]);
+    f.push(["nodeSelector", "Ein Taint hält andere fern, zieht aber niemanden an. Damit die gewünschten Pods auch tatsächlich hier landen, braucht es zusätzlich nodeSelector oder nodeAffinity auf ein Label des Nodes.|A taint keeps others away but attracts nobody. To get the intended pods to actually land here you also need a nodeSelector or nodeAffinity on one of the node's labels."]);
+    if (eff === "NoExecute") r.push({lvl:"err", m:t("NoExecute wirft sofort alles hinaus, was bereits läuft und den Taint nicht toleriert — auch mitten im Betrieb. Für ein geplantes Räumen ist drain der richtige Befehl.|NoExecute immediately throws out everything already running that does not tolerate the taint — in the middle of operation too. For a planned evacuation, drain is the right command.")});
+    else r.push({lvl:"warn", m:t("Ab jetzt kommt kein Pod ohne passende toleration mehr auf diesen Node. Bereits laufende bleiben unberührt.|From now on no pod without a matching toleration lands on this node. Those already running stay untouched.")});
+    if (byLabel) r.push({lvl:"warn", m:t("Mit -l trifft es jeden passenden Node auf einmal. Vorher mit kubectl get nodes -l und demselben Filter prüfen.|With -l this hits every matching node at once. Check first with kubectl get nodes -l and the same filter.")});
+  }
+
+  if (a === "untaint"){
+    c = "kubectl taint nodes" + ctxF() + tgt + " " + key + (eff ? ":" + eff : "") + "-";
+    f.push(["-", "Das angehängte Minus entfernt. Vergisst man es, legt derselbe Befehl den Taint stattdessen an.|The trailing minus removes. Forget it and the same command adds the taint instead."]);
+    if (!eff) f.push(["ohne Effekt|without an effect", "Entfernt alle Taints mit diesem Schlüssel, unabhängig vom Effekt.|Removes every taint with that key, whatever its effect."]);
+  }
+
+  if (a === "show"){
+    c = "kubectl get nodes" + ctxF() +
+        " -o custom-columns=NAME:.metadata.name,UNSCHEDULABLE:.spec.unschedulable,TAINTS:.spec.taints[*].key,VERSION:.status.nodeInfo.kubeletVersion";
+    f.push(["custom-columns", "Gesperrte Nodes und gesetzte Taints in einer Tabelle. Bleibt ein Pod Pending, ohne dass Ressourcen fehlen, steht die Erklärung meistens hier.|Cordoned nodes and the taints in place, in one table. If a pod stays Pending without lacking resources, the explanation is usually here."]);
+  }
+
+  if (a === "cordon" || a === "uncordon"){
+    c = "kubectl " + a + ctxF() + " " + (o.name || "NODE");
+    if (a === "cordon"){
+      f.push(["cordon", "Setzt unschedulable auf dem Node. Neue Pods kommen nicht mehr dazu.|Sets unschedulable on the node. No new pods are added."]);
+      r.push({lvl:"warn", m:t("Laufende Pods bleiben, wo sie sind. Wer sie wirklich wegbekommen will, braucht drain.|Running pods stay where they are. To actually move them you need drain.")});
+    } else f.push(["uncordon", "Nimmt die Sperre zurück. Taints bleiben davon unberührt — die müssen einzeln entfernt werden.|Lifts the block. Taints are unaffected and have to be removed separately."]);
+  }
+
+  if (a === "drain"){
+    c = "kubectl drain" + ctxF() + " " + (o.name || "NODE");
+    if (o.ignoreDS) c += " --ignore-daemonsets";
+    if (o.emptyDir) c += " --delete-emptydir-data";
+    if (o.force) c += " --force";
+    if (o.timeout) c += " --timeout=" + o.timeout;
+    f.push(["drain", "Sperrt den Node und verschiebt anschließend alle Pods. Das ist der Befehl vor jeder Wartung, nicht cordon allein.|Cordons the node and then moves every pod off it. This is the command before any maintenance, not cordon on its own."]);
+    if (!o.ignoreDS) r.push({lvl:"warn", m:t("DaemonSet-Pods lassen sich nicht evakuieren — ohne --ignore-daemonsets bricht drain gleich zu Beginn ab.|DaemonSet pods cannot be evacuated — without --ignore-daemonsets, drain aborts right at the start.")});
+    if (o.emptyDir) r.push({lvl:"warn", m:t("Der Inhalt aller emptyDir-Volumes auf diesem Node ist danach weg. Für Caches egal, für alles andere vorher prüfen.|The contents of every emptyDir volume on this node are gone afterwards. Irrelevant for caches, worth checking for anything else.")});
+    if (o.force) r.push({lvl:"err", m:t("--force löscht auch Pods ohne Controller. Ein einzelner Pod wird nirgends neu angelegt — er ist danach schlicht weg.|--force also deletes pods without a controller. A single pod is not recreated anywhere — it is simply gone afterwards.")});
+    r.push({lvl:"warn", m:t("Hier greift ein PodDisruptionBudget: Zu streng gesetzt, wartet drain endlos, statt Replicas gleichzeitig wegzunehmen.|This is where a PodDisruptionBudget applies: set too strictly, drain waits forever instead of taking replicas away at once.")});
+  }
+
+  if (a === "label"){
+    c = "kubectl label nodes" + ctxF() + tgt + " " + (o.label || "disktype=ssd");
+    if (o.overwrite) c += " --overwrite";
+    f.push(["label", "Auf diese Labels zeigen nodeSelector und nodeAffinity in den Manifesten. Ein Taint hält fern, ein Label zieht an — für reservierte Nodes braucht es beides.|nodeSelector and nodeAffinity in your manifests point at these labels. A taint keeps away, a label attracts — reserved nodes need both."]);
+    if (!o.overwrite) r.push({lvl:"warn", m:t("Ein bereits vorhandenes Label ändert sich nur mit --overwrite, sonst bricht der Befehl ab.|An existing label only changes with --overwrite, otherwise the command fails.")});
+  }
+
+  return {c:c, f:f, r:r};
  }},
 
 {id:"delete", l:"Löschen|Delete", d:"Vorsichtig|Carefully",
@@ -3420,6 +3513,41 @@ function runSelfTests(){
     regServer:"h.de", regUser:"u", regPass:"p"});
   ok("Secret: auth ist base64 von user:pass",
     has(sec.stringData[".dockerconfigjson"], b64("u:p")), sec.stringData[".dockerconfigjson"]);
+
+  /* --- Befehls-Assistent: Nodes und Taints --- */
+  const nodeTask = CMDTASKS.filter(x => x.id === "node")[0];
+  const keepCtx = CMD.ctx;
+  CMD.ctx = "";
+  const nodeCmd = o => nodeTask.build(o).c;
+  ok("taint: key=value:Effect",
+    nodeCmd({action:"taint", name:"worker-01", key:"dedicated", value:"gpu", effect:"NoSchedule"}) ===
+    "kubectl taint nodes worker-01 dedicated=gpu:NoSchedule",
+    nodeCmd({action:"taint", name:"worker-01", key:"dedicated", value:"gpu", effect:"NoSchedule"}));
+  ok("taint ohne Wert lässt das Gleichheitszeichen weg",
+    nodeCmd({action:"taint", name:"n1", key:"gpu", effect:"NoSchedule"}) === "kubectl taint nodes n1 gpu:NoSchedule",
+    nodeCmd({action:"taint", name:"n1", key:"gpu", effect:"NoSchedule"}));
+  ok("taint über Label-Filter statt Namen",
+    nodeCmd({action:"taint", name:"n1", selector:"disktype=ssd", key:"gpu", effect:"NoSchedule"})
+      .indexOf(" -l disktype=ssd ") !== -1, "");
+  ok("NoExecute ist ein Fehlerhinweis",
+    nodeTask.build({action:"taint", name:"n1", key:"gpu", effect:"NoExecute"}).r.some(x => x.lvl === "err"), "");
+  ok("untaint hängt das Minus an",
+    nodeCmd({action:"untaint", name:"n1", key:"dedicated", effect:"NoSchedule"}) ===
+    "kubectl taint nodes n1 dedicated:NoSchedule-",
+    nodeCmd({action:"untaint", name:"n1", key:"dedicated", effect:"NoSchedule"}));
+  ok("untaint ohne Effekt entfernt den ganzen Schlüssel",
+    nodeCmd({action:"untaint", name:"n1", key:"dedicated", effect:""}) === "kubectl taint nodes n1 dedicated-",
+    nodeCmd({action:"untaint", name:"n1", key:"dedicated", effect:""}));
+  ok("drain ohne --ignore-daemonsets wird gewarnt",
+    nodeTask.build({action:"drain", name:"n1"}).r.some(x => x.lvl === "warn"), "");
+  ok("drain --force ist ein Fehlerhinweis",
+    nodeTask.build({action:"drain", name:"n1", ignoreDS:true, force:true}).r.some(x => x.lvl === "err"), "");
+  ok("Node-Befehle tragen kein -n",
+    ["taint","untaint","show","cordon","drain","label"]
+      .every(a => nodeCmd({action:a, name:"n1", ns:"prod", key:"k"}).indexOf(" -n ") === -1), "");
+  ok("Voreinstellung ohne Auswahl ist ein gültiger taint",
+    nodeCmd({}) === "kubectl taint nodes NODE dedicated:NoSchedule", nodeCmd({}));
+  CMD.ctx = keepCtx;
 
   /* --- Init-Container und Sidecars --- */
   const withInit = RES.Deployment.build({name:"api", image:"nginx:1.27", cpuLim:"1", memLim:"1Gi",
