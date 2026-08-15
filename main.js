@@ -4075,6 +4075,9 @@ function runSelfTests(){
   ok("Der MetalLB-Bereich wird übernommen",
     allCmds({lbRange:"10.0.0.50-10.0.0.60"}).indexOf("10.0.0.50-10.0.0.60") !== -1 &&
     allCmds({}).indexOf("192.168.178.240-192.168.178.250") !== -1, "");
+  ok("Der Prüfschritt nennt den Grund für NotReady",
+    allCmds({}).indexOf('.status.conditions[?(@.type=="Ready")]') !== -1 &&
+    allCmds({}).indexOf(".spec.podCIDR") !== -1, "");
   ok("Es gibt einen Abschnitt zum Neuaufsetzen, mit Reihenfolge",
     guideOf({}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1) &&
       s.p.some(x => t(x).indexOf("von aussen nach innen") !== -1 || t(x).indexOf("outside in") !== -1)), "");
@@ -4457,6 +4460,11 @@ function clusterGuide(raw){
        d:"Alle Knoten müssen Ready sein. NotReady direkt nach dem Beitritt ist normal, solange das CNI seine Pods noch verteilt.|Every node has to be Ready. NotReady right after joining is normal while the CNI is still distributing its pods."},
       {c:"kubectl get pods -A",
        d:"CoreDNS ist der beste Anzeiger: Läuft es, funktioniert das Pod-Netz.|CoreDNS is the best indicator: if it runs, the pod network works."},
+      {c:"kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\": \"}" +
+         "{range .status.conditions[?(@.type==\"Ready\")]}{.message}{end}{\"\\n\"}{end}'",
+       d:"Sagt im Klartext, **warum** ein Knoten NotReady ist, statt es raten zu lassen. Steht dort *cni plugin not initialized*, fehlt schlicht das Netzwerk-Plugin — der Normalzustand direkt nach dem Beitritt. Steht etwas anderes da, ist es auch etwas anderes.|Says in plain words **why** a node is NotReady instead of leaving you guessing. If it reads *cni plugin not initialized*, the network plugin is simply missing — the normal state right after joining. If it says something else, it is something else."},
+      {c:"kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}{.spec.podCIDR}{\"\\n\"}{end}'",
+       d:"Jeder Knoten muss ein eigenes Teilnetz haben — bei einem /16 als Pod-Netz also 10.244.0.0/24, 10.244.1.0/24 und so weiter. Bleibt die Spalte bei einem Knoten leer, war das Pod-Netz zu klein gewaehlt.|Every node has to have its own subnet — with a /16 as the pod network that means 10.244.0.0/24, 10.244.1.0/24 and so on. If the column stays empty for a node, the pod network was chosen too small."},
       {c:"kubectl run probe --image=nginx:1.27-alpine --restart=Never --rm -it -- sh",
        d:"Ein Pod von Hand, um den Weg von der Registry bis in den Container einmal zu gehen.|A pod by hand, to walk the path from the registry into the container once."}
     ]
