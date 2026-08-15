@@ -4033,9 +4033,8 @@ function runSelfTests(){
   ok("Beitrittsbefehle nennen bei Hochverfügbarkeit keine Node-IP",
     allCmds({ha:true}).indexOf("IP-DES-HAUPTSERVERS") === -1, "");
   ok("Ein Abschnitt hilft aus dem fehlenden Endpoint heraus",
-    guideOf({ha:true}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1) &&
-      s.items.some(i => i.c.indexOf("controlPlaneEndpoint") !== -1)) &&
-    !guideOf({}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1)), "");
+    guideOf({ha:true}).some(s => s.items.some(i => i.c.indexOf("controlPlaneEndpoint") !== -1)) &&
+    !guideOf({}).some(s => s.items.some(i => i.c.indexOf("controlPlaneEndpoint") !== -1)), "");
   ok("Zertifikatsschlüssel und Token stehen zusammen in einem Block",
     guideOf({ha:true}).some(s => s.items.some(i =>
       i.c.indexOf("upload-certs") !== -1 && i.c.indexOf("--print-join-command") !== -1)), "");
@@ -4076,6 +4075,13 @@ function runSelfTests(){
   ok("Der MetalLB-Bereich wird übernommen",
     allCmds({lbRange:"10.0.0.50-10.0.0.60"}).indexOf("10.0.0.50-10.0.0.60") !== -1 &&
     allCmds({}).indexOf("192.168.178.240-192.168.178.250") !== -1, "");
+  ok("Es gibt einen Abschnitt zum Neuaufsetzen, mit Reihenfolge",
+    guideOf({}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1) &&
+      s.p.some(x => t(x).indexOf("von aussen nach innen") !== -1 || t(x).indexOf("outside in") !== -1)), "");
+  ok("Der Neuaufbau warnt vor dem Verlust von etcd",
+    guideOf({}).some(s => (s.r||[]).some(x => x.lvl === "err" && x.m.indexOf("etcd") !== -1)), "");
+  ok("Die Netzwerkreste werden erwähnt, die reset liegen lässt",
+    allCmds({}).indexOf("ip link delete cni0") !== -1, "");
   ok("Der Funktionstest hat eine Sprosse ohne MetalLB",
     allCmds({}).indexOf('"type":"NodePort"') !== -1, "");
   ok("Für eine vergebene, aber stumme Adresse gibt es eine Diagnose",
@@ -4423,7 +4429,7 @@ function clusterGuide(raw){
       {c:"kubectl -n kube-system get cm kubeadm-config -o yaml | grep -i controlPlaneEndpoint",
        d:"Zuerst nachsehen. Kommt keine Zeile zurück, fehlt der Endpoint — dann gilt der Rest dieses Abschnitts.|Check first. If no line comes back, the endpoint is missing and the rest of this section applies."},
       {c:"sudo kubeadm reset -f\nsudo rm -rf /etc/cni/net.d $HOME/.kube/config",
-       d:"Auf **jedem** Knoten, der schon beigetreten ist, und zuletzt auf dem ersten Hauptserver. Bei einem Cluster, in dem noch nichts läuft, ist das der ehrlichste Weg zurück auf Anfang.|On **every** node that has already joined, and last on the first control-plane node. For a cluster with nothing running on it yet, this is the honest way back to the start."},
+       d:"Auf **jedem** Knoten, der schon beigetreten ist. Reihenfolge und Nacharbeiten stehen im letzten Abschnitt **Neu aufsetzen**.|On **every** node that has already joined. The order and the follow-up work are in the last section, **Starting over**."},
       {c:"echo '" + (o.endpoint ? "192.168.0.10 " + o.endpoint : "192.168.0.10 k8s-api.firma.de") + "' | sudo tee -a /etc/hosts",
        d:"Auf allen Knoten, solange es keinen DNS-Eintrag gibt: Die IP ist vorerst der erste Hauptserver. Später zeigt derselbe Name auf den Lastverteiler oder eine VIP — und weil sich nur die Auflösung ändert, bleiben die Zertifikate gültig.|On every node as long as there is no DNS record: the IP is the first control-plane node for now. Later the same name points at the load balancer or a VIP — and because only the resolution changes, the certificates stay valid."},
       {c:initCmd,
@@ -4510,6 +4516,23 @@ function clusterGuide(raw){
        d:"Ohne StorageClass bleibt jedes PersistentVolumeClaim für immer Pending.|Without a storage class every PersistentVolumeClaim stays Pending forever."}
     ],
     r:[{lvl:"warn", m:t("Beim Upgrade immer nur eine Minor-Version auf einmal, und kubeadm zuerst. kubelet darf höchstens eine Minor-Version hinter dem API-Server liegen, niemals davor.|When upgrading, only one minor version at a time, and kubeadm first. The kubelet may trail the API server by at most one minor version, and must never lead it.")}]
+  });
+
+  sec("Neu aufsetzen|Starting over", "all", {
+    p:["Manches laesst sich nachtraeglich nicht mehr aendern: das Pod-Netz, der controlPlaneEndpoint, das Service-Netz. Bei einem Cluster, auf dem noch nichts Produktives liegt, ist der Neuanfang schneller und sicherer als jede Reparatur.|Some things cannot be changed afterwards: the pod network, the controlPlaneEndpoint, the service network. On a cluster with nothing productive on it, starting over is faster and safer than any repair.",
+       "**Die Reihenfolge ist wichtig: von aussen nach innen.** Erst alle Worker, dann die weiteren Hauptserver, zuletzt der erste Hauptserver. Wer den ersten Hauptserver zuerst zuruecksetzt, nimmt allen anderen die API — deren reset laeuft dann zwar durch, kann sich aber nicht mehr sauber aus dem Cluster abmelden.|**The order matters: from the outside in.** First all workers, then the further control-plane nodes, and the first control-plane node last. Resetting the first control-plane node first takes the API away from everyone else — their reset still runs, but can no longer deregister cleanly."],
+    items:[
+      {c:"kubectl get nodes -o wide",
+       d:"Bestandsaufnahme auf dem Hauptserver: Welche Knoten sind ueberhaupt beigetreten? Genau die muessen zurueckgesetzt werden, in der Reihenfolge oben.|Take stock on the control-plane node: which nodes have actually joined? Exactly those need resetting, in the order above."},
+      {c:"# auf jedem Knoten, Worker zuerst, erster Hauptserver zuletzt\nsudo kubeadm reset -f\nsudo rm -rf /etc/cni/net.d /etc/kubernetes $HOME/.kube",
+       d:"Derselbe Befehl auf jeder Maschine. Auf einem Hauptserver loescht er zusaetzlich das etcd-Verzeichnis — damit sind **alle** Objekte des Clusters weg, nicht nur die Konfiguration.|The same command on every machine. On a control-plane node it also deletes the etcd directory — which means **every** object in the cluster is gone, not just the configuration."},
+      {c:"sudo ip link delete cni0 2>/dev/null\nsudo ip link delete flannel.1 2>/dev/null\nsudo ip link delete cilium_host 2>/dev/null\nsudo iptables -F && sudo iptables -t nat -F && sudo iptables -t mangle -F\nsudo systemctl restart containerd",
+       d:"kubeadm reset raeumt die Netzwerkreste **nicht** mit weg: Bruecken, VXLAN-Geraete und iptables-Regeln des CNI bleiben liegen und stoeren den naechsten Aufbau. Wer sichergehen will, startet den Knoten stattdessen einfach neu — das erledigt dasselbe zuverlaessiger.|kubeadm reset does **not** clean up the network leftovers: the CNI's bridges, VXLAN devices and iptables rules stay behind and disturb the next setup. If you want to be sure, simply reboot the node instead — that does the same thing more reliably."},
+      {c:"getent hosts " + (o.endpoint || "k8s-api.firma.de"),
+       d:"Vor dem Neuaufbau auf **allen** Knoten pruefen: Loest die API-Adresse auf? Ein Eintrag in /etc/hosts ueberlebt den reset, ein fehlender faellt aber erst beim Beitritt auf.|Check on **every** node before rebuilding: does the API address resolve? An entry in /etc/hosts survives the reset, but a missing one only shows up when joining."}
+    ],
+    r:[{lvl:"err", m:t("Auf dem ersten Hauptserver loescht der reset etcd und damit den gesamten Clusterinhalt: alle Deployments, Secrets, ConfigMaps, PVC-Objekte. Was du behalten willst, vorher mit kubectl get -A -o yaml sichern.|On the first control-plane node the reset deletes etcd and with it the entire cluster content: all deployments, secrets, ConfigMaps, PVC objects. Back up whatever you want to keep with kubectl get -A -o yaml first.")},
+       {lvl:"warn", m:t("Danach von vorn: erst der erste Hauptserver mit kubeadm init, dann das CNI genau einmal, dann die weiteren Hauptserver, zuletzt die Worker. Das CNI gehoert nur auf den ersten Hauptserver — es gilt clusterweit und wird nicht je Knoten angewendet.|Then start from the top: first the initial control-plane node with kubeadm init, then the CNI exactly once, then the further control-plane nodes, and the workers last. The CNI belongs on the first control-plane node only — it applies cluster-wide and is not applied per node.")}]
   });
 
   return out;
