@@ -4065,6 +4065,19 @@ function runSelfTests(){
     guideOf({}).some(s => (s.r||[]).some(x => x.m.indexOf("skip-ca-verification") !== -1)), "");
   ok("Worker treten ohne --control-plane bei",
     guideOf({}).filter(s => s.role === "worker")[0].items[0].c.indexOf("--control-plane") === -1, "");
+  ok("Der init-Befehl nagelt die Version nicht fest",
+    allCmds({}).indexOf("--kubernetes-version") === -1, "");
+  ok("Vor dem init werden die installierten Versionen geprüft",
+    guideOf({}).some(s => s.role === "all" && s.items.some(i =>
+      i.c.indexOf("kubeadm version") !== -1 && i.c.indexOf("kubelet --version") !== -1)), "");
+  ok("Ein zu kleines Pod-Netz ist ein Fehler",
+    guideOf({podCidr:"192.168.178.0/24"}).some(s => (s.r||[]).some(x =>
+      x.lvl === "err" && x.m.indexOf("/24") !== -1)) &&
+    !guideOf({podCidr:"10.244.0.0/16"}).some(s => (s.r||[]).some(x =>
+      x.lvl === "err" && x.m.indexOf("zu klein") !== -1)), "");
+  ok("Vor 192.168 als Pod-Netz wird gewarnt",
+    guideOf({cni:"calico"}).some(s => (s.r||[]).some(x => x.m.indexOf("192.168") !== -1)) &&
+    !guideOf({cni:"flannel"}).some(s => (s.r||[]).some(x => x.m.indexOf("192.168") !== -1)), "");
   ok("Paketquelle folgt der Version",
     allCmds({version:"1.33"}).indexOf("stable:/v1.33/") !== -1 &&
     allCmds({version:"v1.33"}).indexOf("stable:/v1.33/") !== -1, "");
@@ -4269,6 +4282,9 @@ function clusterGuide(raw){
     : {c:"cat <<'EOF' | sudo tee /etc/yum.repos.d/kubernetes.repo\n[kubernetes]\nname=Kubernetes\nbaseurl=https://pkgs.k8s.io/core:/stable:/v" + o.version + "/rpm/\nenabled=1\ngpgcheck=1\ngpgkey=https://pkgs.k8s.io/core:/stable:/v" + o.version + "/rpm/repodata/repomd.xml.key\nexclude=kubelet kubeadm kubectl cri-tools kubernetes-cni\nEOF\nsudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes\nsudo systemctl enable --now kubelet",
        d:"exclude in der Repo-Datei hält die Pakete von einem beiläufigen dnf update fern.|The exclude line in the repo file keeps the packages away from a casual dnf update."});
 
+  prep.push({c:"kubeadm version -o short\nkubelet --version\nip -4 addr show | grep 'inet '",
+    d:"Vor dem Weitermachen pruefen. Die ersten beiden Zeilen muessen dieselbe Minor-Version melden — sonst bricht der naechste Schritt mit *the kubelet version is higher than the control plane version* ab. Und die IP-Adressen aus der dritten Zeile duerfen sich **nicht** mit dem Pod-Netz ueberschneiden.|Check before moving on. The first two lines have to report the same minor version — otherwise the next step aborts with *the kubelet version is higher than the control plane version*. And the addresses from the third line must **not** overlap the pod network."});
+
   sec("Vorbereitung|Preparation", "all", {
     p:["Diese Schritte laufen unverändert auf **jedem** Rechner — Hauptserver wie Worker. Am schnellsten geht es, wenn du sie parallel auf allen Knoten ausführst.|These steps run identically on **every** machine — control plane and workers alike. Fastest is to run them on all nodes in parallel."],
     items:prep,
@@ -4289,17 +4305,26 @@ function clusterGuide(raw){
     ]
   });
 
+  /* Ein /24 reicht fuer einen Node: kubeadm gibt jedem Knoten standardmaessig ein /24. */
+  const prefix = (/\/(\d{1,2})\s*$/.exec(o.podCidr) || [])[1];
+  const cidrRisk = [];
+  if (prefix !== undefined && +prefix >= 24)
+    cidrRisk.push({lvl:"err", m:t("Das Pod-Netz " + o.podCidr + " ist zu klein: kubeadm teilt jedem Knoten ein eigenes /24 zu, also reicht ein /24 fuer genau einen Node — jeder weitere bekommt gar kein Pod-Netz. Ueblich ist ein /16.|The pod network " + o.podCidr + " is too small: kubeadm assigns each node its own /24, so a /24 covers exactly one node — every further node gets no pod network at all. A /16 is the usual choice.")});
+  else if (prefix !== undefined && +prefix > 20)
+    cidrRisk.push({lvl:"warn", m:t("Das Pod-Netz " + o.podCidr + " ist knapp bemessen: Jeder Knoten belegt daraus ein /24.|The pod network " + o.podCidr + " is tight: every node takes a /24 out of it.")});
+  if (/^192\.168\./.test(o.podCidr))
+    cidrRisk.push({lvl:"warn", m:t("192.168.x ist der uebliche Bereich von Heim- und Bueronetzen — und zugleich Calicos Vorgabe. Ueberschneidet er sich mit dem Netz der Knoten, kollidieren Pod-Adressen mit echten Geraeten, und die Fehlersuche fuehrt weit in die Irre. Vorher mit ip -4 addr vergleichen und im Zweifel 10.244.0.0/16 nehmen.|192.168.x is the usual range for home and office networks — and at the same time Calico's default. If it overlaps the nodes' network, pod addresses collide with real devices and troubleshooting leads far astray. Compare with ip -4 addr first and use 10.244.0.0/16 when in doubt.")});
+
   /* --- erster Hauptserver --- */
   const initCmd = ["sudo kubeadm init",
     "  --pod-network-cidr=" + o.podCidr,
     o.svcCidr ? "  --service-cidr=" + o.svcCidr : "",
     (o.endpoint || o.ha) ? "  --control-plane-endpoint=" + api + ":6443" : "",
-    o.ha ? "  --upload-certs" : "",
-    "  --kubernetes-version=v" + o.version + ".0"
+    o.ha ? "  --upload-certs" : ""
   ].filter(Boolean).join(" \\\n");
 
   const cp = [{c:initCmd,
-    d:"Legt etcd, API-Server, Controller-Manager und Scheduler an. Am Ende gibt der Befehl die Beitrittsbefehle aus — **diese Ausgabe aufheben**, sie enthält Token und Prüfsumme.|Creates etcd, the API server, the controller manager and the scheduler. At the end it prints the join commands — **keep that output**, it contains the token and the checksum."}];
+    d:"Ohne --kubernetes-version, mit Absicht: kubeadm nimmt dann genau die Version des installierten kubeadm — die aus der Paketquelle von oben. Eine Version von Hand einzutragen fuehrt zuverlaessig zu \"the kubelet version is higher than the control plane version\". Legt etcd, API-Server, Controller-Manager und Scheduler an. Am Ende gibt der Befehl die Beitrittsbefehle aus — **diese Ausgabe aufheben**, sie enthält Token und Prüfsumme.|Deliberately without --kubernetes-version: kubeadm then uses exactly the version of the installed kubeadm — the one from the repository above. Entering a version by hand reliably produces \"the kubelet version is higher than the control plane version\". Creates etcd, the API server, the controller manager and the scheduler. At the end it prints the join commands — **keep that output**, it contains the token and the checksum."}];
   cp.push({c:"mkdir -p $HOME/.kube\nsudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config\nsudo chown $(id -u):$(id -g) $HOME/.kube/config",
     d:"Erst danach funktioniert kubectl als normaler Benutzer.|Only after this does kubectl work as an ordinary user."});
 
@@ -4316,7 +4341,7 @@ function clusterGuide(raw){
   sec("Erster Hauptserver|First control-plane node", "cp", {
     p:["Ab hier unterscheiden sich die Rechner. Diese Schritte laufen **nur auf dem ersten Hauptserver**.|From here the machines differ. These steps run **only on the first control-plane node**."],
     items:cp,
-    r:(noEndpoint ? [{lvl:"err", m:t("Fuer mehrere Hauptserver ist --control-plane-endpoint zwingend. Ohne ihn schreibt kubeadm keinen controlPlaneEndpoint in die Cluster-Konfiguration, und jeder weitere Hauptserver scheitert an der Meldung unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Nachtraeglich aendern heisst im Zweifel: Cluster zuruecksetzen und neu aufsetzen. Trag die Adresse oben ein, bevor du anfaengst.|For several control-plane nodes, --control-plane-endpoint is mandatory. Without it kubeadm writes no controlPlaneEndpoint into the cluster configuration, and every further control-plane node fails with unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Changing it afterwards usually means resetting the cluster and starting over. Enter the address above before you begin.")}] : [])
+    r:cidrRisk.concat(noEndpoint ? [{lvl:"err", m:t("Fuer mehrere Hauptserver ist --control-plane-endpoint zwingend. Ohne ihn schreibt kubeadm keinen controlPlaneEndpoint in die Cluster-Konfiguration, und jeder weitere Hauptserver scheitert an der Meldung unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Nachtraeglich aendern heisst im Zweifel: Cluster zuruecksetzen und neu aufsetzen. Trag die Adresse oben ein, bevor du anfaengst.|For several control-plane nodes, --control-plane-endpoint is mandatory. Without it kubeadm writes no controlPlaneEndpoint into the cluster configuration, and every further control-plane node fails with unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Changing it afterwards usually means resetting the cluster and starting over. Enter the address above before you begin.")}] : [])
       .concat(o.endpoint ? [{lvl:"warn", m:t("Die Adresse muss auf allen Knoten aufloesen, bevor du anfaengst — notfalls ueber /etc/hosts. Nimm einen Namen statt einer IP: Der Name wandert spaeter auf einen Lastverteiler oder eine VIP, ohne dass Zertifikate neu ausgestellt werden muessen.|The address has to resolve on every node before you begin — an entry in /etc/hosts will do. Use a name rather than an IP: the name can later move to a load balancer or a VIP without reissuing certificates.")}] : [])
       .concat(o.ha ? [] : [{lvl:"warn", m:t("Ein einzelner Hauptserver ist keine Hochverfügbarkeit: Fällt er aus, ist die API weg und nichts lässt sich mehr ändern. Bereits laufende Pods laufen weiter, aber niemand ersetzt sie.|A single control-plane node is not high availability: if it fails the API is gone and nothing can be changed. Pods already running keep running, but nobody replaces them.")}])
   });
