@@ -4006,9 +4006,9 @@ function runSelfTests(){
     roles({}));
   ok("Jeder Abschnitt hat Überschrift, Rolle und Befehle",
     g1.every(s => s.h && CLUSTER_ROLE[s.role] && s.items.length), "");
-  ok("init trägt das Pod-Netz des gewählten CNI",
-    allCmds({cni:"calico"}).indexOf("--pod-network-cidr=192.168.0.0/16") !== -1 &&
-    allCmds({cni:"flannel"}).indexOf("--pod-network-cidr=10.244.0.0/16") !== -1, "");
+  ok("init trägt ein Pod-Netz, das nicht mit Heimnetzen kollidiert",
+    ["cilium","calico","flannel"].every(c =>
+      allCmds({cni:c}).indexOf("--pod-network-cidr=10.244.0.0/16") !== -1), "");
   ok("Eigenes Pod-Netz sticht die Voreinstellung",
     allCmds({cni:"calico", podCidr:"172.20.0.0/16"}).indexOf("172.20.0.0/16") !== -1, "");
   ok("control-plane-endpoint nur mit Adresse",
@@ -4098,8 +4098,8 @@ function runSelfTests(){
     !guideOf({podCidr:"10.244.0.0/16"}).some(s => (s.r||[]).some(x =>
       x.lvl === "err" && x.m.indexOf("zu klein") !== -1)), "");
   ok("Vor 192.168 als Pod-Netz wird gewarnt",
-    guideOf({cni:"calico"}).some(s => (s.r||[]).some(x => x.m.indexOf("192.168") !== -1)) &&
-    !guideOf({cni:"flannel"}).some(s => (s.r||[]).some(x => x.m.indexOf("192.168") !== -1)), "");
+    guideOf({podCidr:"192.168.0.0/16"}).some(s => (s.r||[]).some(x => x.m.indexOf("192.168") !== -1)) &&
+    !guideOf({}).some(s => (s.r||[]).some(x => x.m.indexOf("192.168") !== -1)), "");
   ok("Paketquelle folgt der Version",
     allCmds({version:"1.33"}).indexOf("stable:/v1.33/") !== -1 &&
     allCmds({version:"v1.33"}).indexOf("stable:/v1.33/") !== -1, "");
@@ -4246,7 +4246,10 @@ const CLUSTER_FIELDS = [
    hint:"Freier Bereich im Netz der Knoten, ausserhalb des DHCP-Bereichs des Routers. Auf eigener Hardware vergibt sonst niemand externe Adressen.|A free range in the nodes' network, outside the router's DHCP range. On your own hardware nothing else hands out external addresses."}
 ];
 
-const CNI_CIDR = {flannel:"10.244.0.0/16", calico:"192.168.0.0/16", cilium:"10.244.0.0/16"};
+/* Alle drei auf 10.244.0.0/16: Calicos dokumentierte Vorgabe 192.168.0.0/16 ueberschneidet
+   sich mit den meisten Heim- und Bueronetzen, und Calico liest das Pod-Netz ohnehin selbst
+   aus der Cluster-Konfiguration. */
+const CNI_CIDR = {flannel:"10.244.0.0/16", calico:"10.244.0.0/16", cilium:"10.244.0.0/16"};
 
 function clusterOpts(o){
   const cni = o.cni || "cilium";
@@ -4356,7 +4359,7 @@ function clusterGuide(raw){
   if (o.cni === "cilium") cp.push({c:"CILIUM_CLI=v0.16.16   # aktuelle Version aus den Release Notes\ncurl -sL --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI}/cilium-linux-amd64.tar.gz\nsudo tar xzvfC cilium-linux-amd64.tar.gz /usr/local/bin\ncilium install\ncilium status --wait",
     d:"Ohne CNI bleiben alle Knoten NotReady und die CoreDNS-Pods hängen in Pending. Das ist kein Fehler, sondern der normale Zwischenstand.|Without a CNI every node stays NotReady and the CoreDNS pods sit in Pending. That is not a fault, it is the normal intermediate state."});
   if (o.cni === "calico") cp.push({c:"CALICO=v3.29.1   # aktuelle Version aus den Release Notes\nkubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/${CALICO}/manifests/calico.yaml",
-    d:"Calico übernimmt das Pod-Netz und bringt NetworkPolicy gleich mit. Das Pod-Netz muss zu dem passen, das oben bei kubeadm init steht.|Calico takes over the pod network and brings network policy with it. The pod network has to match the one given to kubeadm init above."});
+    d:"Calico übernimmt das Pod-Netz und bringt NetworkPolicy gleich mit. Im Manifest steht zwar 192.168.0.0/16, aber Calico liest das tatsächliche Pod-Netz aus der Cluster-Konfiguration — genau deshalb ist hier 10.244.0.0/16 voreingestellt, das sich mit keinem üblichen Heimnetz überschneidet.|Calico takes over the pod network and brings network policy with it. The manifest says 192.168.0.0/16, but Calico reads the actual pod network from the cluster configuration — which is exactly why 10.244.0.0/16 is preset here, a range that collides with no common home network."});
   if (o.cni === "flannel") cp.push({c:"kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml",
     d:"Flannel erwartet zwingend 10.244.0.0/16 als Pod-Netz. Flannel kennt keine NetworkPolicy — dafür braucht es später zusätzlich Calico oder Cilium.|Flannel insists on 10.244.0.0/16 as the pod network. Flannel has no network policy — that needs Calico or Cilium alongside it later."});
 
