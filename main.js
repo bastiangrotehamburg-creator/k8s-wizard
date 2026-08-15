@@ -4021,6 +4021,24 @@ function runSelfTests(){
     allCmds({ha:true}).indexOf("--control-plane --certificate-key") !== -1, "");
   ok("Ohne Hochverfügbarkeit wird gewarnt",
     guideOf({}).some(s => (s.r||[]).some(x => x.lvl === "warn")) , "");
+  ok("Ein Abschnitt erklärt die Platzhalter",
+    guideOf({}).some(s => s.items.some(i => i.c.indexOf("--print-join-command") !== -1) &&
+      s.items.some(i => i.c.indexOf("kubeadm token list") !== -1) &&
+      s.items.some(i => i.c.indexOf("/etc/kubernetes/pki/ca.crt") !== -1)), "");
+  ok("Der Platzhalter-Abschnitt steht vor den Beitrittsbefehlen",
+    guideOf({}).findIndex(s => s.items.some(i => i.c.indexOf("--print-join-command") !== -1)) <
+    guideOf({}).findIndex(s => s.role === "worker"), "");
+  ok("Der Zertifikatsschlüssel wird nur bei Hochverfügbarkeit erklärt",
+    allCmds({ha:true}).indexOf("upload-certs") !== -1 &&
+    guideOf({}).every(s => s.p.every(x => x.indexOf("<KEY>") === -1)), "");
+  ok("Jeder Platzhalter kommt mit einem Weg, ihn zu beschaffen",
+    ["<TOKEN>","<HASH>"].every(ph => {
+      const uses = guideOf({}).some(s => s.items.some(i => i.c.indexOf(ph) !== -1));
+      const explains = guideOf({}).some(s => s.p.some(x => t(x).indexOf(ph) !== -1));
+      return uses && explains;
+    }), "");
+  ok("Vor dem Überspringen der Hash-Prüfung wird gewarnt",
+    guideOf({}).some(s => (s.r||[]).some(x => x.m.indexOf("skip-ca-verification") !== -1)), "");
   ok("Worker treten ohne --control-plane bei",
     guideOf({}).filter(s => s.role === "worker")[0].items[0].c.indexOf("--control-plane") === -1, "");
   ok("Paketquelle folgt der Version",
@@ -4275,14 +4293,37 @@ function clusterGuide(raw){
     r:o.ha ? [] : [{lvl:"warn", m:t("Ein einzelner Hauptserver ist keine Hochverfügbarkeit: Fällt er aus, ist die API weg und nichts lässt sich mehr ändern. Bereits laufende Pods laufen weiter, aber niemand ersetzt sie.|A single control-plane node is not high availability: if it fails the API is gone and nothing can be changed. Pods already running keep running, but nobody replaces them.")}]
   });
 
+  /* --- woher die Platzhalter kommen --- */
+  const join = [
+    {c:"kubeadm token create --print-join-command",
+     d:"Der bequemste Weg: Dieser Befehl erzeugt ein frisches Token und gibt den vollständigen Beitrittsbefehl aus — Token und Hash schon eingesetzt. Ausgabe auf dem Worker einfügen, fertig. Für einen weiteren Hauptserver hängst du an diese Zeile noch --control-plane --certificate-key an.|The most convenient way: this creates a fresh token and prints the complete join command — token and hash already filled in. Paste the output on the worker and you are done. For another control-plane node, append --control-plane --certificate-key to that line."},
+    {c:"kubeadm token list",
+     d:"Zeigt die vorhandenen Token mit ihrer Restlaufzeit in der Spalte TTL. Ist die Liste leer, ist das Token aus der Installation abgelaufen — dann hilft nur der Befehl darüber.|Lists the existing tokens with their remaining lifetime in the TTL column. An empty list means the token from the installation has expired — then only the command above helps."},
+    {c:"openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt \\\n  | openssl rsa -pubin -outform der 2>/dev/null \\\n  | openssl dgst -sha256 -hex | sed 's/^.* //'",
+     d:"Nur den Hash nachschlagen, falls das Token noch gilt. Er ist der Fingerabdruck der Cluster-CA und ändert sich nie, solange der Cluster derselbe bleibt — du kannst ihn dir also einmal aufschreiben.|Look up just the hash, in case the token is still valid. It is the fingerprint of the cluster CA and never changes as long as the cluster stays the same — so you can write it down once."}
+  ];
+  if (o.ha) join.push({c:"sudo kubeadm init phase upload-certs --upload-certs",
+    d:"Lädt die Zertifikate erneut in das Secret kubeadm-certs im Namespace kube-system und gibt einen neuen certificate-key aus. Nötig für jeden weiteren Hauptserver, der später als zwei Stunden nach der Installation dazukommt.|Uploads the certificates into the kubeadm-certs secret in namespace kube-system again and prints a new certificate key. Needed for every additional control-plane node joining later than two hours after the installation."});
+
+  sec("Beitrittsdaten besorgen|Getting the join values", "cp", {
+    p:["Die Platzhalter in den folgenden Befehlen stammen alle aus der Ausgabe von `kubeadm init`. Ist die verloren, holst du sie hier — **auf dem ersten Hauptserver**, nicht auf dem Rechner, der beitreten soll.|The placeholders in the commands below all come from the output of `kubeadm init`. If that is lost, this is where you get them — **on the first control-plane node**, not on the machine that wants to join.",
+       "`<TOKEN>` ist ein Einmalkennwort und gilt 24 Stunden. `<HASH>` ist der Fingerabdruck der Cluster-CA und ändert sich nie." +
+       (o.ha ? " `<KEY>` entschlüsselt die hochgeladenen Zertifikate und gilt nur zwei Stunden." : "") +
+       "|`<TOKEN>` is a one-time password and lasts 24 hours. `<HASH>` is the fingerprint of the cluster CA and never changes." +
+       (o.ha ? " `<KEY>` decrypts the uploaded certificates and lasts only two hours." : "")],
+    items:join,
+    r:[{lvl:"err", m:t("Der Hash ist keine Formsache: Ohne ihn — etwa mit --discovery-token-unsafe-skip-ca-verification — glaubt der beitretende Knoten jedem, der auf der Adresse antwortet, und übergibt sein Vertrauen an einen möglicherweise fremden API-Server.|The hash is not a formality: without it — for instance with --discovery-token-unsafe-skip-ca-verification — the joining node believes whoever answers on that address and hands its trust to a potentially foreign API server.")}]
+  });
+
   /* --- weitere Hauptserver --- */
   if (o.ha) sec("Weitere Hauptserver|Further control-plane nodes", "cp", {
-    p:["Auf dem zweiten und dritten Hauptserver — nicht auf den Workern.|On the second and third control-plane node — not on the workers."],
+    p:["Auf dem zweiten und dritten Hauptserver — nicht auf den Workern.|On the second and third control-plane node — not on the workers.",
+       "`<TOKEN>` und `<HASH>` wie beim Worker, dazu `<KEY>` aus dem Abschnitt **Beitrittsdaten besorgen**. Der Schlüssel ist der Grund, warum ein Hauptserver mehr braucht als ein Worker: Mit ihm holt sich der neue Knoten die Zertifikate der bestehenden CA, statt eine eigene anzulegen.|`<TOKEN>` and `<HASH>` as for a worker, plus `<KEY>` from the section **Getting the join values**. That key is why a control-plane node needs more than a worker: with it the new node fetches the certificates of the existing CA instead of creating its own."],
     items:[
       {c:"sudo kubeadm join " + api + ":6443 \\\n  --token <TOKEN> \\\n  --discovery-token-ca-cert-hash sha256:<HASH> \\\n  --control-plane --certificate-key <KEY>",
-       d:"Genau der Befehl, den kubeadm init ausgegeben hat — mit --control-plane und dem Zertifikatsschlüssel.|Exactly the command kubeadm init printed — with --control-plane and the certificate key."},
+       d:"Genau der Befehl, den kubeadm init ausgegeben hat — mit --control-plane und dem Zertifikatsschlüssel. Fehlt dir die Ausgabe, setzt du ihn aus kubeadm token create --print-join-command und einem frischen certificate-key selbst zusammen.|Exactly the command kubeadm init printed — with --control-plane and the certificate key. If you no longer have that output, assemble it yourself from kubeadm token create --print-join-command plus a fresh certificate key."},
       {c:"sudo kubeadm init phase upload-certs --upload-certs",
-       d:"Der Zertifikatsschlüssel läuft nach zwei Stunden ab. Dieser Befehl auf dem ersten Hauptserver erzeugt einen neuen.|The certificate key expires after two hours. This command on the first control-plane node creates a new one."}
+       d:"Der Zertifikatsschlüssel läuft nach zwei Stunden ab. Dieser Befehl auf dem **ersten** Hauptserver erzeugt einen neuen und gibt ihn als letzte Zeile aus.|The certificate key expires after two hours. Run this on the **first** control-plane node to create a new one; it prints it as the last line."}
     ],
     r:[{lvl:"warn", m:t("Drei Hauptserver, nicht zwei: etcd braucht eine Mehrheit. Mit zwei Knoten steht der Cluster, sobald einer ausfällt — schlechter als mit einem einzelnen.|Three control-plane nodes, not two: etcd needs a majority. With two nodes the cluster stops as soon as one fails — worse than with a single one.")}]
   });
@@ -4293,9 +4334,7 @@ function clusterGuide(raw){
        (o.workers ? "On all " + o.workers + " workers" : "On every worker") + " — after the preparation above, but without any of the control-plane steps."],
     items:[
       {c:"sudo kubeadm join " + api + ":6443 \\\n  --token <TOKEN> \\\n  --discovery-token-ca-cert-hash sha256:<HASH>",
-       d:"Der Befehl aus der Ausgabe von kubeadm init, ohne --control-plane.|The command from the kubeadm init output, without --control-plane."},
-      {c:"kubeadm token create --print-join-command",
-       d:"Auf dem Hauptserver ausführen, wenn die Ausgabe verloren ging: Das Token aus kubeadm init läuft nach 24 Stunden ab. Der Befehl gibt einen vollständigen, frischen Beitrittsbefehl aus.|Run on the control-plane node when the output is lost: the token from kubeadm init expires after 24 hours. This prints a complete, fresh join command."}
+       d:"Der Befehl aus der Ausgabe von kubeadm init, ohne --control-plane. `<TOKEN>` und `<HASH>` kommen aus dem Abschnitt **Beitrittsdaten besorgen** — dort steht auch, wie du sie neu erzeugst.|The command from the kubeadm init output, without --control-plane. `<TOKEN>` and `<HASH>` come from the section **Getting the join values**, which also shows how to create them anew."}
     ],
     r:[{lvl:"err", m:t("kubectl gehört nicht auf die Worker und die admin.conf schon gar nicht. Wer sie dorthin kopiert, gibt jedem mit Zugang zum Worker die volle Kontrolle über den Cluster.|kubectl does not belong on the workers and admin.conf certainly does not. Copying it there hands anyone with access to that worker full control of the cluster.")}]
   });
