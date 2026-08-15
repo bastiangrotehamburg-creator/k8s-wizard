@@ -4016,11 +4016,26 @@ function runSelfTests(){
     allCmds({endpoint:"api.firma.de"}).indexOf("--control-plane-endpoint=api.firma.de:6443") !== -1, "");
   ok("upload-certs nur bei Hochverfügbarkeit",
     allCmds({}).indexOf("--upload-certs") === -1 && allCmds({ha:true}).indexOf("--upload-certs") !== -1, "");
-  ok("Hochverfügbarkeit ergänzt den Abschnitt für weitere Hauptserver",
-    guideOf({ha:true}).length === guideOf({}).length + 1 &&
-    allCmds({ha:true}).indexOf("--control-plane --certificate-key") !== -1, "");
+  ok("Hochverfügbarkeit ergänzt die Abschnitte für weitere Hauptserver",
+    guideOf({ha:true}).length > guideOf({}).length &&
+    allCmds({ha:true}).indexOf("--control-plane --certificate-key") !== -1 &&
+    allCmds({}).indexOf("--control-plane --certificate-key") === -1, "");
   ok("Ohne Hochverfügbarkeit wird gewarnt",
     guideOf({}).some(s => (s.r||[]).some(x => x.lvl === "warn")) , "");
+  ok("Hochverfügbarkeit ohne Adresse ist ein Fehler, kein stiller Verzicht",
+    guideOf({ha:true}).some(s => (s.r||[]).some(x => x.lvl === "err" && x.m.indexOf("controlPlaneEndpoint") !== -1)) &&
+    !guideOf({ha:true, endpoint:"api.firma.de"}).some(s => (s.r||[]).some(x => x.lvl === "err" && x.m.indexOf("controlPlaneEndpoint") !== -1)), "");
+  ok("Der init-Befehl lässt den Endpoint bei Hochverfügbarkeit nie weg",
+    allCmds({ha:true}).indexOf("--control-plane-endpoint=STABILE-ADRESSE:6443") !== -1 &&
+    allCmds({ha:true, endpoint:"api.firma.de"}).indexOf("--control-plane-endpoint=api.firma.de:6443") !== -1, "");
+  ok("Ohne Hochverfügbarkeit bleibt der Endpoint optional",
+    allCmds({}).indexOf("--control-plane-endpoint") === -1, "");
+  ok("Beitrittsbefehle nennen bei Hochverfügbarkeit keine Node-IP",
+    allCmds({ha:true}).indexOf("IP-DES-HAUPTSERVERS") === -1, "");
+  ok("Ein Abschnitt hilft aus dem fehlenden Endpoint heraus",
+    guideOf({ha:true}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1) &&
+      s.items.some(i => i.c.indexOf("controlPlaneEndpoint") !== -1)) &&
+    !guideOf({}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1)), "");
   ok("Ein Abschnitt erklärt die Platzhalter",
     guideOf({}).some(s => s.items.some(i => i.c.indexOf("--print-join-command") !== -1) &&
       s.items.some(i => i.c.indexOf("kubeadm token list") !== -1) &&
@@ -4173,7 +4188,7 @@ const CLUSTER_FIELDS = [
          ["calico","Calico — verbreitet, NetworkPolicy inklusive|Calico — widespread, network policy included"],
          ["flannel","Flannel — einfach, ohne NetworkPolicy|Flannel — simple, no network policy"]]},
   {k:"endpoint", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de",
-   hint:"Name oder VIP, unter dem der API-Server erreichbar ist. Leer lassen heißt: die IP des ersten Hauptservers — die lässt sich später nicht mehr ändern.|Name or VIP the API server answers on. Empty means the first control-plane node's IP — which cannot be changed later."},
+   hint:"Name oder VIP, unter dem der API-Server erreichbar ist. Leer lassen heißt: die IP des ersten Hauptservers — die lässt sich später nicht mehr ändern. Für mehrere Hauptserver ist die Angabe zwingend.|Name or VIP the API server answers on. Empty means the first control-plane node's IP — which cannot be changed later. With several control-plane nodes it is mandatory."},
   {k:"ha", t:"bool", structural:true, l:"Mehrere Hauptserver (Hochverfügbarkeit)|Several control-plane nodes (high availability)",
    hint:"Drei Hauptserver sind das Minimum, damit etcd eine Mehrheit bilden kann. Braucht einen Lastverteiler vor den API-Servern.|Three control-plane nodes are the minimum for etcd to form a majority. Requires a load balancer in front of the API servers."},
   {k:"workers", t:"number", l:"Anzahl Worker|Number of workers", ph:"3", half:true},
@@ -4208,7 +4223,9 @@ function clusterOpts(o){
 function clusterGuide(raw){
   const o = clusterOpts(raw);
   const apt = o.os === "apt";
-  const api = o.endpoint || "IP-DES-HAUPTSERVERS";
+  /* Bei Hochverfuegbarkeit ist die Node-IP keine gueltige Antwort. */
+  const noEndpoint = o.ha && !o.endpoint;
+  const api = o.endpoint || (o.ha ? "STABILE-ADRESSE" : "IP-DES-HAUPTSERVERS");
   const out = [];
   const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
 
@@ -4267,7 +4284,7 @@ function clusterGuide(raw){
   const initCmd = ["sudo kubeadm init",
     "  --pod-network-cidr=" + o.podCidr,
     o.svcCidr ? "  --service-cidr=" + o.svcCidr : "",
-    o.endpoint ? "  --control-plane-endpoint=" + o.endpoint + ":6443" : "",
+    (o.endpoint || o.ha) ? "  --control-plane-endpoint=" + api + ":6443" : "",
     o.ha ? "  --upload-certs" : "",
     "  --kubernetes-version=v" + o.version + ".0"
   ].filter(Boolean).join(" \\\n");
@@ -4290,7 +4307,9 @@ function clusterGuide(raw){
   sec("Erster Hauptserver|First control-plane node", "cp", {
     p:["Ab hier unterscheiden sich die Rechner. Diese Schritte laufen **nur auf dem ersten Hauptserver**.|From here the machines differ. These steps run **only on the first control-plane node**."],
     items:cp,
-    r:o.ha ? [] : [{lvl:"warn", m:t("Ein einzelner Hauptserver ist keine Hochverfügbarkeit: Fällt er aus, ist die API weg und nichts lässt sich mehr ändern. Bereits laufende Pods laufen weiter, aber niemand ersetzt sie.|A single control-plane node is not high availability: if it fails the API is gone and nothing can be changed. Pods already running keep running, but nobody replaces them.")}]
+    r:(noEndpoint ? [{lvl:"err", m:t("Fuer mehrere Hauptserver ist --control-plane-endpoint zwingend. Ohne ihn schreibt kubeadm keinen controlPlaneEndpoint in die Cluster-Konfiguration, und jeder weitere Hauptserver scheitert an der Meldung unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Nachtraeglich aendern heisst im Zweifel: Cluster zuruecksetzen und neu aufsetzen. Trag die Adresse oben ein, bevor du anfaengst.|For several control-plane nodes, --control-plane-endpoint is mandatory. Without it kubeadm writes no controlPlaneEndpoint into the cluster configuration, and every further control-plane node fails with unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Changing it afterwards usually means resetting the cluster and starting over. Enter the address above before you begin.")}] : [])
+      .concat(o.endpoint ? [{lvl:"warn", m:t("Die Adresse muss auf allen Knoten aufloesen, bevor du anfaengst — notfalls ueber /etc/hosts. Nimm einen Namen statt einer IP: Der Name wandert spaeter auf einen Lastverteiler oder eine VIP, ohne dass Zertifikate neu ausgestellt werden muessen.|The address has to resolve on every node before you begin — an entry in /etc/hosts will do. Use a name rather than an IP: the name can later move to a load balancer or a VIP without reissuing certificates.")}] : [])
+      .concat(o.ha ? [] : [{lvl:"warn", m:t("Ein einzelner Hauptserver ist keine Hochverfügbarkeit: Fällt er aus, ist die API weg und nichts lässt sich mehr ändern. Bereits laufende Pods laufen weiter, aber niemand ersetzt sie.|A single control-plane node is not high availability: if it fails the API is gone and nothing can be changed. Pods already running keep running, but nobody replaces them.")}])
   });
 
   /* --- woher die Platzhalter kommen --- */
@@ -4326,6 +4345,22 @@ function clusterGuide(raw){
        d:"Der Zertifikatsschlüssel läuft nach zwei Stunden ab. Dieser Befehl auf dem **ersten** Hauptserver erzeugt einen neuen und gibt ihn als letzte Zeile aus.|The certificate key expires after two hours. Run this on the **first** control-plane node to create a new one; it prints it as the last line."}
     ],
     r:[{lvl:"warn", m:t("Drei Hauptserver, nicht zwei: etcd braucht eine Mehrheit. Mit zwei Knoten steht der Cluster, sobald einer ausfällt — schlechter als mit einem einzelnen.|Three control-plane nodes, not two: etcd needs a majority. With two nodes the cluster stops as soon as one fails — worse than with a single one.")}]
+  });
+
+  /* --- Notausgang, wenn der Endpoint fehlt --- */
+  if (o.ha) sec("Wenn der Endpoint fehlt|If the endpoint is missing", "cp", {
+    p:["Steht der Cluster bereits und `kubeadm init` lief ohne `--control-plane-endpoint`, scheitert jeder weitere Hauptserver mit *unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address*. Nachrüsten hiesse: ConfigMap kubeadm-config ändern, das API-Server-Zertifikat mit neuem SAN ausstellen und alle vier kubeconfig-Dateien umschreiben. Bei einem frischen Cluster ist Zurücksetzen schneller und sicherer.|If the cluster is already up and `kubeadm init` ran without `--control-plane-endpoint`, every further control-plane node fails with *unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address*. Retrofitting means editing the kubeadm-config ConfigMap, reissuing the API server certificate with a new SAN and rewriting all four kubeconfig files. On a fresh cluster, resetting is faster and safer."],
+    items:[
+      {c:"kubectl -n kube-system get cm kubeadm-config -o yaml | grep -i controlPlaneEndpoint",
+       d:"Zuerst nachsehen. Kommt keine Zeile zurück, fehlt der Endpoint — dann gilt der Rest dieses Abschnitts.|Check first. If no line comes back, the endpoint is missing and the rest of this section applies."},
+      {c:"sudo kubeadm reset -f\nsudo rm -rf /etc/cni/net.d $HOME/.kube/config",
+       d:"Auf **jedem** Knoten, der schon beigetreten ist, und zuletzt auf dem ersten Hauptserver. Bei einem Cluster, in dem noch nichts läuft, ist das der ehrlichste Weg zurück auf Anfang.|On **every** node that has already joined, and last on the first control-plane node. For a cluster with nothing running on it yet, this is the honest way back to the start."},
+      {c:"echo '" + (o.endpoint ? "192.168.0.10 " + o.endpoint : "192.168.0.10 k8s-api.firma.de") + "' | sudo tee -a /etc/hosts",
+       d:"Auf allen Knoten, solange es keinen DNS-Eintrag gibt: Die IP ist vorerst der erste Hauptserver. Später zeigt derselbe Name auf den Lastverteiler oder eine VIP — und weil sich nur die Auflösung ändert, bleiben die Zertifikate gültig.|On every node as long as there is no DNS record: the IP is the first control-plane node for now. Later the same name points at the load balancer or a VIP — and because only the resolution changes, the certificates stay valid."},
+      {c:initCmd,
+       d:"Neu aufsetzen, diesmal mit Endpoint. Danach greifen die Beitrittsbefehle wie beschrieben.|Set up again, this time with the endpoint. After that the join commands work as described."}
+    ],
+    r:[{lvl:"warn", m:t("Zeigt der Endpoint auf die IP eines einzelnen Hauptservers, laesst kubeadm zwar weitere Master zu — hochverfuegbar ist der Cluster damit trotzdem nicht, weil die Adresse mit genau dieser Maschine steht und faellt.|If the endpoint points at a single control-plane node's IP, kubeadm does allow further masters — but the cluster is still not highly available, because the address lives and dies with that one machine.")}]
   });
 
   /* --- Worker --- */
