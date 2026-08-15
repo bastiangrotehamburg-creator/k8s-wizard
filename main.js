@@ -4065,6 +4065,16 @@ function runSelfTests(){
     guideOf({}).some(s => (s.r||[]).some(x => x.m.indexOf("skip-ca-verification") !== -1)), "");
   ok("Worker treten ohne --control-plane bei",
     guideOf({}).filter(s => s.role === "worker")[0].items[0].c.indexOf("--control-plane") === -1, "");
+  ok("Es gibt einen Funktionstest von innen nach aussen",
+    guideOf({}).some(s => t(s.h).indexOf("Funktionstest") !== -1 || t(s.h).indexOf("Smoke test") !== -1), "");
+  ok("Der Funktionstest deckt DNS, Service, LoadBalancer und Ingress ab",
+    ["nslookup kubernetes.default","kubectl expose deployment","metallb","LoadBalancer","kubectl create ingress"]
+      .every(x => allCmds({}).toLowerCase().indexOf(x.toLowerCase()) !== -1), "");
+  ok("Der MetalLB-Bereich wird übernommen",
+    allCmds({lbRange:"10.0.0.50-10.0.0.60"}).indexOf("10.0.0.50-10.0.0.60") !== -1 &&
+    allCmds({}).indexOf("192.168.178.240-192.168.178.250") !== -1, "");
+  ok("Der Funktionstest räumt hinter sich auf",
+    allCmds({}).indexOf("kubectl delete deployment web") !== -1, "");
   ok("Der init-Befehl nagelt die Version nicht fest",
     allCmds({}).indexOf("--kubernetes-version") === -1, "");
   ok("Vor dem init werden die installierten Versionen geprüft",
@@ -4219,7 +4229,9 @@ const CLUSTER_FIELDS = [
   {k:"svcCidr", t:"text", adv:true, l:"Service-Netz|Service network", ph:"10.96.0.0/12", half:true},
   {k:"singleNode", t:"bool", l:"Auch auf dem Hauptserver Pods zulassen|Run pods on the control plane too",
    hint:"Für Testcluster ohne eigene Worker. Entfernt den Taint, den kubeadm setzt.|For test clusters without separate workers. Removes the taint kubeadm sets."},
-  {k:"firewall", t:"bool", l:"Firewall-Regeln mit ausgeben|Include firewall rules"}
+  {k:"firewall", t:"bool", l:"Firewall-Regeln mit ausgeben|Include firewall rules"},
+  {k:"lbRange", t:"text", l:"MetalLB-Adressbereich|MetalLB address range", ph:"192.168.178.240-192.168.178.250",
+   hint:"Freier Bereich im Netz der Knoten, ausserhalb des DHCP-Bereichs des Routers. Auf eigener Hardware vergibt sonst niemand externe Adressen.|A free range in the nodes' network, outside the router's DHCP range. On your own hardware nothing else hands out external addresses."}
 ];
 
 const CNI_CIDR = {flannel:"10.244.0.0/16", calico:"192.168.0.0/16", cilium:"10.244.0.0/16"};
@@ -4237,7 +4249,8 @@ function clusterOpts(o){
     podCidr: (o.podCidr || "").trim() || CNI_CIDR[cni],
     svcCidr: (o.svcCidr || "").trim(),
     singleNode: !!o.singleNode,
-    firewall: !!o.firewall
+    firewall: !!o.firewall,
+    lbRange: (o.lbRange || "").trim() || "192.168.178.240-192.168.178.250"
   };
 }
 
@@ -4426,6 +4439,35 @@ function clusterGuide(raw){
       {c:"kubectl run probe --image=nginx:1.27-alpine --restart=Never --rm -it -- sh",
        d:"Ein Pod von Hand, um den Weg von der Registry bis in den Container einmal zu gehen.|A pod by hand, to walk the path from the registry into the container once."}
     ]
+  });
+
+  sec("Funktionstest|Smoke test", "cp", {
+    p:["Der Reihe nach von innen nach aussen. Jeder Schritt setzt den vorigen voraus — bricht einer ab, ist die Ursache dort und nicht weiter unten.|From the inside out, in order. Each step needs the one before it — if one fails, the cause is there and not further down."],
+    items:[
+      {c:"kubectl get nodes -o wide\nkubectl get pods -A",
+       d:"Erwartung: alle Knoten Ready, alle Pods Running oder Completed. Haengt CoreDNS in Pending, laeuft das CNI noch nicht.|Expected: every node Ready, every pod Running or Completed. If CoreDNS sits in Pending, the CNI is not up yet."},
+      {c:"kubectl run dnstest --image=busybox:1.36 --restart=Never --rm -it -- \\\n  nslookup kubernetes.default",
+       d:"Prueft Pod-Netz und clusterinternes DNS in einem Zug. Erwartung: eine Antwort mit der Service-IP, ueblicherweise 10.96.0.1. Kommt keine, stimmt etwas am CNI.|Tests the pod network and cluster DNS in one go. Expected: an answer with the service IP, usually 10.96.0.1. If none comes back, something is wrong with the CNI."},
+      {c:"kubectl create deployment web --image=nginx:1.27-alpine --replicas=3\nkubectl expose deployment web --port=80\nkubectl get pods -o wide\nkubectl get endpoints web",
+       d:"Erwartung: drei Pods, moeglichst auf verschiedenen Knoten, und drei Adressen unter ENDPOINTS. Steht dort none, trifft der Selector nicht.|Expected: three pods, ideally on different nodes, and three addresses under ENDPOINTS. If it says none, the selector does not match."},
+      {c:"kubectl run probe --image=busybox:1.36 --restart=Never --rm -it -- \\\n  wget -qO- http://web",
+       d:"Der eigentliche Netzwerktest: ueber den Service-Namen, aus einem anderen Pod, moeglicherweise von einem anderen Knoten. Kommt die nginx-Startseite zurueck, funktionieren DNS, kube-proxy und das Overlay ueber Knotengrenzen hinweg.|The real network test: via the service name, from another pod, possibly on another node. If the nginx welcome page comes back, DNS, kube-proxy and the overlay across node boundaries all work."},
+      {c:"METALLB=v0.14.9   # aktuelle Version aus den Release Notes\nkubectl apply -f https://raw.githubusercontent.com/metallb/metallb/${METALLB}/config/manifests/metallb-native.yaml\nkubectl -n metallb-system wait --for=condition=available deploy/controller --timeout=120s",
+       d:"Auf eigener Hardware vergibt niemand externe Adressen — MetalLB uebernimmt das. In der Cloud entfaellt dieser Schritt, dort macht es der Anbieter.|On your own hardware nothing hands out external addresses — MetalLB does that job. In the cloud you skip this step; the provider does it."},
+      {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: metallb.io/v1beta1\nkind: IPAddressPool\nmetadata:\n  name: lan\n  namespace: metallb-system\nspec:\n  addresses:\n    - " + o.lbRange + "\n---\napiVersion: metallb.io/v1beta1\nkind: L2Advertisement\nmetadata:\n  name: lan\n  namespace: metallb-system\nspec:\n  ipAddressPools:\n    - lan\nEOF",
+       d:"Der Bereich muss im Netz der Knoten liegen und ausserhalb dessen, was der Router per DHCP vergibt — sonst bekommt irgendwann ein Laptop dieselbe Adresse wie dein Service.|The range has to sit in the nodes' network and outside what the router hands out via DHCP — otherwise a laptop eventually gets the same address as your service."},
+      {c:"kubectl patch svc web -p '{\"spec\":{\"type\":\"LoadBalancer\"}}'\nkubectl get svc web",
+       d:"Erwartung: unter EXTERNAL-IP steht nach wenigen Sekunden eine Adresse aus dem Bereich oben. Bleibt dort dauerhaft Pending, findet MetalLB keinen freien Platz — oder der Pool passt nicht zum Netz der Knoten.|Expected: an address from the range above appears under EXTERNAL-IP within seconds. If it stays Pending, MetalLB finds no free slot — or the pool does not match the nodes' network."},
+      {c:"curl http://ADRESSE-AUS-EXTERNAL-IP",
+       d:"Vom eigenen Rechner aus, nicht vom Knoten. Kommt die nginx-Seite, ist der Weg von aussen bis in den Pod offen.|From your own machine, not from a node. If the nginx page appears, the path from outside into the pod is open."},
+      {c:"kubectl -n ingress-nginx patch svc ingress-nginx-controller \\\n  -p '{\"spec\":{\"type\":\"LoadBalancer\"}}'\nkubectl -n ingress-nginx get svc ingress-nginx-controller",
+       d:"Das Baremetal-Manifest des Ingress-Controllers legt einen NodePort-Service an. Mit MetalLB bekommt er stattdessen eine eigene Adresse — die Adresse, auf die spaeter alle Hostnamen zeigen.|The ingress controller's baremetal manifest creates a NodePort service. With MetalLB it gets an address of its own instead — the address all your hostnames will later point at."},
+      {c:"kubectl create ingress web --class=nginx \\\n  --rule=\"web.example.lan/*=web:80\"\ncurl -H 'Host: web.example.lan' http://ADRESSE-DES-INGRESS",
+       d:"Der Host-Header ersetzt den DNS-Eintrag fuer den ersten Test. Kommt die nginx-Seite, funktioniert die ganze Kette: MetalLB, Ingress-Controller, Regel, Service, Pod. Danach den Namen im DNS oder in /etc/hosts auf dieselbe Adresse zeigen lassen.|The Host header stands in for the DNS record for a first test. If the nginx page appears, the whole chain works: MetalLB, ingress controller, rule, service, pod. After that, point the name at the same address in DNS or /etc/hosts."},
+      {c:"kubectl delete ingress web\nkubectl delete svc web\nkubectl delete deployment web",
+       d:"Aufraeumen. MetalLB und der Ingress-Controller bleiben stehen, die brauchst du weiter.|Clean up. MetalLB and the ingress controller stay, you will keep needing those."}
+    ],
+    r:[{lvl:"warn", m:t("Bleibt ein Service auf Pending oder ein Pod auf ContainerCreating, hilft kubectl describe auf genau dieses Objekt weiter — der Abschnitt Events ganz unten nennt die Ursache fast immer im Klartext.|If a service stays Pending or a pod stays in ContainerCreating, kubectl describe on exactly that object is the way forward — the Events section at the bottom almost always names the cause outright.")}]
   });
 
   sec("Danach|Afterwards", "cp", {
