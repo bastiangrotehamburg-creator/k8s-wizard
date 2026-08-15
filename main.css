@@ -612,3 +612,7 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
 .crole--worker{background:var(--ok-bg);color:var(--ok)}
 .clusterout .cmd--big{white-space:pre;font-size:12px;line-height:1.6}
 .clusterout .wikiitem p{margin:0;color:var(--muted);font-size:12px}
+.cstep code{font-family:var(--mono);font-size:11.5px;background:var(--accent-soft);color:var(--accent);padding:1px 6px;border-radius:5px}
+.cstep strong{font-weight:660;color:var(--ink)}
+.cstep .swtwrap{margin:0 0 14px}
+.cstep .swtable td:first-child code{background:none;padding:0}

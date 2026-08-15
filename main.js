@@ -4049,7 +4049,9 @@ function runSelfTests(){
   ok("Jeder Platzhalter kommt mit einem Weg, ihn zu beschaffen",
     ["<TOKEN>","<HASH>"].every(ph => {
       const uses = guideOf({}).some(s => s.items.some(i => i.c.indexOf(ph) !== -1));
-      const explains = guideOf({}).some(s => s.p.some(x => t(x).indexOf(ph) !== -1));
+      const explains = guideOf({}).some(s =>
+        s.p.some(x => t(x).indexOf(ph) !== -1) ||
+        (s.table||[]).some(r => r.some(c => t(c).indexOf(ph) !== -1)));
       return uses && explains;
     }), "");
   ok("Vor dem Überspringen der Hash-Prüfung wird gewarnt",
@@ -4326,10 +4328,15 @@ function clusterGuide(raw){
 
   sec("Beitrittsdaten besorgen|Getting the join values", "cp", {
     p:["Die Platzhalter in den folgenden Befehlen stammen alle aus der Ausgabe von `kubeadm init`. Ist die verloren, holst du sie hier — **auf dem ersten Hauptserver**, nicht auf dem Rechner, der beitreten soll.|The placeholders in the commands below all come from the output of `kubeadm init`. If that is lost, this is where you get them — **on the first control-plane node**, not on the machine that wants to join.",
-       "`<TOKEN>` ist ein Einmalkennwort und gilt 24 Stunden. `<HASH>` ist der Fingerabdruck der Cluster-CA und ändert sich nie." +
-       (o.ha ? " `<KEY>` entschlüsselt die hochgeladenen Zertifikate und gilt nur zwei Stunden." : "") +
-       "|`<TOKEN>` is a one-time password and lasts 24 hours. `<HASH>` is the fingerprint of the cluster CA and never changes." +
-       (o.ha ? " `<KEY>` decrypts the uploaded certificates and lasts only two hours." : "")],
+       "Jeder Wert steht in der Ausgabe von `kubeadm init` — und lässt sich jederzeit neu beschaffen.|Every value appears in the output of `kubeadm init` — and can be obtained again at any time."],
+    table:[
+      ["Platzhalter|Placeholder","Was es ist|What it is","Gültig|Valid for","Woher|Where from"],
+      ["`<TOKEN>`","Einmalkennwort für den Beitritt|One-time password for joining","24 Stunden|24 hours",
+       "`kubeadm token create --print-join-command`"],
+      ["`<HASH>`","Fingerabdruck der Cluster-CA|Fingerprint of the cluster CA","unbegrenzt|indefinitely",
+       "derselbe Befehl — oder der openssl-Dreisatz unten|the same command — or the openssl trio below"]
+    ].concat(o.ha ? [["`<KEY>`","Schlüssel für die hochgeladenen Zertifikate|Key for the uploaded certificates",
+       "2 Stunden|2 hours","`kubeadm init phase upload-certs --upload-certs`"]] : []),
     items:join,
     r:[{lvl:"err", m:t("Der Hash ist keine Formsache: Ohne ihn — etwa mit --discovery-token-unsafe-skip-ca-verification — glaubt der beitretende Knoten jedem, der auf der Adresse antwortet, und übergibt sein Vertrauen an einen möglicherweise fremden API-Server.|The hash is not a formality: without it — for instance with --discovery-token-unsafe-skip-ca-verification — the joining node believes whoever answers on that address and hands its trust to a potentially foreign API server.")}]
   });
@@ -4443,6 +4450,14 @@ function renderClusterOut(){
     h += '<div class="cstep"><p class="hgroup">' + String(i+1).padStart(2,"0") + " · " + esc(t(s.h)) +
          '<span class="crole crole--' + s.role + '">' + esc(t(CLUSTER_ROLE[s.role])) + "</span></p>";
     (s.p||[]).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
+    if (s.table){
+      const rows = s.table;
+      h += '<div class="swtwrap"><table class="swtable"><thead><tr>' +
+           rows[0].map(c => "<th>" + mdInline(t(c)) + "</th>").join("") + "</tr></thead><tbody>" +
+           rows.slice(1).map(r => "<tr>" + r.map((c, n) =>
+             "<td" + (n === 0 ? ' class="swkey"' : "") + ">" + mdInline(t(c)) + "</td>").join("") + "</tr>").join("") +
+           "</tbody></table></div>";
+    }
     if ((s.r||[]).length)
       h += '<div class="crisks">' + s.r.map(x =>
         '<p class="crisk crisk--' + x.lvl + '"><b>' + (x.lvl === "err" ? "!" : "?") + "</b>" + esc(x.m) + "</p>").join("") + "</div>";
@@ -4470,6 +4485,11 @@ function clusterMarkdown(){
   clusterGuide(CLUSTER).forEach((s, i) => {
     m += "## " + (i+1) + ". " + t(s.h) + " — " + t(CLUSTER_ROLE[s.role]) + "\n\n";
     (s.p||[]).forEach(x => { m += t(x) + "\n\n"; });
+    if (s.table){
+      m += "| " + s.table[0].map(t).join(" | ") + " |\n|" + s.table[0].map(() => "---").join("|") + "|\n";
+      s.table.slice(1).forEach(r => { m += "| " + r.map(t).join(" | ") + " |\n"; });
+      m += "\n";
+    }
     (s.r||[]).forEach(x => { m += "> **" + (x.lvl === "err" ? "Achtung" : "Hinweis") + "** — " + x.m + "\n\n"; });
     (s.items||[]).forEach(it => { m += "```sh\n" + it.c + "\n```\n\n" + t(it.d) + "\n\n"; });
   });
