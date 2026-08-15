@@ -4036,6 +4036,13 @@ function runSelfTests(){
     guideOf({ha:true}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1) &&
       s.items.some(i => i.c.indexOf("controlPlaneEndpoint") !== -1)) &&
     !guideOf({}).some(s => s.items.some(i => i.c.indexOf("kubeadm reset -f") !== -1)), "");
+  ok("Zertifikatsschlüssel und Token stehen zusammen in einem Block",
+    guideOf({ha:true}).some(s => s.items.some(i =>
+      i.c.indexOf("upload-certs") !== -1 && i.c.indexOf("--print-join-command") !== -1)), "");
+  ok("Die zusammengesetzte Zeile ergibt einen vollstaendigen Beitrittsbefehl",
+    guideOf({ha:true}).some(s => s.items.some(i =>
+      i.c.indexOf("--control-plane --certificate-key $KEY") !== -1 &&
+      i.c.indexOf("tail -1") !== -1)), "");
   ok("Ein Abschnitt erklärt die Platzhalter",
     guideOf({}).some(s => s.items.some(i => i.c.indexOf("--print-join-command") !== -1) &&
       s.items.some(i => i.c.indexOf("kubeadm token list") !== -1) &&
@@ -4323,8 +4330,8 @@ function clusterGuide(raw){
     {c:"openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt \\\n  | openssl rsa -pubin -outform der 2>/dev/null \\\n  | openssl dgst -sha256 -hex | sed 's/^.* //'",
      d:"Nur den Hash nachschlagen, falls das Token noch gilt. Er ist der Fingerabdruck der Cluster-CA und ändert sich nie, solange der Cluster derselbe bleibt — du kannst ihn dir also einmal aufschreiben.|Look up just the hash, in case the token is still valid. It is the fingerprint of the cluster CA and never changes as long as the cluster stays the same — so you can write it down once."}
   ];
-  if (o.ha) join.push({c:"sudo kubeadm init phase upload-certs --upload-certs",
-    d:"Lädt die Zertifikate erneut in das Secret kubeadm-certs im Namespace kube-system und gibt einen neuen certificate-key aus. Nötig für jeden weiteren Hauptserver, der später als zwei Stunden nach der Installation dazukommt.|Uploads the certificates into the kubeadm-certs secret in namespace kube-system again and prints a new certificate key. Needed for every additional control-plane node joining later than two hours after the installation."});
+  if (o.ha) join.push({c:"sudo kubeadm init phase upload-certs --upload-certs\nkubeadm token create --print-join-command",
+    d:"Beide Werte auf einmal, weil ein weiterer Hauptserver beide braucht: Der erste Befehl lädt die Zertifikate erneut in das Secret kubeadm-certs und gibt den neuen certificate-key als **letzte Zeile** aus, der zweite den vollständigen Beitrittsbefehl mit Token und Hash. Aneinandergehängt ergibt das die Zeile für den neuen Hauptserver.|Both values at once, because an additional control-plane node needs both: the first command uploads the certificates into the kubeadm-certs secret again and prints the new certificate key as its **last line**, the second prints the complete join command with token and hash. Put together they form the line for the new control-plane node."});
 
   sec("Beitrittsdaten besorgen|Getting the join values", "cp", {
     p:["Die Platzhalter in den folgenden Befehlen stammen alle aus der Ausgabe von `kubeadm init`. Ist die verloren, holst du sie hier — **auf dem ersten Hauptserver**, nicht auf dem Rechner, der beitreten soll.|The placeholders in the commands below all come from the output of `kubeadm init`. If that is lost, this is where you get them — **on the first control-plane node**, not on the machine that wants to join.",
@@ -4348,8 +4355,10 @@ function clusterGuide(raw){
     items:[
       {c:"sudo kubeadm join " + api + ":6443 \\\n  --token <TOKEN> \\\n  --discovery-token-ca-cert-hash sha256:<HASH> \\\n  --control-plane --certificate-key <KEY>",
        d:"Genau der Befehl, den kubeadm init ausgegeben hat — mit --control-plane und dem Zertifikatsschlüssel. Fehlt dir die Ausgabe, setzt du ihn aus kubeadm token create --print-join-command und einem frischen certificate-key selbst zusammen.|Exactly the command kubeadm init printed — with --control-plane and the certificate key. If you no longer have that output, assemble it yourself from kubeadm token create --print-join-command plus a fresh certificate key."},
-      {c:"sudo kubeadm init phase upload-certs --upload-certs",
-       d:"Der Zertifikatsschlüssel läuft nach zwei Stunden ab. Dieser Befehl auf dem **ersten** Hauptserver erzeugt einen neuen und gibt ihn als letzte Zeile aus.|The certificate key expires after two hours. Run this on the **first** control-plane node to create a new one; it prints it as the last line."}
+      {c:"KEY=$(sudo kubeadm init phase upload-certs --upload-certs | tail -1)\necho \"$(kubeadm token create --print-join-command) --control-plane --certificate-key $KEY\"",
+       d:"Auf dem **ersten** Hauptserver ausführen: Das erzeugt einen frischen Zertifikatsschlüssel und ein frisches Token und setzt daraus die vollständige Zeile zusammen, die du oben brauchst. Weil beide Werte neu sind, spielt es keine Rolle, wie lange die Installation her ist.|Run on the **first** control-plane node: this creates a fresh certificate key and a fresh token and assembles the complete line you need above. Since both values are new, it does not matter how long ago the installation was."},
+      {c:"sudo kubeadm init phase upload-certs --upload-certs\nkubeadm token create --print-join-command",
+       d:"Dasselbe in zwei Schritten, falls du die Werte einzeln sehen willst. Der Zertifikatsschlüssel steht in der letzten Zeile der ersten Ausgabe.|The same in two steps, if you would rather see the values separately. The certificate key is the last line of the first output."}
     ],
     r:[{lvl:"warn", m:t("Drei Hauptserver, nicht zwei: etcd braucht eine Mehrheit. Mit zwei Knoten steht der Cluster, sobald einer ausfällt — schlechter als mit einem einzelnen.|Three control-plane nodes, not two: etcd needs a majority. With two nodes the cluster stops as soon as one fails — worse than with a single one.")}]
   });
