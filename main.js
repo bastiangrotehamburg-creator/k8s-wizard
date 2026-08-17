@@ -4263,7 +4263,7 @@ const CLUSTER_FIELDS = [
    hint:"Für Testcluster ohne eigene Worker. Entfernt den Taint, den kubeadm setzt.|For test clusters without separate workers. Removes the taint kubeadm sets."},
   {k:"firewall", t:"bool", l:"Firewall-Regeln mit ausgeben|Include firewall rules"},
   {k:"lbRange", t:"text", l:"MetalLB-Adressbereich|MetalLB address range", ph:"192.168.178.240-192.168.178.250",
-   hint:"Freier Bereich im Netz der Knoten, ausserhalb des DHCP-Bereichs des Routers. Auf eigener Hardware vergibt sonst niemand externe Adressen.|A free range in the nodes' network, outside the router's DHCP range. On your own hardware nothing else hands out external addresses."}
+   hint:"Freier Bereich im **selben** Netz wie die Knoten und ausserhalb des DHCP-Bereichs des Routers. MetalLB kuendigt die Adressen per ARP an — das geht nur im eigenen Segment, ein beliebiges freies Netz reicht nicht. Mit ip -4 addr auf einem Knoten siehst du Adresse und Praefix.|A free range in the **same** network as the nodes and outside the router's DHCP range. MetalLB announces the addresses via ARP — that only works within its own segment, an arbitrary free network will not do. Use ip -4 addr on a node to see the address and prefix."}
 ];
 
 /* Alle drei auf 10.244.0.0/16: Calicos dokumentierte Vorgabe 192.168.0.0/16 ueberschneidet
