@@ -4086,6 +4086,8 @@ function runSelfTests(){
   ok("Der MetalLB-Bereich wird übernommen",
     allCmds({lbRange:"10.0.0.50-10.0.0.60"}).indexOf("10.0.0.50-10.0.0.60") !== -1 &&
     allCmds({}).indexOf("192.168.178.240-192.168.178.250") !== -1, "");
+  ok("Der metrics-server bekommt den Hinweis auf 0/1 mit",
+    allCmds({}).indexOf("--kubelet-insecure-tls") !== -1, "");
   ok("Der Prüfschritt nennt den Grund für NotReady",
     allCmds({}).indexOf('.status.conditions[?(@.type=="Ready")]') !== -1 &&
     allCmds({}).indexOf(".spec.podCIDR") !== -1, "");
@@ -4533,6 +4535,8 @@ function clusterGuide(raw){
        d:"Ein Ingress-Controller, sonst bleibt jeder Ingress wirkungslos. Auf eigener Hardware ist zusätzlich MetalLB nötig, damit ein Service vom Typ LoadBalancer eine Adresse bekommt.|An ingress controller, otherwise every Ingress stays inert. On your own hardware you also need MetalLB so a LoadBalancer service gets an address."},
       {c:"kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml",
        d:"Ohne metrics-server liefert kubectl top nichts und ein HorizontalPodAutoscaler skaliert nie.|Without metrics-server, kubectl top returns nothing and a HorizontalPodAutoscaler never scales."},
+      {c:"kubectl -n kube-system patch deployment metrics-server --type=json \\\n  -p='[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--kubelet-insecure-tls\"}]'\nkubectl -n kube-system rollout status deploy/metrics-server\nkubectl top nodes",
+       d:"Auf einem kubeadm-Cluster bleibt metrics-server sonst dauerhaft auf **0/1** stehen — Status Running, aber nie bereit. Grund: Er spricht die kubelets ueber HTTPS an und prueft deren Zertifikate, und kubeadm stattet die kubelets mit selbstsignierten Zertifikaten ohne passende SANs aus. Im Log steht dann *cannot validate certificate ... doesn't contain any IP SANs*. Der saubere Weg fuer Produktion ist serverTLSBootstrap im kubelet samt Freigabe der Zertifikatsanfragen; fuer Labor und Testcluster ist dieser Schalter der uebliche Weg.|On a kubeadm cluster metrics-server otherwise sits at **0/1** forever — status Running, but never ready. The reason: it talks to the kubelets over HTTPS and validates their certificates, and kubeadm equips the kubelets with self-signed certificates without matching SANs. The log then reads *cannot validate certificate ... doesn't contain any IP SANs*. The clean route for production is serverTLSBootstrap in the kubelet plus approving the certificate requests; for labs and test clusters this flag is the usual way."},
       {c:"# StorageClass: auf eigener Hardware etwa Longhorn oder der local-path-provisioner",
        d:"Ohne StorageClass bleibt jedes PersistentVolumeClaim für immer Pending.|Without a storage class every PersistentVolumeClaim stays Pending forever."}
     ],
