@@ -4024,6 +4024,9 @@ function runSelfTests(){
     allCmds({endpoint:"api.firma.de"}).indexOf("--control-plane-endpoint=api.firma.de:6443") !== -1, "");
   ok("upload-certs nur bei Hochverfügbarkeit",
     allCmds({}).indexOf("--upload-certs") === -1 && allCmds({ha:true}).indexOf("--upload-certs") !== -1, "");
+  ok("Bei Hochverfügbarkeit wird geprüft, wohin die API-Adresse zeigt",
+    allCmds({ha:true}).indexOf("getent hosts") !== -1 &&
+    guideOf({ha:true}).some(s => s.items.some(i => i.d.indexOf("kube-vip") !== -1)), "");
   ok("Hochverfügbarkeit ergänzt die Abschnitte für weitere Hauptserver",
     guideOf({ha:true}).length > guideOf({}).length &&
     allCmds({ha:true}).indexOf("--control-plane --certificate-key") !== -1 &&
@@ -4427,6 +4430,8 @@ function clusterGuide(raw){
        d:"Genau der Befehl, den kubeadm init ausgegeben hat — mit --control-plane und dem Zertifikatsschlüssel. Fehlt dir die Ausgabe, setzt du ihn aus kubeadm token create --print-join-command und einem frischen certificate-key selbst zusammen.|Exactly the command kubeadm init printed — with --control-plane and the certificate key. If you no longer have that output, assemble it yourself from kubeadm token create --print-join-command plus a fresh certificate key."},
       {c:"KEY=$(sudo kubeadm init phase upload-certs --upload-certs | tail -1)\necho \"$(kubeadm token create --print-join-command) --control-plane --certificate-key $KEY\"",
        d:"Auf dem **ersten** Hauptserver ausführen: Das erzeugt einen frischen Zertifikatsschlüssel und ein frisches Token und setzt daraus die vollständige Zeile zusammen, die du oben brauchst. Weil beide Werte neu sind, spielt es keine Rolle, wie lange die Installation her ist.|Run on the **first** control-plane node: this creates a fresh certificate key and a fresh token and assembles the complete line you need above. Since both values are new, it does not matter how long ago the installation was."},
+      {c:"getent hosts " + api + "\nkubectl -n kube-system get cm kubeadm-config -o yaml | grep controlPlaneEndpoint",
+       d:"Die Gegenprobe, wohin die API-Adresse tatsaechlich zeigt. Loest sie auf die IP **eines einzelnen** Hauptservers auf, ist der Cluster zwar erweiterbar, aber nicht hochverfuegbar: Faellt diese Maschine aus, laeuft der Cluster mit den anderen beiden weiter — nur erreicht niemand mehr die API, weil der Name auf eine tote Adresse zeigt. Fuer echte Hochverfuegbarkeit braucht der Name eine schwebende Adresse: kube-vip als statischer Pod auf den Hauptservern, keepalived, oder ein Lastverteiler davor. Weil sich dabei nur die Aufloesung aendert und nicht der Name, bleiben die Zertifikate gueltig.|The counter-check on where the API address actually points. If it resolves to the IP of **one single** control-plane node, the cluster can be extended but is not highly available: if that machine fails, the cluster keeps running on the other two — only nobody can reach the API any more, because the name points at a dead address. Real high availability needs a floating address for that name: kube-vip as a static pod on the control-plane nodes, keepalived, or a load balancer in front. Since only the resolution changes and not the name, the certificates stay valid."},
       {c:"sudo kubeadm init phase upload-certs --upload-certs\nkubeadm token create --print-join-command",
        d:"Dasselbe in zwei Schritten, falls du die Werte einzeln sehen willst. Der Zertifikatsschlüssel steht in der letzten Zeile der ersten Ausgabe.|The same in two steps, if you would rather see the values separately. The certificate key is the last line of the first output."}
     ],
