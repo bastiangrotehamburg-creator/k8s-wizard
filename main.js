@@ -4086,6 +4086,9 @@ function runSelfTests(){
   ok("Der MetalLB-Bereich wird übernommen",
     allCmds({lbRange:"10.0.0.50-10.0.0.60"}).indexOf("10.0.0.50-10.0.0.60") !== -1 &&
     allCmds({}).indexOf("192.168.178.240-192.168.178.250") !== -1, "");
+  ok("Die Anleitung zeigt den Weg auf die eigene Arbeitsstation",
+    allCmds({}).indexOf("/etc/kubernetes/admin.conf' > ~/.kube/config") !== -1 &&
+    guideOf({}).some(s => (s.r||[]).some(x => x.lvl === "err" && x.m.indexOf("admin.conf") !== -1)), "");
   ok("Der metrics-server bekommt den Hinweis auf 0/1 mit",
     allCmds({}).indexOf("--kubelet-insecure-tls") !== -1, "");
   ok("Der Prüfschritt nennt den Grund für NotReady",
@@ -4537,10 +4540,13 @@ function clusterGuide(raw){
        d:"Ohne metrics-server liefert kubectl top nichts und ein HorizontalPodAutoscaler skaliert nie.|Without metrics-server, kubectl top returns nothing and a HorizontalPodAutoscaler never scales."},
       {c:"kubectl -n kube-system patch deployment metrics-server --type=json \\\n  -p='[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--kubelet-insecure-tls\"}]'\nkubectl -n kube-system rollout status deploy/metrics-server\nkubectl top nodes",
        d:"Auf einem kubeadm-Cluster bleibt metrics-server sonst dauerhaft auf **0/1** stehen — Status Running, aber nie bereit. Grund: Er spricht die kubelets ueber HTTPS an und prueft deren Zertifikate, und kubeadm stattet die kubelets mit selbstsignierten Zertifikaten ohne passende SANs aus. Im Log steht dann *cannot validate certificate ... doesn't contain any IP SANs*. Der saubere Weg fuer Produktion ist serverTLSBootstrap im kubelet samt Freigabe der Zertifikatsanfragen; fuer Labor und Testcluster ist dieser Schalter der uebliche Weg.|On a kubeadm cluster metrics-server otherwise sits at **0/1** forever — status Running, but never ready. The reason: it talks to the kubelets over HTTPS and validates their certificates, and kubeadm equips the kubelets with self-signed certificates without matching SANs. The log then reads *cannot validate certificate ... doesn't contain any IP SANs*. The clean route for production is serverTLSBootstrap in the kubelet plus approving the certificate requests; for labs and test clusters this flag is the usual way."},
+      {c:"ssh " + (o.endpoint || "HAUPTSERVER") + " 'sudo cat /etc/kubernetes/admin.conf' > ~/.kube/config\nchmod 600 ~/.kube/config\nkubectl get nodes",
+       d:"Von der eigenen Arbeitsstation aus arbeiten, statt sich auf den Hauptserver zu setzen. Wichtig: In der Datei steht die API-Adresse als Name — der muss auch **auf deinem Rechner** aufloesen, notfalls ueber die lokale hosts-Datei. Hast du schon eine kubeconfig, nicht ueberschreiben, sondern zusammenfuehren: KUBECONFIG=~/.kube/config:neue.conf kubectl config view --flatten.|Work from your own machine instead of sitting on the control-plane node. Important: the file contains the API address as a name — that has to resolve **on your machine** too, via the local hosts file if need be. If you already have a kubeconfig, do not overwrite it but merge: KUBECONFIG=~/.kube/config:new.conf kubectl config view --flatten."},
       {c:"# StorageClass: auf eigener Hardware etwa Longhorn oder der local-path-provisioner",
        d:"Ohne StorageClass bleibt jedes PersistentVolumeClaim für immer Pending.|Without a storage class every PersistentVolumeClaim stays Pending forever."}
     ],
-    r:[{lvl:"warn", m:t("Beim Upgrade immer nur eine Minor-Version auf einmal, und kubeadm zuerst. kubelet darf höchstens eine Minor-Version hinter dem API-Server liegen, niemals davor.|When upgrading, only one minor version at a time, and kubeadm first. The kubelet may trail the API server by at most one minor version, and must never lead it.")}]
+    r:[{lvl:"err", m:t("Die admin.conf ist ein Vollzugriff auf den gesamten Cluster, unbefristet und nicht widerrufbar ausser durch Austausch der CA. Auf einem Laptop ist sie fuer den Anfang bequem und auf Dauer die falsche Antwort — sobald mehr als eine Person damit arbeitet, gehoert jede an ihren eigenen Zugang mit eigenen Rechten, ueber RBAC begrenzt.|admin.conf is full access to the entire cluster, unlimited in time and revocable only by replacing the CA. On a laptop it is convenient to start with and the wrong answer in the long run — as soon as more than one person works with it, everyone belongs on their own credentials with their own rights, limited via RBAC.")},
+       {lvl:"warn", m:t("Beim Upgrade immer nur eine Minor-Version auf einmal, und kubeadm zuerst. kubelet darf höchstens eine Minor-Version hinter dem API-Server liegen, niemals davor.|When upgrading, only one minor version at a time, and kubeadm first. The kubelet may trail the API server by at most one minor version, and must never lead it.")}]
   });
 
   sec("Neu aufsetzen|Starting over", "all", {
