@@ -849,18 +849,22 @@ $warn" \
     case $sel in
       version)  O_version=$(ui_input "$(t 'Kubernetes-Version|Kubernetes version')" \
                   "$(t 'Nur Major.Minor — daraus entsteht die Paketquelle.|Major.minor only — the package repository is derived from it.')" "$O_version");;
-      os)       pick O_os "$(t 'Betriebssystem|Operating system')" "" \
+      os)       pick O_os "$(t 'Betriebssystem|Operating system')" \
+                  "$(t 'Bestimmt die Paketquelle und ein paar Schritte der Vorbereitung.|Determines the package repository and a few preparation steps.')" \
                   apt "Debian / Ubuntu" dnf "RHEL / Rocky / AlmaLinux";;
-      runtime)  pick O_runtime "$(t 'Container-Runtime|Container runtime')" "" \
+      runtime)  pick O_runtime "$(t 'Container-Runtime|Container runtime')" \
+                  "$(t 'Bei containerd muss der cgroup-Treiber von Hand auf systemd gestellt werden, CRI-O bringt das richtig eingestellt mit.|With containerd the cgroup driver has to be switched to systemd by hand; CRI-O ships with it set correctly.')" \
                   containerd "containerd" crio "CRI-O";;
-      cni)      pick O_cni "$(t 'Netzwerk (CNI)|Networking (CNI)')" "" \
+      cni)      pick O_cni "$(t 'Netzwerk (CNI)|Networking (CNI)')" \
+                  "$(t 'Ohne CNI bleibt jeder Knoten NotReady. Die Wahl entscheidet auch, ob es NetworkPolicy gibt.|Without a CNI every node stays NotReady. The choice also decides whether network policy exists at all.')" \
                   cilium  "$(t 'Cilium — eBPF, ohne kube-proxy moeglich|Cilium — eBPF, can replace kube-proxy')" \
                   calico  "$(t 'Calico — verbreitet, NetworkPolicy inklusive|Calico — widespread, network policy included')" \
                   flannel "$(t 'Flannel — einfach, ohne NetworkPolicy|Flannel — simple, no network policy')";;
       endpoint) O_endpoint=$(ui_input "$(t 'API-Adresse|API address')" \
                   "$(t 'Name oder VIP, unter dem der API-Server erreichbar ist. Leer lassen heisst: die IP des ersten Hauptservers — die laesst sich spaeter nicht mehr aendern. Fuer mehrere Hauptserver ist die Angabe zwingend.|Name or VIP the API server answers on. Empty means the first control-plane node IP — which cannot be changed later. With several control-plane nodes it is mandatory.')" "$O_endpoint");;
       ha)       O_ha=$(toggle "$O_ha");;
-      workers)  local w; w=$(ui_input "$(t 'Anzahl Worker|Number of workers')" "" "$O_workers")
+      workers)  local w; w=$(ui_input "$(t 'Anzahl Worker|Number of workers')" \
+                  "$(t 'Geht nur in die Anleitung ein — die Worker treten alle mit demselben Befehl bei.|Only feeds the guide — every worker joins with the same command.')" "$O_workers")
                 case $w in ''|*[!0-9]*) ui_msg "$(t 'Ungueltig|Invalid')" "$(t 'Bitte eine Zahl.|Please enter a number.')";; *) O_workers=$w;; esac;;
       podCidr)  O_podCidr=$(ui_input "$(t 'Pod-Netz|Pod network')" \
                   "$(t 'Darf sich mit keinem Netz ueberschneiden, das die Knoten sonst benutzen.|Must not overlap with any network the nodes already use.')" "$O_podCidr");;
@@ -935,6 +939,23 @@ ex_cmd(){
   step_run "$1" "$(plain "$(t "$2")")" "$(printf '%02d · %s' "$EX_CUR" "$EX_H")"
 }
 
+# whiptails Eingabefeld ist einzeilig: ein mehrzeiliger Befehl waere nach der
+# ersten Zeile abgeschnitten, ohne dass es jemand merkt. Also Zeile fuer Zeile.
+edit_command(){
+  local c=$1 title=$2 line new i out=""
+  local -a lines=()
+  while IFS= read -r line; do lines+=("$line"); done <<EOF
+$c
+EOF
+  for i in "${!lines[@]}"; do
+    new=$(ui_input "$title" "$(t 'Zeile|Line') $((i+1))/${#lines[@]}" "${lines[$i]}") || return 1
+    out="$out$new
+"
+  done
+  printf '%s' "${out%
+}"
+}
+
 step_run(){
   local c=$1 d=$2 title=$3
   while :; do
@@ -954,7 +975,7 @@ $hint
       skip|"") return 0;;
       stop)    ABORT=1; return 0;;
       edit)
-        local nc; nc=$(ui_input "$title" "$(t 'Befehl|Command')" "$c") || return 0
+        local nc; nc=$(edit_command "$c" "$title") || return 0
         [ -n "$nc" ] && c=$nc
         continue;;
       run)
@@ -1131,6 +1152,11 @@ selftest(){
   SELECTED="1"
   out=$(export_script)
   ok "Auswahl begrenzt den Export"    "$([ "$(has "$out" 'kubeadm join')" = 0 ] && echo 1 || echo 0)"
+
+  ui_input(){ printf '%s' "$3"; }        # Stellvertreter fuer den Dialog
+  out=$(edit_command "$(printf 'eins\nzwei drei\nvier')" T)
+  ok "Bearbeiten laesst mehrzeilige Befehle heil" "$([ "$out" = "$(printf 'eins\nzwei drei\nvier')" ] && echo 1 || echo 0)"
+  unset -f ui_input
 
   UILANG=en; out=$(markdown); UILANG=de
   ok "Englisch uebersetzt die Ueberschrift" "$(has "$out" 'First control-plane node')"
