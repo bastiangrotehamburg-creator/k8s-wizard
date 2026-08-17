@@ -1,0 +1,40 @@
+# Beispiel fuer eigene Befehle
+# ---------------------------------------------------------------------------
+# Kopieren und umbenennen, damit es geladen wird:
+#   cp modules.d/00-beispiel.module.example modules.d/00-meins.module
+#
+# Alles in modules.d/*.module wird beim Start von setup-wizard.sh eingelesen.
+# Damit landen eigene Befehle automatisch in der Checkliste des Menues.
+#
+# Registrierung:
+#   register_module <id> <label> <beschreibung> <test-befehl> <installfunktion>
+#
+# Hilfsfunktionen, die zur Verfuegung stehen:
+#   run_cmd "<shell-befehl>"                  ausfuehren + protokollieren + dry-run
+#   pkg_install <paket> [<paket> ...]         ueber den erkannten Paketmanager
+#   install_binary <url> <name>               nach /usr/local/bin, chmod 0755
+#   install_from_tgz <url> <pfad-im-tar> <name>
+#   $SUDO   $ARCH   $PM   $LOG_FILE           erkannte Umgebung
+
+# --- Beispiel 1: einfache Pakete ------------------------------------------
+inst_meine_tools() {
+  pkg_install htop ncdu tree
+}
+register_module meine-tools "Meine Tools" "htop, ncdu, tree" \
+  "command -v htop" inst_meine_tools
+
+# --- Beispiel 2: mehrere Befehle nacheinander ------------------------------
+inst_zeitzone() {
+  run_cmd "$SUDO timedatectl set-timezone Europe/Berlin" &&
+  run_cmd "$SUDO timedatectl set-ntp true"
+}
+register_module zeitzone "Zeitzone" "Europe/Berlin + NTP aktivieren" \
+  "timedatectl show -p Timezone --value | grep -q Europe/Berlin" inst_zeitzone
+
+# --- Beispiel 3: Datei schreiben ------------------------------------------
+inst_sysctl_tuning() {
+  run_cmd "printf 'net.ipv4.ip_forward=1\n' | $SUDO tee /etc/sysctl.d/99-wizard.conf >/dev/null" &&
+  run_cmd "$SUDO sysctl --system"
+}
+register_module sysctl-tuning "sysctl" "IPv4-Forwarding dauerhaft aktivieren" \
+  "test -f /etc/sysctl.d/99-wizard.conf" inst_sysctl_tuning
