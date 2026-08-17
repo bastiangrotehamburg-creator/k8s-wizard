@@ -48,6 +48,8 @@ angezeigt, nie ausgeführt.
 
 ### Beitrittspakete: vom Hauptserver zu den anderen Knoten
 
+![Wer macht was](docs/beitrittspakete.png)
+
 Damit auf Worker und weiteren Hauptservern nichts abgetippt werden muss, holt
 das Script auf dem **ersten Hauptserver** ein frisches Token, den CA-Hash und —
 bei Hochverfügbarkeit — einen Zertifikatsschlüssel und schreibt sie zusammen
@@ -85,6 +87,10 @@ Zwei Dinge sind dabei bewusst so gebaut:
 Das Token gilt 24 Stunden, der Zertifikatsschlüssel zwei. Das Menü zeigt, wie
 alt beides ist; danach auf dem ersten Hauptserver ein neues Paket erzeugen.
 Nach dem Beitritt gehört die Datei gelöscht — das Script sagt es auch.
+
+Der ganze Weg an einem durchgerechneten Beispiel — ein Hauptserver, zwei Worker,
+feste Adressen, inklusive Trockenübung ohne Cluster:
+**[docs/beispiel-drei-knoten.md](docs/beispiel-drei-knoten.md)**
 
 ### Auf dem Rechner ausführen
 
