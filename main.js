@@ -3504,6 +3504,14 @@ const CHEATSHEET = [
    ["backend…port.number","Ingress","Der Port des **Service**, nicht der des Containers.|The **service** port, not the container port."],
    ["probe port","Pod","Muss zu einem containerPort passen, sonst prüft die Probe ins Leere.|Has to match a containerPort, otherwise the probe checks nothing."]]},
 
+{h:"Die drei Netze|The three networks",
+ table:[["Netz|Network","Beispiel|Example","Wo es existiert|Where it exists","Wer vergibt|Who assigns"],
+   ["Knoten-Netz|Node network","192.168.178.0/24","Echt, im LAN. Die Adressen der Maschinen.|Real, in the LAN. The machines' addresses.","Router oder Netzwerkteam|Router or network team"],
+   ["Pod-Netz|Pod network","10.244.0.0/16","Nur im Cluster. Jeder Pod bekommt eine Adresse daraus.|Cluster-internal only. Every pod gets an address from it.","CNI, je Knoten ein /24|The CNI, a /24 per node"],
+   ["Service-Netz|Service network","10.96.0.0/12","Nirgends — es sind reine Regeln auf jedem Knoten.|Nowhere — it is just rules on every node.","kube-proxy"]],
+ p2:["Nur das Knoten-Netz ist ein echtes Netz. Pod- und Service-Netz sind frei gewaehlte Bereiche, die **ausschliesslich innerhalb des Clusters** gelten: Im Router ist dafuer nichts einzutragen, und kein Geraet ausserhalb muss sie kennen. Die einzige Bedingung ist, dass sich die drei nicht ueberschneiden — und auch nicht mit etwas, das die Knoten sonst erreichen muessen, etwa einem VPN oder einem NAS.|Only the node network is a real network. The pod and service networks are freely chosen ranges that apply **inside the cluster only**: there is nothing to configure in your router, and no device outside needs to know them. The single condition is that the three must not overlap — nor collide with anything the nodes otherwise need to reach, such as a VPN or a NAS.",
+     "Nach **aussen** kommen Pods trotzdem: Der Knoten schreibt die Absenderadresse auf seine eigene um. Nach **innen** fuehrt kein Weg ueber die Pod-Adresse — dafuer gibt es NodePort, LoadBalancer und Ingress, und die sitzen alle auf echten Adressen aus dem Knoten-Netz.|Pods still reach **out**: the node rewrites the source address to its own. There is no way **in** via a pod address — that is what NodePort, LoadBalancer and Ingress are for, and those all sit on real addresses from the node network."]},
+
 {h:"Mengenangaben|Quantities",
  table:[["Schreibweise|Notation","Wert|Value","Anmerkung|Note"],
    ["1 / 1000m","1 CPU-Kern|1 CPU core","m heißt Milli. 500m ist ein halber Kern.|m means milli. 500m is half a core."],
