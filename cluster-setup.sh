@@ -47,6 +47,15 @@ O_lbRange=""
 cni_cidr(){ echo "10.244.0.0/16"; }
 
 CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/k8s-wizard/cluster.conf
+SELFDIR=$(cd "$(dirname "$0")" && pwd)
+
+# Ein Beitrittspaket ist eine Einstellungsdatei plus die Werte, die nur der
+# erste Hauptserver kennt: Token, CA-Hash und bei Hochverfuegbarkeit der
+# Zertifikatsschluessel. Damit muss auf dem Zielrechner nichts mehr getippt
+# werden.
+J_role=""; J_api=""; J_token=""; J_hash=""; J_certKey=""; J_from=""; J_created=""
+CONFIG_SRC=""; JOIN_ERR=""
+
 
 # Abgeleitete Werte. API ist die Adresse, die in jedem join-Befehl steht.
 API=""
@@ -61,6 +70,9 @@ normalize(){
   case $O_runtime in containerd|crio) :;; *) O_runtime=containerd;; esac
   case $O_cni     in cilium|calico|flannel) :;; *) O_cni=cilium;; esac
   case $O_ha         in 0|1) :;; *) O_ha=0;; esac
+  # Ein Paket mit der Rolle "weiterer Hauptserver" setzt Hochverfuegbarkeit
+  # voraus — sonst gaebe es den Abschnitt gar nicht, dem es gilt.
+  [ "$J_role" = cp ] && O_ha=1
   case $O_singleNode in 0|1) :;; *) O_singleNode=0;; esac
   case $O_firewall   in 0|1) :;; *) O_firewall=0;; esac
   if [ -n "$O_endpoint" ]; then API=$O_endpoint
@@ -113,6 +125,10 @@ para(){  "${R}_para"  "$@"; }
 thead(){ "${R}_thead" "$@"; }
 trow(){  "${R}_trow"  "$@"; }
 risk(){  "${R}_risk"  "$@"; }
+# cmd <befehl> <erklaerung> [other]
+# "other" heisst: laeuft auf einem anderen Rechner als dem, der diesen
+# Abschnitt abarbeitet. Anleitung und Markdown zeigen ihn, ausgefuehrt wird er
+# hier nicht.
 cmd(){   "${R}_cmd"   "$@"; }
 
 risk_lbl(){ [ "$1" = err ] && t "Achtung|Caution" || t "Hinweis|Note"; }
@@ -122,6 +138,13 @@ risk_lbl(){ [ "$1" = err ] && t "Achtung|Caution" || t "Hinweis|Note"; }
 guide(){
   normalize
   local apt=0; [ "$O_os" = apt ] && apt=1
+  # Steckt ein Beitrittspaket dahinter, stehen in den join-Befehlen die echten
+  # Werte — dann sind sie ausfuehrbar statt nur abzuschreiben.
+  local japi=$API:6443 jtok="<TOKEN>" jhash="sha256:<HASH>" jkey="<KEY>"
+  [ -n "$J_api" ]     && japi=$J_api
+  [ -n "$J_token" ]   && jtok=$J_token
+  [ -n "$J_hash" ]    && jhash=$J_hash
+  [ -n "$J_certKey" ] && jkey=$J_certKey
 
   # --- alle Knoten ---
   sec "Vorbereitung|Preparation" all
@@ -349,17 +372,22 @@ CMD
     para "\`<TOKEN>\` und \`<HASH>\` wie beim Worker, dazu \`<KEY>\` aus dem Abschnitt **Beitrittsdaten besorgen**. Der Schluessel ist der Grund, warum ein Hauptserver mehr braucht als ein Worker: Mit ihm holt sich der neue Knoten die Zertifikate der bestehenden CA, statt eine eigene anzulegen.|\`<TOKEN>\` and \`<HASH>\` as for a worker, plus \`<KEY>\` from the section **Getting the join values**. That key is why a control-plane node needs more than a worker: with it the new node fetches the certificates of the existing CA instead of creating its own."
     risk warn "Drei Hauptserver, nicht zwei: etcd braucht eine Mehrheit. Mit zwei Knoten steht der Cluster, sobald einer ausfaellt — schlechter als mit einem einzelnen.|Three control-plane nodes, not two: etcd needs a majority. With two nodes the cluster stops as soon as one fails — worse than with a single one."
     cmd "$(cat <<CMD
-sudo kubeadm join $API:6443 \\
-  --token <TOKEN> \\
-  --discovery-token-ca-cert-hash sha256:<HASH> \\
-  --control-plane --certificate-key <KEY>
+sudo kubeadm join $japi \\
+  --token $jtok \\
+  --discovery-token-ca-cert-hash $jhash \\
+  --control-plane --certificate-key $jkey
 CMD
-)" "Genau der Befehl, den kubeadm init ausgegeben hat — mit --control-plane und dem Zertifikatsschluessel. Fehlt dir die Ausgabe, setzt du ihn aus kubeadm token create --print-join-command und einem frischen certificate-key selbst zusammen.|Exactly the command kubeadm init printed — with --control-plane and the certificate key. If you no longer have that output, assemble it yourself from kubeadm token create --print-join-command plus a fresh certificate key."
+)" "$([ -n "$J_certKey" ] && printf '%s' "Token, Hash und Zertifikatsschluessel stehen schon drin — aus dem Beitrittspaket von **$J_from**. Der Schluessel gilt nur zwei Stunden: Ist er abgelaufen, auf dem ersten Hauptserver ein neues Paket erzeugen.|Token, hash and certificate key are already filled in — from the join package created on **$J_from**. The key is valid for two hours only: once it has expired, create a new package on the first control-plane node." || printf '%s' "Genau der Befehl, den kubeadm init ausgegeben hat — mit --control-plane und dem Zertifikatsschluessel. Fehlt dir die Ausgabe, setzt du ihn aus kubeadm token create --print-join-command und einem frischen certificate-key selbst zusammen.|Exactly the command kubeadm init printed — with --control-plane and the certificate key. If you no longer have that output, assemble it yourself from kubeadm token create --print-join-command plus a fresh certificate key.")"
     cmd "$(cat <<'CMD'
 KEY=$(sudo kubeadm init phase upload-certs --upload-certs | tail -1)
 echo "$(kubeadm token create --print-join-command) --control-plane --certificate-key $KEY"
 CMD
-)" "Auf dem **ersten** Hauptserver ausfuehren: Das erzeugt einen frischen Zertifikatsschluessel und ein frisches Token und setzt daraus die vollstaendige Zeile zusammen, die du oben brauchst. Weil beide Werte neu sind, spielt es keine Rolle, wie lange die Installation her ist.|Run on the **first** control-plane node: this creates a fresh certificate key and a fresh token and assembles the complete line you need above. Since both values are new, it does not matter how long ago the installation was."
+)" "Auf dem **ersten** Hauptserver ausfuehren: Das erzeugt einen frischen Zertifikatsschluessel und ein frisches Token und setzt daraus die vollstaendige Zeile zusammen, die du oben brauchst. Weil beide Werte neu sind, spielt es keine Rolle, wie lange die Installation her ist.|Run on the **first** control-plane node: this creates a fresh certificate key and a fresh token and assembles the complete line you need above. Since both values are new, it does not matter how long ago the installation was." other
+    cmd "$(cat <<'CMD'
+sudo kubeadm init phase upload-certs --upload-certs
+kubeadm token create --print-join-command
+CMD
+)" "Dasselbe in zwei Schritten, falls du die Werte einzeln sehen willst. Der Zertifikatsschluessel steht in der letzten Zeile der ersten Ausgabe.|The same in two steps, if you would rather see the values separately. The certificate key is the last line of the first output." other
 
     # --- Notausgang, wenn der Endpoint fehlt ---
     sec "Wenn der Endpoint fehlt|If the endpoint is missing" cp
@@ -386,12 +414,14 @@ CMD
     para "Auf jedem Worker — nach der Vorbereitung ganz oben, aber ohne die Schritte des Hauptservers.|On every worker — after the preparation above, but without any of the control-plane steps."
   fi
   risk err "kubectl gehoert nicht auf die Worker und die admin.conf schon gar nicht. Wer sie dorthin kopiert, gibt jedem mit Zugang zum Worker die volle Kontrolle ueber den Cluster.|kubectl does not belong on the workers and admin.conf certainly does not. Copying it there hands anyone with access to that worker full control of the cluster."
+  local jdesc="Der Befehl aus der Ausgabe von kubeadm init, ohne --control-plane. \`<TOKEN>\` und \`<HASH>\` kommen aus dem Abschnitt **Beitrittsdaten besorgen** — dort steht auch, wie du sie neu erzeugst.|The command from the kubeadm init output, without --control-plane. \`<TOKEN>\` and \`<HASH>\` come from the section **Getting the join values**, which also shows how to create them anew."
+  [ -n "$J_token" ] && jdesc="Token und Hash stehen schon drin — aus dem Beitrittspaket von **$J_from**. Das Token gilt 24 Stunden ab dem Zeitpunkt, an dem das Paket erzeugt wurde; danach auf dem ersten Hauptserver ein neues erzeugen.|The token and hash are already filled in — from the join package created on **$J_from**. The token is valid for 24 hours from when the package was made; after that, create a new one on the first control-plane node."
   cmd "$(cat <<CMD
-sudo kubeadm join $API:6443 \\
-  --token <TOKEN> \\
-  --discovery-token-ca-cert-hash sha256:<HASH>
+sudo kubeadm join $japi \\
+  --token $jtok \\
+  --discovery-token-ca-cert-hash $jhash
 CMD
-)" "Der Befehl aus der Ausgabe von kubeadm init, ohne --control-plane. \`<TOKEN>\` und \`<HASH>\` kommen aus dem Abschnitt **Beitrittsdaten besorgen** — dort steht auch, wie du sie neu erzeugst.|The command from the kubeadm init output, without --control-plane. \`<TOKEN>\` and \`<HASH>\` come from the section **Getting the join values**, which also shows how to create them anew."
+)" "$jdesc"
 
   # --- Pruefen ---
   sec "Pruefen|Checking" cp
@@ -569,7 +599,17 @@ md_thead(){ local c out="|" sep="|"; for c in "$@"; do out="$out $(t "$c") |"; s
             printf '%s\n%s\n' "$out" "$sep"; MD_TBL=1; }
 md_trow(){ local c out="|"; for c in "$@"; do out="$out $(t "$c") |"; done; printf '%s\n' "$out"; }
 md_risk(){ md_flush; printf '> **%s** — %s\n\n' "$(risk_lbl "$1")" "$(t "$2")"; }
-md_cmd(){ md_flush; printf '```sh\n%s\n```\n\n%s\n\n' "$1" "$(t "$2")"; }
+# Die Anleitung wird weitergegeben, das Token nicht: im Markdown stehen wieder
+# die Platzhalter.
+mask(){
+  local x=$1
+  [ -n "$J_token" ]   && x=${x//$J_token/<TOKEN>}
+  [ -n "$J_hash" ]    && x=${x//$J_hash/sha256:<HASH>}
+  [ -n "$J_certKey" ] && x=${x//$J_certKey/<KEY>}
+  printf '%s' "$x"
+}
+md_cmd(){ md_flush; printf '```sh\n%s\n```\n\n%s\n\n' "$(mask "$1")" "$(t "$2")"; }
+
 
 markdown(){
   normalize
@@ -667,7 +707,8 @@ sh_risk(){ sel_has "$SH_CUR" || return 0
   printf 'note %s %s\n\n' "$1" "$(shq "$(plain "$(t "$2")")")"; }
 sh_cmd(){ sel_has "$SH_CUR" || return 0
   printf '%s\n' "$(plain "$(t "$2")" | fold -s -w 74 | sed 's/^/# /')"
-  if has_placeholder "$1"; then printf 'manual <<'"'"'K8SCMD'"'"'\n%s\nK8SCMD\n\n' "$1"
+  if [ "${3:-}" = other ] || has_placeholder "$1"; then
+    printf 'manual <<'"'"'K8SCMD'"'"'\n%s\nK8SCMD\n\n' "$1"
   else printf 'run <<'"'"'K8SCMD'"'"'\n%s\nK8SCMD\n\n' "$1"; fi; }
 
 shq(){ printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -929,6 +970,8 @@ $([ "$1" = err ] && echo '!' || echo '?') $(plain "$(t "$2")")"; }
 ex_cmd(){
   [ "$ABORT" = 1 ] && return 0
   sel_has "$EX_CUR" || return 0
+  # Gehoert auf einen anderen Rechner — hier nicht anbieten.
+  [ "${3:-}" = other ] && return 0
   if [ "${EX_SHOWN:-0}" = 0 ]; then
     EX_SHOWN=1
     if [ -n "$EX_RISKS" ]; then
@@ -1014,17 +1057,252 @@ Continue?')" || return 0
   else ui_msg "$(t 'Fertig|Done')" "$(t 'Alle gewaehlten Schritte sind durch.|All selected steps are through.')"; fi
 }
 
+
+# ------------------------------------------------------- Beitrittspakete ----
+# Aus der Ausgabe von "kubeadm token create --print-join-command" die drei
+# Werte herausloesen. Als eigene Funktion, damit sie sich pruefen laesst.
+parse_join_line(){
+  local l=$1
+  case $l in *"kubeadm join "*) :;; *) return 1;; esac
+  J_api=$(printf '%s' "$l" | sed -n 's/.*kubeadm join \([^ ]*\).*/\1/p')
+  J_token=$(printf '%s' "$l" | sed -n 's/.*--token \([^ ]*\).*/\1/p')
+  J_hash=$(printf '%s' "$l" | sed -n 's/.*--discovery-token-ca-cert-hash \([^ ]*\).*/\1/p')
+  [ -n "$J_api" ] && [ -n "$J_token" ] && [ -n "$J_hash" ]
+}
+
+# Auf dem ersten Hauptserver: frisches Token, Hash und bei HA den
+# Zertifikatsschluessel besorgen. Beides laeuft ueber kubeadm, beides braucht
+# root — deshalb sudo.
+join_fetch(){
+  local line
+  line=$(sudo kubeadm token create --print-join-command 2>&1) || { JOIN_ERR=$line; return 1; }
+  parse_join_line "$line" || { JOIN_ERR=$line; return 1; }
+  J_certKey=""
+  if [ "$O_ha" = 1 ]; then
+    J_certKey=$(sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1)
+    case $J_certKey in *[!0-9a-f]*|"") J_certKey="";; esac
+  fi
+  J_from=$(hostname)
+  J_created=$(date +%s)
+  return 0
+}
+
+# Datei je Rolle. 0600, weil Token und Schluessel darin stehen.
+write_package(){  # rolle datei
+  local role=$1 file=$2
+  ( umask 077
+    {
+      printf '# k8s-wizard Beitrittspaket\n'
+      printf '# erzeugt %s auf %s\n' "$(date '+%F %T')" "$J_from"
+      printf '# %s\n' "$(t 'Enthaelt ein Token — nicht ins Repository, nach dem Beitritt loeschen.|Contains a token — keep out of repositories, delete after joining.')"
+      write_settings
+      printf 'role=%s\n' "$role"
+      printf 'api=%s\n' "$J_api"
+      printf 'token=%s\n' "$J_token"
+      printf 'hash=%s\n' "$J_hash"
+      [ "$role" = cp ] && [ -n "$J_certKey" ] && printf 'certKey=%s\n' "$J_certKey"
+      printf 'from=%s\n' "$J_from"
+      printf 'created=%s\n' "$J_created"
+    } > "$file" )
+  chmod 600 "$file" 2>/dev/null
+}
+
+# Wie alt ist das Token? Es gilt 24 Stunden.
+token_age(){
+  [ -n "$J_created" ] || { echo ""; return; }
+  local d=$(( $(date +%s) - J_created ))
+  local h=$(( d / 3600 )) m=$(( (d % 3600) / 60 ))
+  if [ "$h" -ge 24 ]; then t "seit $h Stunden — abgelaufen, auf dem Hauptserver neu erzeugen|$h hours old — expired, create a new one on the control-plane node"
+  elif [ "$h" -gt 0 ]; then t "vor $h h $m min erzeugt, gilt noch $(( 24 - h )) h|created $h h $m min ago, valid for another $(( 24 - h )) h"
+  else t "vor $m min erzeugt|created $m min ago"; fi
+}
+
+# Den Terminal ganz freigeben: scp fragt nach dem Passwort, das geht nicht
+# durch eine Dialogbox.
+run_on_tty(){  # befehl
+  clear 2>/dev/null
+  printf '\033[36m$ %s\033[0m\n\n' "$1"
+  bash -c "$1" </dev/tty
+  local rc=$?
+  printf '\n[exit %d] %s' "$rc" "$(t 'Weiter mit Enter.|Press enter to continue.')"
+  ask_line
+  return $rc
+}
+
+send_package(){  # datei
+  local file=$1 target
+  target=$(ui_input "scp" "$(t 'Wohin? Benutzer und Rechner, etwa root@192.168.0.21|Where to? User and host, e.g. root@192.168.0.21')" "") || return 0
+  [ -z "$target" ] && return 0
+  local cmd="scp '$file' '$SELFDIR/$(basename "$0")' '$target:~/'"
+  if ui_yesno "scp" "$(t 'Jetzt kopieren?|Copy now?')
+
+$cmd
+
+$(t 'Das Script wird gleich mitkopiert. Nach dem Passwort fragt scp selbst.|The script itself is copied along. scp will ask for the password.')"; then
+    if run_on_tty "$cmd"; then
+      ui_msg "scp" "$(t 'Kopiert. Auf dem Zielrechner genuegt jetzt:|Copied. On the target machine this is enough now:')
+
+  ./$(basename "$0")
+
+$(t 'Die Datei wird beim Start gefunden und angeboten.|The file is found and offered at startup.')"
+    else
+      ui_msg "scp" "$(t 'Das hat nicht geklappt. Von Hand:|That did not work. By hand:')
+
+$cmd"
+    fi
+  fi
+}
+
+make_packages(){
+  if ! command -v kubeadm >/dev/null 2>&1; then
+    ui_msg "$(t 'Kein kubeadm|No kubeadm')" \
+      "$(t 'Beitrittspakete entstehen auf dem ersten Hauptserver — dort, wo kubeadm init gelaufen ist. Auf diesem Rechner gibt es kein kubeadm.|Join packages are created on the first control-plane node, where kubeadm init ran. This machine has no kubeadm.')"
+    return 0
+  fi
+  ui_yesno "$(t 'Beitrittspakete erstellen|Create join packages')" \
+    "$(t 'Holt ein frisches Token und den CA-Hash vom laufenden Cluster.|Fetches a fresh token and the CA hash from the running cluster.')$([ "$O_ha" = 1 ] && printf '%s' "
+$(t 'Dazu einen neuen Zertifikatsschluessel fuer weitere Hauptserver — der gilt zwei Stunden.|Plus a new certificate key for further control-plane nodes — valid for two hours.')")
+
+$(t 'Beides landet in Dateien mit Rechten 0600. Fortfahren?|Both go into files with mode 0600. Continue?')" || return 0
+
+  JOIN_ERR=""
+  if ! join_fetch; then
+    ui_msg "kubeadm" "$(t 'Das Token liess sich nicht erzeugen:|The token could not be created:')
+
+${JOIN_ERR:-?}
+
+$(t 'Laeuft dieser Befehl auf dem ersten Hauptserver, und ist der API-Server erreichbar?|Is this the first control-plane node, and is the API server reachable?')"
+    return 0
+  fi
+
+  local dir
+  dir=$(ui_input "$(t 'Verzeichnis|Directory')" "$(t 'Wohin sollen die Pakete?|Where should the packages go?')" "$PWD") || return 0
+  [ -z "$dir" ] && return 0
+  mkdir -p "$dir" 2>/dev/null
+
+  local made=""
+  write_package worker "$dir/k8s-worker.conf"; made="$dir/k8s-worker.conf"
+  if [ "$O_ha" = 1 ]; then
+    write_package cp "$dir/k8s-controlplane.conf"
+    made="$made
+$dir/k8s-controlplane.conf"
+  fi
+
+  ui_msg "$(t 'Fertig|Done')" "$(t 'Geschrieben:|Written:')
+
+$made
+
+$(t 'API-Adresse|API address'): $J_api
+$(t 'Token gilt 24 Stunden|Token valid for 24 hours')$([ -n "$J_certKey" ] && printf '\n%s' "$(t 'Zertifikatsschluessel gilt 2 Stunden|Certificate key valid for 2 hours')")
+
+$(t 'Beide Dateien enthalten Geheimnisse — nach dem Beitritt loeschen.|Both files contain secrets — delete them after joining.')"
+
+  # Direkt weiterreichen, solange die Werte frisch sind.
+  while :; do
+    local pick
+    pick=$(ui_menu "$(t 'Verteilen|Distribute')" "$(t 'Datei per scp auf einen Rechner kopieren. Das Script kommt mit.|Copy a file to a machine via scp. The script comes along.')" \
+      worker "k8s-worker.conf → $(t 'ein Worker|a worker')" \
+      $([ "$O_ha" = 1 ] && printf '%s %s' cp "k8s-controlplane.conf") \
+      fertig "« $(t 'fertig|done')") || return 0
+    case $pick in
+      worker) send_package "$dir/k8s-worker.conf";;
+      cp)     send_package "$dir/k8s-controlplane.conf";;
+      *)      return 0;;
+    esac
+  done
+}
+
+# --- die Gegenseite ---------------------------------------------------------
+# Beim Start nach Paketen suchen: im Verzeichnis des Scripts, im aktuellen
+# Verzeichnis und in der Konfiguration. Nur Dateien mit unserer Kopfzeile.
+find_packages(){
+  local f
+  for f in "$SELFDIR"/*.conf "$PWD"/*.conf "$(dirname "$CONFIG")"/*.conf; do
+    [ -r "$f" ] || continue
+    head -1 "$f" 2>/dev/null | grep -q '^# k8s-wizard' || continue
+    printf '%s\n' "$f"
+  done | awk '!seen[$0]++'
+}
+
+offer_packages(){
+  local list; list=$(find_packages)
+  [ -z "$list" ] && return 0
+  # Kurze Nummern als Auswahl — der volle Pfad passt in keine Spalte.
+  local args=() paths=() f n=0 role
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    n=$((n+1))
+    role=$(sed -n 's/^role=//p' "$f" | head -1)
+    case $role in
+      worker) role=Worker;;
+      cp)     role=$(t 'Hauptserver|control plane');;
+      *)      role=$(t 'nur Einstellungen|settings only');;
+    esac
+    paths+=("$f")
+    args+=("$n" "$(basename "$f")  [$role]  —  $(dirname "$f")")
+  done <<EOF
+$list
+EOF
+  [ "$n" = 0 ] && return 0
+  args+=(ohne "$(t 'ohne — mit den Vorgaben starten|none — start with the defaults')")
+  local pick
+  pick=$(ui_menu "$(t 'Konfiguration gefunden|Configuration found')" \
+    "$(t 'Neben dem Script liegt eine Konfiguration. Laden?|There is a configuration next to the script. Load it?')" "${args[@]}") || return 0
+  case $pick in
+    ''|ohne) return 0;;
+    *[!0-9]*) return 0;;
+    *) f=${paths[$((pick-1))]:-}
+       [ -n "$f" ] && load_config "$f" && CONFIG_SRC=$f;;
+  esac
+}
+
+# Beitreten: genau die Abschnitte, die zur Rolle aus dem Paket gehoeren.
+join_mode(){
+  local role=${J_role:-worker}
+  ui_yesno "$(t 'Diesem Cluster beitreten|Join this cluster')" \
+    "$(t 'Rolle|Role'): $([ "$role" = cp ] && t 'weiterer Hauptserver|further control-plane node' || echo Worker)
+$(t 'Cluster|Cluster'): $J_api  ($J_from)
+Token: $(token_age)
+
+$(t 'Erst die Vorbereitung, dann der Beitritt. Vor jedem Befehl wird gefragt. Fortfahren?|First the preparation, then the join. Every command asks first. Continue?')" || return 0
+
+  # Vorbereitung plus der Abschnitt der eigenen Rolle.
+  local n h r c
+  SELECTED=""
+  while IFS=$'\t' read -r n h r c; do
+    case $r in
+      all) case $h in "Neu aufsetzen"|"Starting over") :;; *) SELECTED="$SELECTED $n";; esac;;
+      worker) [ "$role" = worker ] && SELECTED="$SELECTED $n";;
+      cp) [ "$role" = cp ] && case $h in
+            "Weitere Hauptserver"|"Further control-plane nodes") SELECTED="$SELECTED $n";;
+          esac;;
+    esac
+  done < <(sections)
+  ABORT=0; SECN=0; EX_RISKS=""
+  R=ex guide
+  if [ "$ABORT" = 1 ]; then
+    ui_msg "$(t 'Abgebrochen|Aborted')" "$(t 'Nichts weiter ausgefuehrt.|Nothing further was run.')"
+  else
+    ui_msg "$(t 'Fertig|Done')" "$(t 'Auf dem Hauptserver sollte der Knoten jetzt in kubectl get nodes auftauchen. NotReady ist normal, solange das CNI seine Pods verteilt.|On the control-plane node the node should now appear in kubectl get nodes. NotReady is normal while the CNI distributes its pods.')
+
+$(t 'Das Beitrittspaket enthaelt ein gueltiges Token — jetzt loeschen.|The join package contains a valid token — delete it now.')${CONFIG_SRC:+
+  rm $CONFIG_SRC}"
+  fi
+}
+
 # ------------------------------------------------------------- Hauptmenue ----
+SETTING_KEYS="version os runtime cni endpoint ha workers podCidr svcCidr singleNode firewall lbRange"
+
+write_settings(){  # Einstellungen als key=wert, ohne die Geheimnisse
+  local k v
+  for k in $SETTING_KEYS; do v="O_$k"; printf '%s=%s\n' "$k" "${!v}"; done
+}
+
 save_config(){
   mkdir -p "$(dirname "$CONFIG")" 2>/dev/null
-  {
-    printf '# k8s-wizard cluster-setup\n'
-    local k
-    for k in version os runtime cni endpoint ha workers podCidr svcCidr singleNode firewall lbRange; do
-      local v="O_$k"; printf '%s=%s\n' "$k" "${!v}"
-    done
-  } > "$CONFIG"
+  { printf '# k8s-wizard cluster-setup\n'; write_settings; } > "$CONFIG"
 }
+
 load_config(){
   [ -r "$1" ] && [ ! -d "$1" ] || return 1
   local k v
@@ -1033,6 +1311,8 @@ load_config(){
       ''|\#*) continue;;
       version|os|runtime|cni|endpoint|ha|workers|podCidr|svcCidr|singleNode|firewall|lbRange)
         printf -v "O_$k" '%s' "$v";;
+      role|api|token|hash|certKey|from|created)
+        printf -v "J_$k" '%s' "$v";;
     esac
   done < "$1"
 }
@@ -1063,8 +1343,16 @@ $(t 'Aufruf auf dem Zielrechner: bash|Run on the target machine: bash') $(basena
 main_menu(){
   while :; do
     normalize
-    local sel
-    sel=$(ui_menu "k8s-wizard · $(t 'Cluster aufsetzen|Setting up a cluster')" "$(config_line)" \
+    local sel extra=()
+    # Nur zeigen, was hier auch Sinn ergibt.
+    # Nur auf der Empfaengerseite: die Rolle steht ausschliesslich in einem
+    # geladenen Paket. Wer die Werte gerade selbst erzeugt hat, sitzt auf dem
+    # ersten Hauptserver und tritt nirgends bei.
+    [ -n "$J_token" ] && [ -n "$J_role" ] &&
+      extra+=(join "$(t 'Diesem Cluster beitreten|Join this cluster')  [$([ "$J_role" = cp ] && t 'Hauptserver|control plane' || echo Worker)]")
+    command -v kubeadm >/dev/null 2>&1 && extra+=(pkg "$(t 'Beitrittspakete fuer die anderen Knoten|Join packages for the other nodes')")
+    sel=$(ui_menu "k8s-wizard · $(t 'Cluster aufsetzen|Setting up a cluster')" "$(config_line)$([ -n "$J_token" ] && [ -n "$J_role" ] && printf '\n%s' "$(t 'Beitrittspaket von|Join package from') $J_from · $J_api · $(token_age)")$([ -n "$J_token" ] && [ -z "$J_role" ] && printf '\n%s' "$(t 'Beitrittsdaten erzeugt|Join values created') · $J_api · $(token_age)")" \
+      "${extra[@]}" \
       set    "$(t 'Einstellungen|Settings')" \
       show   "$(t 'Anleitung anzeigen|Show the guide')" \
       md     "$(t 'Als Markdown speichern|Save as Markdown')" \
@@ -1074,6 +1362,8 @@ main_menu(){
       lang   "$(t 'Sprache: Deutsch|Language: English')" \
       quit   "$(t 'Beenden|Quit')") || return 0
     case $sel in
+      join)   join_mode;;
+      pkg)    make_packages;;
       set)    settings_menu;;
       show)   show_guide;;
       md)     save_markdown;;
@@ -1153,10 +1443,73 @@ selftest(){
   out=$(export_script)
   ok "Auswahl begrenzt den Export"    "$([ "$(has "$out" 'kubeadm join')" = 0 ] && echo 1 || echo 0)"
 
+  # --- Beitrittspakete ---
+  J_api=""; J_token=""; J_hash=""; J_certKey=""; J_role=""; J_from=""; J_created=""
+  out=$(markdown)
+  ok "ohne Paket bleiben die Platzhalter" "$(has "$out" '--token <TOKEN>')"
+
+  # Nicht in einer Kommandosubstitution aufrufen: die Werte sollen hier ankommen.
+  parse_join_line 'kubeadm join 192.168.0.10:6443 --token ab12cd.34ef56gh78ij90kl --discovery-token-ca-cert-hash sha256:deadbeef'
+  ok "join-Zeile wird zerlegt" \
+     "$([ "$J_api" = 192.168.0.10:6443 ] && [ "$J_token" = ab12cd.34ef56gh78ij90kl ] && [ "$J_hash" = sha256:deadbeef ] && echo 1 || echo 0)"
+  ok "Unsinn wird abgewiesen" "$(parse_join_line 'irgendwas anderes' 2>/dev/null && echo 0 || echo 1)"
+
+  J_from=pruefstand; J_created=$(date +%s); J_certKey=abc123
+  pkgdir=$(mktemp -d)
+  write_package worker "$pkgdir/w.conf"
+  write_package cp     "$pkgdir/c.conf"
+  ok "Paket ist nur fuer den Eigentuemer lesbar" "$([ "$(stat -c %a "$pkgdir/w.conf")" = 600 ] && echo 1 || echo 0)"
+  ok "Worker-Paket ohne Zertifikatsschluessel" "$(grep -q '^certKey=' "$pkgdir/w.conf" && echo 0 || echo 1)"
+  ok "Hauptserver-Paket mit Zertifikatsschluessel" "$(grep -q '^certKey=abc123' "$pkgdir/c.conf" && echo 1 || echo 0)"
+  ok "Paket traegt unsere Kopfzeile" "$(head -1 "$pkgdir/w.conf" | grep -q '^# k8s-wizard' && echo 1 || echo 0)"
+
+  J_api=""; J_token=""; J_hash=""; J_role=""; J_certKey=""
+  load_config "$pkgdir/w.conf"
+  ok "Paket laedt Token und Rolle zurueck" \
+     "$([ "$J_token" = ab12cd.34ef56gh78ij90kl ] && [ "$J_role" = worker ] && [ "$J_api" = 192.168.0.10:6443 ] && echo 1 || echo 0)"
+
+  out=$(text_guide)
+  ok "join-Befehl traegt das echte Token"  "$(has "$out" '--token ab12cd.34ef56gh78ij90kl')"
+  ok "kein Platzhalter mehr im join-Befehl" \
+     "$(printf '%s' "$out" | grep -q -- '--token <TOKEN>' && echo 0 || echo 1)"
+  ok "die Erklaertabelle nennt weiter die Platzhalter" "$(has "$out" '<TOKEN>')"
+  ok "der echte Befehl gilt als ausfuehrbar" \
+     "$(has_placeholder "$(printf 'sudo kubeadm join 192.168.0.10:6443 --token ab12cd.34ef56gh78ij90kl --discovery-token-ca-cert-hash sha256:deadbeef')" && echo 0 || echo 1)"
+  out=$(markdown)
+  ok "Markdown maskiert das Token"         "$([ "$(has "$out" 'ab12cd.34ef56gh78ij90kl')" = 0 ] && echo 1 || echo 0)"
+  ok "Markdown zeigt wieder <TOKEN>"       "$(has "$out" '<TOKEN>')"
+
+  load_config "$pkgdir/c.conf"
+  out=$(text_guide)
+  ok "Hauptserver-Paket setzt den Schluessel ein" "$(has "$out" '--certificate-key abc123')"
+  rm -rf "$pkgdir"
+  J_api=""; J_token=""; J_hash=""; J_certKey=""; J_role=""; J_from=""; J_created=""
+
   ui_input(){ printf '%s' "$3"; }        # Stellvertreter fuer den Dialog
   out=$(edit_command "$(printf 'eins\nzwei drei\nvier')" T)
   ok "Bearbeiten laesst mehrzeilige Befehle heil" "$([ "$out" = "$(printf 'eins\nzwei drei\nvier')" ] && echo 1 || echo 0)"
   unset -f ui_input
+
+  # Befehle, die auf einen anderen Rechner gehoeren, werden gezeigt, aber
+  # nicht ausgefuehrt.
+  O_ha=1 O_endpoint=api.lan; normalize
+  SELECTED=$(sections | awk -F'\t' '$2 ~ /Weitere Hauptserver|Further control/ {print $1}')
+  out=$(export_script)
+  ok "ohne Paket ist auch der join nur zum Ansehen" \
+     "$([ "$(printf '%s' "$out" | grep -c '^run <<')" = 0 ] && echo 1 || echo 0)"
+  ok "Abschnitt hat dieselben drei Befehle wie die WebUI" \
+     "$([ "$(sections | awk -F'\t' '$2 ~ /Weitere Hauptserver/ {print $4}')" = 3 ] && echo 1 || echo 0)"
+
+  J_api=192.168.0.10:6443 J_token=ab12cd.34ef56gh78ij90kl J_hash=sha256:deadbeef J_certKey=abc123 J_role=cp
+  out=$(export_script)
+  ok "mit Paket ist der Beitritt ausfuehrbar" \
+     "$(printf '%s' "$out" | grep -A2 '^run <<' | grep -q 'kubeadm join' && echo 1 || echo 0)"
+  ok "Befehle des ersten Hauptservers bleiben zum Ansehen" \
+     "$(printf '%s' "$out" | grep -A2 '^manual <<' | grep -q 'upload-certs' && echo 1 || echo 0)"
+  ok "und genau einer davon ist ausfuehrbar" \
+     "$([ "$(printf '%s' "$out" | grep -c '^run <<')" = 1 ] && echo 1 || echo 0)"
+  J_api=""; J_token=""; J_hash=""; J_certKey=""; J_role=""
+  O_ha=0 O_endpoint=""; normalize
 
   UILANG=en; out=$(markdown); UILANG=de
   ok "Englisch uebersetzt die Ueberschrift" "$(has "$out" 'First control-plane node')"
@@ -1241,6 +1594,7 @@ case $ACTION in
               printf '  Debian/Ubuntu: sudo apt-get install whiptail\n'
               printf '  RHEL/Rocky:    sudo dnf install newt\n\n'
             fi
+            offer_packages
             main_menu
             clear 2>/dev/null
             ;;
