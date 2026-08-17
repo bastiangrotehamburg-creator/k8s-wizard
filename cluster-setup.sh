@@ -78,7 +78,8 @@ role_lbl(){
 
 # --------------------------------------------------------------- Pruefungen --
 # Entspricht cidrRisk und den Warnungen der Abschnitte in clusterGuide().
-# Gibt Zeilen "err<TAB>text" bzw. "warn<TAB>text" aus.
+# Gibt "stufe<TAB>kurz<TAB>lang" aus: kurz fuer die Kopfzeile des Menues, lang
+# fuer die Anleitung. whiptail schneidet lange Menuetexte sonst einfach ab.
 config_checks(){
   local prefix=${O_podCidr##*/}
   case $O_podCidr in
@@ -86,18 +87,18 @@ config_checks(){
     *)   prefix="";;
   esac
   if [ -n "$prefix" ] && [ "$prefix" -ge 24 ]; then
-    printf 'err\t%s\n' "$(t "Das Pod-Netz $O_podCidr ist zu klein: kubeadm teilt jedem Knoten ein eigenes /24 zu, also reicht ein /24 fuer genau einen Node — jeder weitere bekommt gar kein Pod-Netz. Ueblich ist ein /16.|The pod network $O_podCidr is too small: kubeadm assigns each node its own /24, so a /24 covers exactly one node — every further node gets no pod network at all. A /16 is the usual choice.")"
+    printf 'err\t%s\t%s\n' "$(t "Pod-Netz /$prefix ist zu klein — jeder Knoten belegt ein /24|Pod network /$prefix is too small — every node takes a /24")" "$(t "Das Pod-Netz $O_podCidr ist zu klein: kubeadm teilt jedem Knoten ein eigenes /24 zu, also reicht ein /24 fuer genau einen Node — jeder weitere bekommt gar kein Pod-Netz. Ueblich ist ein /16.|The pod network $O_podCidr is too small: kubeadm assigns each node its own /24, so a /24 covers exactly one node — every further node gets no pod network at all. A /16 is the usual choice.")"
   elif [ -n "$prefix" ] && [ "$prefix" -gt 20 ]; then
-    printf 'warn\t%s\n' "$(t "Das Pod-Netz $O_podCidr ist knapp bemessen: Jeder Knoten belegt daraus ein /24.|The pod network $O_podCidr is tight: every node takes a /24 out of it.")"
+    printf 'warn\t%s\t%s\n' "$(t "Pod-Netz knapp bemessen|Pod network is tight")" "$(t "Das Pod-Netz $O_podCidr ist knapp bemessen: Jeder Knoten belegt daraus ein /24.|The pod network $O_podCidr is tight: every node takes a /24 out of it.")"
   fi
   case $O_podCidr in 192.168.*)
-    printf 'warn\t%s\n' "$(t "192.168.x ist der uebliche Bereich von Heim- und Bueronetzen — und zugleich Calicos Vorgabe. Ueberschneidet er sich mit dem Netz der Knoten, kollidieren Pod-Adressen mit echten Geraeten, und die Fehlersuche fuehrt weit in die Irre. Vorher mit ip -4 addr vergleichen und im Zweifel 10.244.0.0/16 nehmen.|192.168.x is the usual range for home and office networks — and at the same time Calico's default. If it overlaps the nodes' network, pod addresses collide with real devices and troubleshooting leads far astray. Compare with ip -4 addr first and use 10.244.0.0/16 when in doubt.")";;
+    printf 'warn\t%s\t%s\n' "$(t "192.168.x kollidiert leicht mit dem Netz der Knoten|192.168.x easily collides with the nodes' network")" "$(t "192.168.x ist der uebliche Bereich von Heim- und Bueronetzen — und zugleich Calicos Vorgabe. Ueberschneidet er sich mit dem Netz der Knoten, kollidieren Pod-Adressen mit echten Geraeten, und die Fehlersuche fuehrt weit in die Irre. Vorher mit ip -4 addr vergleichen und im Zweifel 10.244.0.0/16 nehmen.|192.168.x is the usual range for home and office networks — and at the same time Calico's default. If it overlaps the nodes' network, pod addresses collide with real devices and troubleshooting leads far astray. Compare with ip -4 addr first and use 10.244.0.0/16 when in doubt.")";;
   esac
   if [ "$O_ha" = 1 ] && [ -z "$O_endpoint" ]; then
-    printf 'err\t%s\n' "$(t "Fuer mehrere Hauptserver ist --control-plane-endpoint zwingend. Ohne ihn schreibt kubeadm keinen controlPlaneEndpoint in die Cluster-Konfiguration, und jeder weitere Hauptserver scheitert. Trag die API-Adresse ein, bevor du anfaengst.|For several control-plane nodes, --control-plane-endpoint is mandatory. Without it kubeadm writes no controlPlaneEndpoint into the cluster configuration and every further control-plane node fails. Enter the API address before you begin.")"
+    printf 'err\t%s\t%s\n' "$(t "Mehrere Hauptserver ohne API-Adresse|Several control-plane nodes without an API address")" "$(t "Fuer mehrere Hauptserver ist --control-plane-endpoint zwingend. Ohne ihn schreibt kubeadm keinen controlPlaneEndpoint in die Cluster-Konfiguration, und jeder weitere Hauptserver scheitert. Trag die API-Adresse ein, bevor du anfaengst.|For several control-plane nodes, --control-plane-endpoint is mandatory. Without it kubeadm writes no controlPlaneEndpoint into the cluster configuration and every further control-plane node fails. Enter the API address before you begin.")"
   fi
   if [ "$O_cni" = flannel ] && [ "$O_podCidr" != "10.244.0.0/16" ]; then
-    printf 'err\t%s\n' "$(t "Flannel erwartet zwingend 10.244.0.0/16 als Pod-Netz. Mit $O_podCidr bekommen die Pods keine Adressen.|Flannel insists on 10.244.0.0/16 as the pod network. With $O_podCidr the pods get no addresses.")"
+    printf 'err\t%s\t%s\n' "$(t "Flannel verlangt 10.244.0.0/16|Flannel demands 10.244.0.0/16")" "$(t "Flannel erwartet zwingend 10.244.0.0/16 als Pod-Netz. Mit $O_podCidr bekommen die Pods keine Adressen.|Flannel insists on 10.244.0.0/16 as the pod network. With $O_podCidr the pods get no addresses.")"
   fi
 }
 
@@ -266,9 +267,9 @@ CMD
   sec "Erster Hauptserver|First control-plane node" cp
   para "Ab hier unterscheiden sich die Rechner. Diese Schritte laufen **nur auf dem ersten Hauptserver**.|From here the machines differ. These steps run **only on the first control-plane node**."
   # Prozesssubstitution statt Pipe: der Renderer darf Zustand behalten.
-  local lvl msg
-  while IFS=$'\t' read -r lvl msg; do
-    [ -n "$lvl" ] && risk "$lvl" "$msg|$msg"
+  local lvl short long
+  while IFS=$'\t' read -r lvl short long; do
+    [ -n "$lvl" ] && risk "$lvl" "$long|$long"
   done < <(config_checks)
   if [ -n "$O_endpoint" ]; then
     risk warn "Die Adresse muss auf allen Knoten aufloesen, bevor du anfaengst — notfalls ueber /etc/hosts. Nimm einen Namen statt einer IP: Der Name wandert spaeter auf einen Lastverteiler oder eine VIP, ohne dass Zertifikate neu ausgestellt werden muessen.|The address has to resolve on every node before you begin — an entry in /etc/hosts will do. Use a name rather than an IP: the name can later move to a load balancer or a VIP without reissuing certificates."
@@ -616,7 +617,7 @@ txt_trow(){ local c first=1 rest=""
   printf '\n'; }
 txt_risk(){ printf '  %s %s\n' "$([ "$1" = err ] && echo '!' || echo '?')" "$(risk_lbl "$1")"
             wrapped "$(plain "$(t "$2")")"; printf '\n'; }
-txt_cmd(){ printf '%s\n' "$1" | sed 's/^/  $ /'
+txt_cmd(){ printf '%s\n' "$1" | sed '1s/^/  $ /; 2,$s/^/    /'
            wrapped "$(plain "$(t "$2")")"; printf '\n'; }
 
 text_guide(){ normalize; SECN=0
@@ -736,7 +737,7 @@ size(){
   l=$(tput lines 2>/dev/null || echo 24); c=$(tput cols 2>/dev/null || echo 80)
   BH=$((l-6)); [ "$BH" -lt 14 ] && BH=14
   BW=$((c-6)); [ "$BW" -lt 60 ] && BW=60; [ "$BW" -gt 100 ] && BW=100
-  MH=$((BH-9)); [ "$MH" -lt 5 ] && MH=5
+  MH=$((BH-11)); [ "$MH" -lt 5 ] && MH=5
   TXTW=$((BW-6)); [ "$TXTW" -lt 50 ] && TXTW=50
 }
 
@@ -763,9 +764,13 @@ ui_input(){ # titel text vorgabe -> stdout
   else printf '\n== %s\n%s\n[%s] ' "$1" "$2" "$3" >&2; ask_line
        [ -z "$ANSWER" ] && ANSWER=$3; printf '%s' "$ANSWER"; fi
 }
+# Die Liste bekommt nur so viele Zeilen, wie sie Eintraege hat — sonst frisst
+# sie den Platz des Kopftextes, und whiptail schneidet ihn wortlos ab.
+list_h(){ local n=$1; [ "$n" -gt "$MH" ] && n=$MH; [ "$n" -lt 1 ] && n=1; echo "$n"; }
+
 ui_menu(){ # titel text tag item tag item ...
   local title=$1 text=$2; shift 2
-  if [ -n "$DLG" ]; then "$DLG" --title "$title" --menu "$text" "$BH" "$BW" "$MH" "$@" 3>&1 1>&2 2>&3
+  if [ -n "$DLG" ]; then "$DLG" --title "$title" --menu "$text" "$BH" "$BW" "$(list_h $(( $# / 2 )))" "$@" 3>&1 1>&2 2>&3
   else
     printf '\n== %s\n%s\n' "$title" "$text" >&2
     local i=1
@@ -776,7 +781,7 @@ ui_menu(){ # titel text tag item tag item ...
 ui_check(){ # titel text tag item status ...
   local title=$1 text=$2; shift 2
   if [ -n "$DLG" ]; then
-    "$DLG" --title "$title" --checklist "$text" "$BH" "$BW" "$MH" "$@" 3>&1 1>&2 2>&3
+    "$DLG" --title "$title" --checklist "$text" "$BH" "$BW" "$(list_h $(( $# / 3 )))" "$@" 3>&1 1>&2 2>&3
   else
     printf '\n== %s\n%s\n' "$title" "$text" >&2
     local pre=""
@@ -814,13 +819,16 @@ pick(){
 settings_menu(){
   while :; do
     normalize
-    local warn="" line
-    while IFS=$'\t' read -r lvl msg; do
+    local warn="" line lvl short long n=0
+    while IFS=$'\t' read -r lvl short long; do
       [ -z "$lvl" ] && continue
+      n=$((n+1))
       warn="$warn
-$([ "$lvl" = err ] && echo '!' || echo '?') $msg"
+$([ "$lvl" = err ] && echo '!' || echo '?') $short"
     done < <(config_checks)
     line=$(config_line)
+    local extra=()
+    [ "$n" -gt 0 ] && extra=(hinweise "$(t 'Hinweise im Wortlaut|Warnings in full') ($n)")
     local sel
     sel=$(ui_menu "$(t 'Einstellungen|Settings')" "$line
 $warn" \
@@ -836,6 +844,7 @@ $warn" \
       single    "$(onoff "$O_singleNode") $(t 'Auch auf dem Hauptserver Pods zulassen|Run pods on the control plane too')" \
       firewall  "$(onoff "$O_firewall") $(t 'Firewall-Regeln mit ausgeben|Include firewall rules')" \
       lbRange   "$(t 'MetalLB-Adressbereich|MetalLB address range'): $O_lbRange" \
+      "${extra[@]}" \
       zurueck   "« $(t 'zurueck|back')") || return 0
     case $sel in
       version)  O_version=$(ui_input "$(t 'Kubernetes-Version|Kubernetes version')" \
@@ -857,6 +866,14 @@ $warn" \
                   "$(t 'Darf sich mit keinem Netz ueberschneiden, das die Knoten sonst benutzen.|Must not overlap with any network the nodes already use.')" "$O_podCidr");;
       svcCidr)  O_svcCidr=$(ui_input "$(t 'Service-Netz|Service network')" \
                   "$(t 'Leer laesst kubeadm die Vorgabe 10.96.0.0/12 nehmen.|Empty lets kubeadm use its default of 10.96.0.0/12.')" "$O_svcCidr");;
+      hinweise) local full=""
+                while IFS=$'\t' read -r lvl short long; do
+                  [ -z "$lvl" ] && continue
+                  full="$full$([ "$lvl" = err ] && echo '!' || echo '?') $long
+
+"
+                done < <(config_checks)
+                ui_msg "$(t 'Hinweise|Warnings')" "$full";;
       single)   O_singleNode=$(toggle "$O_singleNode");;
       firewall) O_firewall=$(toggle "$O_firewall");;
       lbRange)  O_lbRange=$(ui_input "$(t 'MetalLB-Adressbereich|MetalLB address range')" \
@@ -1100,7 +1117,10 @@ selftest(){
   O_podCidr="10.244.0.0/16"; normalize
   ok "Flannel mit 10.244 ist still"   "$(config_checks | grep -q '^err' && echo 0 || echo 1)"
 
-  O_cni=cilium O_podCidr=""; normalize
+  O_cni=cilium O_ha=1 O_endpoint="" O_podCidr="10.10.0.0/24"; normalize
+  ok "Pruefung liefert Kurz- und Langtext" "$(config_checks | awk -F'\t' 'NF!=3{bad=1} END{print bad?0:1}')"
+  ok "Kurztext bleibt einzeilig"       "$(config_checks | cut -f2 | awk 'length($0)>70{bad=1} END{print bad?0:1}')"
+  O_cni=cilium O_ha=0 O_podCidr=""; normalize
   ok "Platzhalter erkannt"            "$(has_placeholder 'kubeadm join x --token <TOKEN>' && echo 1 || echo 0)"
   ok "normaler Befehl ist keiner"     "$(has_placeholder 'kubectl get nodes -o wide' && echo 0 || echo 1)"
 
