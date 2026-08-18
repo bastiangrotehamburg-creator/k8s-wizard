@@ -4378,6 +4378,22 @@ function runSelfTests(){
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
   const oidcGuide = tenantGuide({user:"bge", ns:"team-admin", identity:"oidc", api:"k8s-cp1.highq.org:6443"});
   const oidcTxt = oidcGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
+  const pinGuide = tenantGuide({ns:"team-admin", pin:true, pool:"pool=team-admin", taint:true});
+  const pinTxt = pinGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
+  ok("Node-Bindung: Label, Annotation und Plugin gehören zusammen",
+    pinTxt.indexOf("kubectl label node") !== -1 &&
+    pinTxt.indexOf("scheduler.alpha.kubernetes.io/node-selector") !== -1 &&
+    pinTxt.indexOf("PodNodeSelector") !== -1, "");
+  ok("Node-Bindung: das stille Scheitern ohne Plugin ist als Fehler benannt",
+    pinGuide.some(s => s.r.some(x => x.lvl === "err" &&
+      (x.m.indexOf("Admission-Plugin") !== -1 || x.m.indexOf("admission plugin") !== -1))), "");
+  ok("Node-Bindung: Taint nur auf Wunsch",
+    pinTxt.indexOf("kubectl taint nodes") !== -1 &&
+    tenantGuide({pin:true}).map(s => s.items.map(i => i.c).join(" ")).join(" ").indexOf("kubectl taint") === -1, "");
+  ok("Node-Bindung: ohne Haken kein Abschnitt",
+    tenantGuide({}).length + 1 === tenantGuide({pin:true}).length, "");
+  ok("Node-Bindung: Label ohne Leerzeichen",
+    tenantOpts({pool:" pool = team-admin "}).pool === "pool=team-admin", "");
   ok("Kennwort-Weg: Anmeldedienst und API-Server-Umstellung kommen dazu",
     oidcGuide.some(s => t(s.h).indexOf("Dex") !== -1) &&
     oidcTxt.indexOf("--oidc-issuer-url=") !== -1 && oidcTxt.indexOf("--oidc-username-prefix=oidc:") !== -1, "");
@@ -4966,7 +4982,14 @@ const TENANT_FIELDS = [
   {k:"cpu", t:"text", l:"CPU insgesamt|CPU in total", ph:"4", half:true, when:o => !!o.quota},
   {k:"mem", t:"text", l:"Speicher insgesamt|Memory in total", ph:"8Gi", half:true, when:o => !!o.quota},
   {k:"pods", t:"number", l:"Pods höchstens|Pods at most", ph:"20", half:true, when:o => !!o.quota},
-  {k:"netpol", t:"bool", l:"Namespace nach außen abschotten (NetworkPolicy)|Seal the namespace off (NetworkPolicy)"}
+  {k:"netpol", t:"bool", l:"Namespace nach außen abschotten (NetworkPolicy)|Seal the namespace off (NetworkPolicy)"},
+  {k:"pin", t:"bool", structural:true, l:"Nur auf bestimmten Nodes laufen lassen|Run only on certain nodes",
+   hint:"Alle Pods dieses Namespace landen dann ausschließlich auf Nodes mit dem Label unten.|Every pod of this namespace then lands only on nodes carrying the label below."},
+  {k:"pool", t:"text", l:"Node-Label|Node label", ph:"pool=team-admin", half:true, when:o => !!o.pin,
+   hint:"Schlüssel und Wert, mit denen die Nodes markiert werden. Frei wählbar.|Key and value the nodes are marked with. Free to choose."},
+  {k:"taint", t:"bool", l:"Diese Nodes für andere Namespaces sperren|Bar these nodes from other namespaces",
+   when:o => !!o.pin,
+   hint:"Ohne das dürfen andere weiterhin dort laufen — die Bindung gilt dann nur in eine Richtung.|Without this, others may still run there — the binding then holds in one direction only."}
 ];
 
 /* Aus k8s-cp1.firma.de:6443 wird firma.de — als Vorgabe fuer Anmeldename und Dienst. */
@@ -4980,11 +5003,13 @@ function tenantOpts(o){
   const user = (o.user || "").trim() || "anna";
   const api = (o.api || "").trim() || "API-ADRESSE:6443";
   const dom = domainOf(api);
+  /* Gebunden wird der Namespace, nicht die Person — also haengt die Vorgabe an ihm. */
+  const ns = (o.ns || "").trim() || ("team-" + user);
   return {
     user: user,
     email: (o.email || "").trim() || (user + "@" + dom),
     issuer: (o.issuer || "").trim().replace(/\/+$/, "") || ("https://dex." + dom + ":32000"),
-    ns: (o.ns || "").trim() || ("team-" + user),
+    ns: ns,
     level: o.level || "edit",
     identity: o.identity || "cert",
     api: (o.api || "").trim() || "API-ADRESSE:6443",
@@ -4995,7 +5020,11 @@ function tenantOpts(o){
     cpu: (o.cpu || "").trim() || "4",
     mem: (o.mem || "").trim() || "8Gi",
     pods: num(o.pods) === undefined ? 20 : num(o.pods),
-    netpol: !!o.netpol
+    netpol: !!o.netpol,
+    pin: !!o.pin,
+    /* pool=wert wird an zwei Stellen gebraucht: als Label und als Taint. */
+    pool: ((o.pool || "").trim() || "pool=" + ns).replace(/\s+/g, ""),
+    taint: !!o.taint
   };
 }
 
@@ -5227,6 +5256,39 @@ function tenantGuide(raw){
       ],
       r:[{lvl:"warn", m:t("Flannel setzt NetworkPolicies nicht durch. Der API-Server nimmt sie an, kubectl meldet keinen Fehler, und es passiert schlicht nichts. Wirksam sind sie erst mit Calico, Cilium oder einem anderen CNI, das Policies unterstützt.|Flannel does not enforce network policies. The API server accepts them, kubectl reports no error, and simply nothing happens. They only take effect with Calico, Cilium or another CNI that supports policies.")},
          {lvl:"warn", m:t("Die Regel schneidet auch den Weg nach außen ab. Braucht eine Anwendung im Namespace das Internet — für Paketquellen, eine API, einen Webhook — muss das ausdrücklich erlaubt werden.|The rule also cuts off the way out. If an application in the namespace needs the internet — for package repositories, an API, a webhook — that has to be allowed explicitly.")}]
+    });
+  }
+
+  /* --- 7b. Nodes --- */
+  if (o.pin){
+    const key = o.pool.split("=")[0];
+    const val = o.pool.split("=").slice(1).join("=") || o.ns;
+    sec("Den Namespace an Nodes binden|Tying the namespace to nodes", "admin", {
+      p:["Zwei Richtungen, und sie sind nicht dasselbe. **Hin**: Die Pods dieses Namespace sollen nur auf bestimmten Nodes landen. **Zurück**: Auf diesen Nodes soll sonst nichts laufen. Wer nur die erste einrichtet, hat einen reservierten Bereich, in dem trotzdem jeder andere mitspielt.|Two directions, and they are not the same thing. **There**: the pods of this namespace should only land on certain nodes. **Back**: nothing else should run on those nodes. Setting up only the first gives you a reserved area everyone else still plays in.",
+         "Die Hinrichtung macht ein `nodeSelector` an jedem Pod. Den von Hand in jedes Manifest zu schreiben hält niemand durch — deshalb setzt ihn eine Annotation am Namespace für alle Pods darin, sobald das Admission-Plugin `PodNodeSelector` läuft.|The there-direction is a `nodeSelector` on every pod. Writing it by hand into every manifest is not sustainable — so an annotation on the namespace sets it for every pod inside, once the `PodNodeSelector` admission plugin is running."],
+      table:[["Was du willst|What you want","Womit|With what","Wirkt auf|Acts on"],
+        ["Nur diese Nodes benutzen|Use only these nodes","nodeSelector, gesetzt über die Namespace-Annotation|nodeSelector, set via the namespace annotation","die Pods des Namespace|the namespace's pods"],
+        ["Andere fernhalten|Keep others away","Taint auf den Nodes|A taint on the nodes","alle anderen Pods|all other pods"],
+        ["Beides|Both","Annotation und Taint zusammen|Annotation and taint together","echte Zuteilung|a real assignment"]],
+      items:[
+        {c:"kubectl label node NODE-1 NODE-2 " + o.pool + " --overwrite\nkubectl get nodes -l " + o.pool,
+         d:"Zuerst die Nodes markieren. Der zweite Befehl muss genau die Maschinen zeigen, die gemeint sind — kommt eine leere Liste, passt das Label nicht.|Mark the nodes first. The second command has to show exactly the machines you mean — an empty list means the label does not match."},
+        {c:"kubectl annotate namespace " + o.ns + " \\\n  scheduler.alpha.kubernetes.io/node-selector='" + o.pool + "' --overwrite",
+         d:"Von jetzt an bekommt jeder Pod in diesem Namespace diesen nodeSelector eingesetzt — auch die, die ein Deployment oder ein DaemonSet erzeugt. Bringt ein Pod bereits einen widersprechenden Selector mit, wird er abgelehnt statt stillschweigend verschoben.|From now on every pod in this namespace gets this nodeSelector inserted — including those created by a deployment or a daemon set. A pod that already carries a conflicting selector is rejected rather than silently moved."},
+        {c:"# auf jedem Hauptserver, in /etc/kubernetes/manifests/kube-apiserver.yaml:\n    - --enable-admission-plugins=NodeRestriction,PodNodeSelector\n\n# danach:\nkubectl get --raw /healthz",
+         d:"Ohne dieses Plugin wird die Annotation **stillschweigend ignoriert**. Kein Fehler, keine Meldung — die Pods verteilen sich weiter über alle Nodes, und man sucht lange an der falschen Stelle. Vorhandene Plugins in der Zeile stehen lassen und PodNodeSelector nur anhängen.|Without this plugin the annotation is **silently ignored**. No error, no message — the pods keep spreading across all nodes and you search in the wrong place for a long time. Keep the existing plugins in that line and only append PodNodeSelector."}
+      ].concat(o.taint ? [
+        {c:"kubectl taint nodes NODE-1 NODE-2 " + key + "=" + val + ":NoSchedule --overwrite\nkubectl describe node NODE-1 | grep -A2 Taints",
+         d:"Der Riegel in die Gegenrichtung. NoSchedule hält neue Pods fern und lässt laufende in Ruhe; NoExecute würde auch die bereits laufenden vertreiben.|The bolt in the other direction. NoSchedule keeps new pods away and leaves running ones alone; NoExecute would also evict those already running."},
+        {c:"kubectl annotate namespace " + o.ns + " \\\n  scheduler.alpha.kubernetes.io/defaultTolerations='[{\"key\":\"" + key + "\",\"operator\":\"Equal\",\"value\":\"" + val + "\",\"effect\":\"NoSchedule\"}]' --overwrite",
+         d:"Damit die eigenen Pods den Taint überwinden, ohne dass jemand eine toleration ins Manifest schreiben muss. Braucht zusätzlich das Plugin PodTolerationRestriction in derselben Zeile wie oben. Wer das nicht will, schreibt die toleration je Deployment von Hand — der Wizard baut sie im Schritt Zeitplanung mit.|So that your own pods overcome the taint without anyone writing a toleration into a manifest. This additionally needs the PodTolerationRestriction plugin in the same line as above. If you would rather not, write the toleration per deployment by hand — the wizard builds it in the scheduling step."}
+      ] : []).concat([
+        {c:"kubectl -n " + o.ns + " run pintest --image=busybox:1.36 --restart=Never -- sleep 60\nkubectl -n " + o.ns + " get pod pintest -o wide\nkubectl -n " + o.ns + " get pod pintest -o jsonpath='{.spec.nodeSelector}{\"\\n\"}'\nkubectl -n " + o.ns + " delete pod pintest",
+         d:"Die Probe: Der Pod muss auf einem der markierten Nodes liegen, und die dritte Zeile muss den Selector zeigen. Ist sie leer, läuft das Plugin nicht.|The test: the pod has to sit on one of the marked nodes, and the third line has to show the selector. If it is empty, the plugin is not running."}
+      ]),
+      r:[{lvl:"err", m:t("Die Annotation allein bewirkt nichts. Sie ist eine Anweisung an ein Admission-Plugin, das erst eingeschaltet werden muss — und der Cluster meldet nirgends, dass es fehlt. Nach dem Einschalten mit dem Testpod oben nachweisen, dass der Selector wirklich gesetzt wird.|The annotation alone does nothing. It is an instruction to an admission plugin that has to be switched on first — and the cluster reports nowhere that it is missing. After switching it on, use the test pod above to prove the selector is really being set.")},
+         {lvl:"warn", m:t("Sind alle markierten Nodes voll oder nicht bereit, bleiben die Pods in Pending stehen. Sie weichen nicht aus — das ist der Sinn der Sache, überrascht aber beim ersten Ausfall. Zwei Nodes sind das Minimum, wenn es weiterlaufen soll.|If all marked nodes are full or not ready, the pods stay Pending. They do not fall back — that is the whole point, but it surprises you at the first outage. Two nodes are the minimum if things should keep running.")}]
+        .concat(o.taint ? [{lvl:"warn", m:t("DaemonSets aus kube-system — CNI, kube-proxy, Speicher-Treiber — bringen meist eine allgemeine toleration mit und laufen weiter. Selbst gebaute DaemonSets tun das nicht und verschwinden von diesen Nodes, sobald der Taint steht.|Daemon sets from kube-system — CNI, kube-proxy, storage drivers — usually carry a blanket toleration and keep running. Home-grown daemon sets do not, and disappear from those nodes the moment the taint is set.")}] : [])
     });
   }
 
