@@ -3385,8 +3385,8 @@ function setWikiTab(tab){
                           : "Pick a task, fill in the fields — the command assembles as you go. Below it you see what each flag does.")
   : tab === "cheat" ? (de ? "Zum Nachschlagen und zum Danebenlegen: Ports, Mengenangaben, Statusmeldungen, YAML-Fallen. Drucken legt nur diese Seite aufs Papier."
                           : "For looking up and pinning next to your screen: ports, quantities, status messages, YAML traps. Print puts this page alone on paper.")
-  : (de ? "Wie dauerhafter Speicher in Kubernetes zusammenhängt — und woran er in der Praxis scheitert."
-        : "How persistent storage fits together in Kubernetes — and where it fails in practice.");
+  : (de ? "Wie dauerhafter Speicher zusammenhängt, woran er in der Praxis scheitert — und wie du NFS, ZFS oder S3 konkret anbindest."
+        : "How persistent storage fits together, where it fails in practice — and how to wire up NFS, ZFS or S3 concretely.");
   if (tab === "build"){ if (!Object.keys(CMD.o).length) CMD.o = defaultsForCmd(); renderCmdAll(); }
   else if (tab === "storage") renderStorageWiki();
   else if (tab === "cheat") renderCheatsheet();
@@ -3457,21 +3457,116 @@ const STORAGE_WIKI = [
    ["volume node affinity conflict","Das Volume liegt in einer anderen Zone als der Node, auf dem der Pod laufen soll.|The volume sits in a different zone than the node the pod should run on."],
    ["Permission denied im Container|Permission denied in the container","Das Volume gehört root, der Container läuft als anderer Benutzer. `fsGroup` im securityContext des Pods setzen.|The volume belongs to root while the container runs as another user. Set `fsGroup` in the pod's securityContext."],
    ["read-only file system","`readOnlyRootFilesystem` ist gesetzt und der Pfad hat kein beschreibbares Volume.|`readOnlyRootFilesystem` is set and the path has no writable volume."],
-   ["Daten nach Neustart weg|Data gone after a restart","emptyDir statt PVC, oder der Pfad liegt neben dem mountPath.|emptyDir instead of a PVC, or the path sits beside the mountPath."]]}
+   ["Daten nach Neustart weg|Data gone after a restart","emptyDir statt PVC, oder der Pfad liegt neben dem mountPath.|emptyDir instead of a PVC, or the path sits beside the mountPath."]]},
+
+{h:"Welcher Speicher wofür|Which storage for what",
+ p:["Die Frage ist nicht, welcher Speicher der beste ist, sondern was die Anwendung mit den Daten tut. Schreibt nur ein Pod, oder alle? Sind es viele kleine Änderungen oder wenige große Dateien? Braucht es Dateisystem-Semantik — Umbenennen, Anhängen, Sperren — oder reicht ablegen und wieder holen?|The question is not which storage is best but what the application does with the data. Does one pod write, or all of them? Many small changes or few large files? Does it need filesystem semantics — rename, append, lock — or is put-and-get enough?"],
+ table:[["Art|Kind","Modus|Mode","Passt zu|Fits","Der Haken|The catch"],
+   ["Lokale Platte, ZFS am Node|Local disk, ZFS on the node","ReadWriteOnce","Datenbanken, Etcd, alles mit eigener Replikation|Databases, etcd, anything that replicates itself","Der Pod klebt für immer an diesem einen Node.|The pod is pinned to that one node forever."],
+   ["NFS","ReadWriteMany","Geteilte Verzeichnisse, Uploads, CI-Caches|Shared directories, uploads, CI caches","Ein Server für alle. Fällt er aus, hängen alle Pods. Sperren ist unzuverlässig.|One server for everyone. If it fails, every pod hangs. Locking is unreliable."],
+   ["iSCSI, Blockspeicher|iSCSI, block storage","ReadWriteOnce","Datenbanken mit Anspruch an Latenz|Databases that care about latency","Braucht open-iscsi auf jedem Node und einen Treiber.|Needs open-iscsi on every node plus a driver."],
+   ["S3, Objektspeicher|S3, object storage","kein PVC|no PVC","Bilder, Backups, Artefakte, Logs — groß und unveränderlich|Images, backups, artifacts, logs — large and immutable","Kein Dateisystem. Kein Umbenennen, kein Anhängen, kein Sperren.|Not a filesystem. No rename, no append, no locking."]],
+ p2:["Die häufigste Fehlentscheidung ist, S3 als Verzeichnis einzuhängen, damit die Anwendung nicht angefasst werden muss. Das geht technisch und rächt sich später — siehe unten. Die zweithäufigste ist eine Datenbank auf NFS.|The most common wrong turn is mounting S3 as a directory so the application need not be touched. It works technically and bites later — see below. The second most common is a database on NFS."]},
+
+{h:"NFS anbinden|Wiring up NFS",
+ p:["NFS ist der kürzeste Weg zu ReadWriteMany, und für Heimlabore und kleine Cluster oft der richtige. Es gibt zwei Wege: ein PersistentVolume von Hand je Freigabe, oder einen Treiber, der für jedes PVC ein Unterverzeichnis anlegt.|NFS is the shortest route to ReadWriteMany and, for home labs and small clusters, often the right one. There are two routes: a hand-written PersistentVolume per share, or a driver that creates a subdirectory for every PVC."],
+ table:[["Meldung|Message","Die Ursache|The cause"],
+   ["bad option; … helper program","`nfs-common` fehlt auf dem Node, auf dem der Pod gerade landen soll.|`nfs-common` is missing on the node the pod happens to land on."],
+   ["access denied by server","Die Node-IP steht nicht in /etc/exports, oder `exportfs -ra` fehlt.|The node IP is not in /etc/exports, or `exportfs -ra` was not run."],
+   ["Permission denied im Container|Permission denied in the container","root_squash trifft auf einen Container, der als root schreiben will — oder falscher Besitzer.|root_squash meets a container that wants to write as root — or the wrong owner."],
+   ["Pod bleibt Terminating, Node-Last steigt|Pod stays Terminating, node load climbs","NFS-Server weg. Ein `hard`-Mount wartet ewig, und genau das ist gewollt.|NFS server gone. A `hard` mount waits forever, and that is the point."],
+   ["PVC bleibt Pending|PVC stays Pending","Beim Treiberweg: die Controller-Pods laufen nicht. `kubectl -n kube-system logs` ansehen.|On the driver route: the controller pods are not running. Read `kubectl -n kube-system logs`."]],
+ steps:[
+   {h:"Zuerst: die Nodes|First: the nodes", p:["Ohne den NFS-Client auf dem Node kann der kubelet nicht einhängen — und die Fehlermeldung sagt das nicht deutlich. Das gehört auf **jeden** Node, auch auf jeden, der später dazukommt.|Without the NFS client on the node the kubelet cannot mount — and the error message does not say so clearly. This belongs on **every** node, including every one added later."], code:{de:"# Debian / Ubuntu\nsudo apt-get install -y nfs-common\n# RHEL / Rocky / Alma\nsudo dnf install -y nfs-utils\n\n# von Hand prüfen, bevor Kubernetes ins Spiel kommt:\nshowmount -e 172.18.42.5\nsudo mount -t nfs4 172.18.42.5:/tank/k8s /mnt && sudo umount /mnt", en:"# Debian / Ubuntu\nsudo apt-get install -y nfs-common\n# RHEL / Rocky / Alma\nsudo dnf install -y nfs-utils\n\n# check by hand before Kubernetes gets involved:\nshowmount -e 172.18.42.5\nsudo mount -t nfs4 172.18.42.5:/tank/k8s /mnt && sudo umount /mnt"}},
+
+   {h:"Auf dem NFS-Server|On the NFS server", p:["Die Freigabe muss das Knoten-Netz erlauben, nicht das Pod-Netz — es hängt der Node ein, nicht der Pod.|The export has to allow the node network, not the pod network — the node does the mounting, not the pod."], code:{de:"# /etc/exports\n/tank/k8s  172.18.42.0/24(rw,sync,no_subtree_check,no_root_squash)\n\nsudo exportfs -ra\nsudo exportfs -v          # zeigt, was wirklich freigegeben ist", en:"# /etc/exports\n/tank/k8s  172.18.42.0/24(rw,sync,no_subtree_check,no_root_squash)\n\nsudo exportfs -ra\nsudo exportfs -v          # shows what is actually exported"}},
+
+   {h:"Weg 1 · ein PV von Hand|Route 1 · a PV by hand", p:["Kein Treiber, keine Installation. Du beschreibst die Freigabe einmal als PV und bindest ein PVC fest daran. `storageClassName: \"\"` muss in **beiden** stehen, sonst springt die Standard-Klasse ein und legt etwas ganz anderes an.|No driver, no installation. You describe the share once as a PV and bind a PVC to it. `storageClassName: \"\"` has to appear in **both**, otherwise the default class steps in and provisions something else entirely.",
+      "Der Wizard baut dir das: Ressource **PersistentVolume**, Typ *nfs*. Das passende PVC entsteht gleich mit.|The wizard builds this for you: resource **PersistentVolume**, type *nfs*. The matching PVC comes with it."], code:{de:"apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: pv-nfs-daten\nspec:\n  capacity:\n    storage: 50Gi          # bei NFS reine Buchhaltung, niemand erzwingt es\n  accessModes:\n    - ReadWriteMany\n  persistentVolumeReclaimPolicy: Retain\n  storageClassName: \"\"\n  mountOptions:\n    - hard\n    - nfsvers=4.1\n  nfs:\n    server: 172.18.42.5\n    path: /tank/k8s/daten\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: daten\nspec:\n  accessModes:\n    - ReadWriteMany\n  storageClassName: \"\"\n  volumeName: pv-nfs-daten   # bindet genau dieses PV\n  resources:\n    requests:\n      storage: 50Gi", en:"apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: pv-nfs-data\nspec:\n  capacity:\n    storage: 50Gi          # with NFS this is bookkeeping, nobody enforces it\n  accessModes:\n    - ReadWriteMany\n  persistentVolumeReclaimPolicy: Retain\n  storageClassName: \"\"\n  mountOptions:\n    - hard\n    - nfsvers=4.1\n  nfs:\n    server: 172.18.42.5\n    path: /tank/k8s/data\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: data\nspec:\n  accessModes:\n    - ReadWriteMany\n  storageClassName: \"\"\n  volumeName: pv-nfs-data    # binds exactly this PV\n  resources:\n    requests:\n      storage: 50Gi"}},
+
+   {h:"Weg 2 · ein Treiber, der Verzeichnisse anlegt|Route 2 · a driver that creates directories", p:["Ab dem dritten Volume lohnt sich der Treiber. Danach ist ein PVC einfach ein PVC — der Treiber legt für jedes ein Unterverzeichnis auf der Freigabe an, ohne dass du ein PV schreibst.|From the third volume on, the driver pays off. After that a PVC is just a PVC — the driver creates a subdirectory on the share for each one without you writing a PV."], code:{de:"helm repo add csi-driver-nfs https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts\nhelm repo update\nhelm install csi-driver-nfs csi-driver-nfs/csi-driver-nfs -n kube-system\n\nkubectl -n kube-system get pods -l app.kubernetes.io/name=csi-driver-nfs\nkubectl get csidrivers            # nfs.csi.k8s.io muss auftauchen", en:"helm repo add csi-driver-nfs https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts\nhelm repo update\nhelm install csi-driver-nfs csi-driver-nfs/csi-driver-nfs -n kube-system\n\nkubectl -n kube-system get pods -l app.kubernetes.io/name=csi-driver-nfs\nkubectl get csidrivers            # nfs.csi.k8s.io has to show up"}},
+
+   {h:"Die StorageClass dazu|The storage class for it", p:["Danach reicht ein PVC mit `storageClassName: nfs` — Größe, Zugriffsmodus, fertig.|After this a PVC with `storageClassName: nfs` is enough — size, access mode, done."], code:{de:"apiVersion: storage.k8s.io/v1\nkind: StorageClass\nmetadata:\n  name: nfs\nprovisioner: nfs.csi.k8s.io\nparameters:\n  server: 172.18.42.5\n  share: /tank/k8s\nreclaimPolicy: Delete      # Retain, wenn die Daten ein delete überleben sollen\nvolumeBindingMode: Immediate\nallowVolumeExpansion: true\nmountOptions:\n  - hard\n  - nfsvers=4.1", en:"apiVersion: storage.k8s.io/v1\nkind: StorageClass\nmetadata:\n  name: nfs\nprovisioner: nfs.csi.k8s.io\nparameters:\n  server: 172.18.42.5\n  share: /tank/k8s\nreclaimPolicy: Delete      # Retain if the data should survive a delete\nvolumeBindingMode: Immediate\nallowVolumeExpansion: true\nmountOptions:\n  - hard\n  - nfsvers=4.1"}},
+
+   {h:"Rechte — der Punkt, an dem es klemmt|Permissions — where it gets stuck", p:["Auf NFS entscheidet der Server über die Besitzverhältnisse, nicht der Cluster. `fsGroup` im securityContext greift deshalb nur eingeschränkt: der kubelet darf die Dateien gar nicht umschreiben. Läuft der Container als UID 1000 und gehören die Dateien root, kommt *Permission denied* — und `chown` aus dem Container heraus scheitert an `root_squash`.|On NFS the server decides ownership, not the cluster. `fsGroup` in the securityContext therefore only helps so far: the kubelet is not allowed to rewrite the files at all. If the container runs as UID 1000 and the files belong to root you get *Permission denied* — and `chown` from inside the container fails on `root_squash`."], code:{de:"# auf dem Server, einmal richtig setzen:\nsudo chown -R 1000:1000 /tank/k8s/daten\n\n# oder alle Zugriffe auf einen Benutzer abbilden — /etc/exports:\n/tank/k8s  172.18.42.0/24(rw,sync,all_squash,anonuid=1000,anongid=1000,no_subtree_check)", en:"# on the server, set it right once:\nsudo chown -R 1000:1000 /tank/k8s/data\n\n# or map every access onto one user — /etc/exports:\n/tank/k8s  172.18.42.0/24(rw,sync,all_squash,anonuid=1000,anongid=1000,no_subtree_check)"}}],
+ p2:["`hard` gegen `soft`: Bei `soft` bricht ein Schreibvorgang nach einem Timeout ab — die Anwendung bekommt einen Fehler und schreibt womöglich stillschweigend nichts. Bei `hard` wartet sie, bis der Server zurück ist. Für Daten, die zählen, immer `hard`.|`hard` versus `soft`: with `soft` a write aborts after a timeout — the application gets an error and may silently write nothing. With `hard` it waits until the server is back. For data that matters, always `hard`.",
+      "Und die unbequeme Wahrheit: Ein NFS-Server ist ein einzelner Ausfallpunkt für den halben Cluster. Eine Datenbank gehört nicht darauf — POSIX-Sperren über NFS sind genau so verlässlich, wie sie klingen.|And the uncomfortable truth: an NFS server is a single point of failure for half the cluster. A database does not belong on it — POSIX locking over NFS is exactly as dependable as it sounds."]},
+
+{h:"ZFS anbinden|Wiring up ZFS",
+ p:["Bei ZFS werden zwei völlig verschiedene Situationen ständig verwechselt. Entweder liegt der Pool **auf den Kubernetes-Nodes selbst** — dann ist es lokaler Speicher mit sehr guten Eigenschaften. Oder er liegt **auf einer eigenen Maschine**, einer TrueNAS- oder Proxmox-Kiste — dann ist es Netzwerkspeicher, und ZFS ist nur das, was dahinter läuft. Die Anbindung ist in beiden Fällen eine andere.|With ZFS two entirely different situations get confused constantly. Either the pool sits **on the Kubernetes nodes themselves** — then it is local storage with very good properties. Or it sits **on a machine of its own**, a TrueNAS or Proxmox box — then it is network storage and ZFS is merely what runs behind it. The wiring differs in each case."],
+ steps:[
+   {h:"Fall A · ZFS liegt auf den Nodes|Case A · ZFS lives on the nodes", p:["Pool anlegen, Werkzeuge installieren — auf jedem Node, der Speicher stellen soll.|Create the pool, install the tools — on every node that is meant to provide storage."], code:{de:"sudo apt-get install -y zfsutils-linux\nsudo zpool create tank /dev/sdb          # oder ein bestehender Pool\nzpool status\nzfs list", en:"sudo apt-get install -y zfsutils-linux\nsudo zpool create tank /dev/sdb          # or an existing pool\nzpool status\nzfs list"}},
+
+   {h:"Der Treiber dazu: zfs-localpv|The driver for it: zfs-localpv", p:["OpenEBS bringt einen CSI-Treiber mit, der ZFS-Datasets als PersistentVolumes anlegt. Die replizierte Engine braucht man dafür nicht und sollte sie im Heimlabor ausschalten.|OpenEBS ships a CSI driver that provisions ZFS datasets as PersistentVolumes. The replicated engine is not needed for this and should be switched off in a home lab."], code:{de:"helm repo add openebs https://openebs.github.io/openebs\nhelm repo update\nhelm install openebs openebs/openebs -n openebs --create-namespace \\\n  --set engines.replicated.mayastor.enabled=false\n\nkubectl -n openebs get pods\nkubectl get csidrivers            # zfs.csi.openebs.io muss auftauchen", en:"helm repo add openebs https://openebs.github.io/openebs\nhelm repo update\nhelm install openebs openebs/openebs -n openebs --create-namespace \\\n  --set engines.replicated.mayastor.enabled=false\n\nkubectl -n openebs get pods\nkubectl get csidrivers            # zfs.csi.openebs.io has to show up"}},
+
+   {h:"Die StorageClass|The storage class", p:["`volumeBindingMode: WaitForFirstConsumer` ist hier nicht optional. Ohne diese Zeile entsteht das Dataset auf irgendeinem Node, der Scheduler stellt den Pod woanders hin, und du siehst *volume node affinity conflict* — bei einem Volume, das eben noch da war.|`volumeBindingMode: WaitForFirstConsumer` is not optional here. Without that line the dataset appears on some node, the scheduler puts the pod elsewhere, and you get *volume node affinity conflict* — on a volume that was right there a moment ago."], code:{de:"apiVersion: storage.k8s.io/v1\nkind: StorageClass\nmetadata:\n  name: zfs-local\nprovisioner: zfs.csi.openebs.io\nparameters:\n  poolname: tank\n  fstype: zfs            # zfs = Dataset, ext4/xfs = ZVOL mit Dateisystem\n  compression: \"on\"\n  recordsize: \"128k\"     # bei Postgres eher 16k, bei Videos 1M\nallowVolumeExpansion: true\nvolumeBindingMode: WaitForFirstConsumer\nreclaimPolicy: Delete", en:"apiVersion: storage.k8s.io/v1\nkind: StorageClass\nmetadata:\n  name: zfs-local\nprovisioner: zfs.csi.openebs.io\nparameters:\n  poolname: tank\n  fstype: zfs            # zfs = dataset, ext4/xfs = ZVOL with a filesystem\n  compression: \"on\"\n  recordsize: \"128k\"     # 16k for Postgres, 1M for video\nallowVolumeExpansion: true\nvolumeBindingMode: WaitForFirstConsumer\nreclaimPolicy: Delete"}},
+
+   {h:"Was du damit bekommst — und was nicht|What you get — and what you do not", p:["Du bekommst Kompression, Prüfsummen und Snapshots je Volume, und Latenzen, die kein Netzwerkspeicher erreicht. Du bekommst **kein** ReadWriteMany und keine Ausfallsicherheit: Das Volume liegt auf genau einem Node, der Pod wird dorthin festgenagelt, und wenn diese Maschine stirbt, sind die Daten nicht anderswo. Richtig für Postgres mit eigener Replikation oder ein MongoDB-ReplicaSet. Falsch für ein geteiltes Upload-Verzeichnis.|You get compression, checksums and per-volume snapshots, and latency no network storage matches. You do **not** get ReadWriteMany or fault tolerance: the volume sits on exactly one node, the pod is nailed to it, and if that machine dies the data is not somewhere else. Right for Postgres with its own replication or a MongoDB replica set. Wrong for a shared upload directory."], code:{de:"kubectl get pv -o custom-columns=NAME:.metadata.name,NODE:'.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]'\nzfs list -t all                   # auf dem Node: Datasets und Snapshots", en:"kubectl get pv -o custom-columns=NAME:.metadata.name,NODE:'.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]'\nzfs list -t all                   # on the node: datasets and snapshots"}},
+
+   {h:"Fall B · ein eigener ZFS-Server|Case B · a ZFS box of its own", p:["Steht TrueNAS oder ein ZFS-Server daneben, redet **democratic-csi** über dessen API mit ihm: es legt je PVC ein Dataset an, gibt es per NFS oder iSCSI frei und räumt es wieder ab. NFS gibt dir ReadWriteMany, iSCSI die bessere Latenz und ReadWriteOnce.|If TrueNAS or a ZFS server sits next to the cluster, **democratic-csi** talks to its API: it creates a dataset per PVC, exports it over NFS or iSCSI, and cleans it up again. NFS gives you ReadWriteMany, iSCSI gives better latency and ReadWriteOnce."], code:{de:"helm repo add democratic-csi https://democratic-csi.github.io/charts/\nhelm install zfs-nfs democratic-csi/democratic-csi \\\n  -n democratic-csi --create-namespace -f werte.yaml\n\n# werte.yaml, gekürzt:\ncsiDriver:\n  name: org.democratic-csi.nfs\nstorageClasses:\n  - name: zfs-nfs\n    defaultClass: false\n    reclaimPolicy: Delete\n    volumeBindingMode: Immediate\n    allowVolumeExpansion: true\ndriver:\n  config:\n    driver: freenas-api-nfs\n    httpConnection:\n      protocol: https\n      host: 172.18.42.5\n      port: 443\n      apiKey: HIER-DER-API-SCHLUESSEL\n      allowInsecure: true\n    zfs:\n      datasetParentName: tank/k8s/vols\n      detachedSnapshotsDatasetParentName: tank/k8s/snaps\n    nfs:\n      shareHost: 172.18.42.5", en:"helm repo add democratic-csi https://democratic-csi.github.io/charts/\nhelm install zfs-nfs democratic-csi/democratic-csi \\\n  -n democratic-csi --create-namespace -f values.yaml\n\n# values.yaml, abbreviated:\ncsiDriver:\n  name: org.democratic-csi.nfs\nstorageClasses:\n  - name: zfs-nfs\n    defaultClass: false\n    reclaimPolicy: Delete\n    volumeBindingMode: Immediate\n    allowVolumeExpansion: true\ndriver:\n  config:\n    driver: freenas-api-nfs\n    httpConnection:\n      protocol: https\n      host: 172.18.42.5\n      port: 443\n      apiKey: YOUR-API-KEY-HERE\n      allowInsecure: true\n    zfs:\n      datasetParentName: tank/k8s/vols\n      detachedSnapshotsDatasetParentName: tank/k8s/snaps\n    nfs:\n      shareHost: 172.18.42.5"}},
+
+   {h:"Die einfache Variante von Fall B|The plain version of case B", p:["Wenn dir der API-Schlüssel und die Konfigurationsdatei zu viel sind: Gib das Dataset schlicht per NFS frei und nimm den `csi-driver-nfs` aus dem Abschnitt darüber. Du verlierst Snapshots und Quoten je Volume — dafür gibt es ein Stück weniger, das kaputtgehen kann. Im Heimlabor ist das meistens der bessere Tausch.|If the API key and the values file are more than you want: simply export the dataset over NFS and use `csi-driver-nfs` from the section above. You lose per-volume snapshots and quotas — in exchange there is one less thing to break. In a home lab that is usually the better trade."]},
+
+   {h:"Was ZFS im Cluster schiefgehen lässt|What ZFS gets wrong in a cluster", p:["Der ARC — der Lesecache von ZFS — liegt außerhalb dessen, was der kubelet als belegt sieht. Der Node meldet freien Speicher, den ZFS längst hält; dann verdrängt der kubelet Pods oder der OOM-Killer greift zu. Begrenze den ARC, bevor es passiert.|The ARC — ZFS's read cache — sits outside what the kubelet counts as used. The node reports free memory that ZFS is already holding; then the kubelet evicts pods or the OOM killer steps in. Cap the ARC before that happens."], code:{de:"# 4 GiB Obergrenze für den ARC\necho \"options zfs zfs_arc_max=4294967296\" | sudo tee /etc/modprobe.d/zfs.conf\nsudo update-initramfs -u\n# danach neu starten\n\ncat /proc/spl/kstat/zfs/arcstats | grep -E '^(size|c_max)'", en:"# 4 GiB ceiling for the ARC\necho \"options zfs zfs_arc_max=4294967296\" | sudo tee /etc/modprobe.d/zfs.conf\nsudo update-initramfs -u\n# reboot afterwards\n\ncat /proc/spl/kstat/zfs/arcstats | grep -E '^(size|c_max)'"}}],
+ p2:["Zwei weitere Stolpersteine: Der Pool muss beim Start **vor** dem kubelet importiert sein, sonst starten Pods in leere Verzeichnisse hinein und schreiben munter auf die Systemplatte. Und ein voller Pool legt jeden Pod lahm, der darauf schreibt — nicht nur den, der ihn vollgemacht hat. `zpool list` gehört in die Überwachung.|Two more stumbling blocks: the pool has to be imported **before** the kubelet at boot, otherwise pods start into empty directories and happily write onto the system disk. And a full pool stalls every pod writing to it — not just the one that filled it. `zpool list` belongs in your monitoring."]},
+
+{h:"S3 anbinden|Wiring up S3",
+ p:["Der wichtigste Satz zuerst: **Für S3 gibt es kein PVC**, und das ist Absicht. Objektspeicher hat keine Verzeichnisse, kein Umbenennen, kein Anhängen an eine bestehende Datei und keine Sperren. Jeder Zugriff ist eine HTTP-Anfrage. Wer das als Laufwerk einhängt, baut sich ein Dateisystem, das an genau diesen Stellen lügt.|The most important sentence first: **there is no PVC for S3**, and that is deliberate. Object storage has no directories, no rename, no append to an existing file and no locking. Every access is an HTTP request. Mounting it as a drive builds you a filesystem that lies in exactly those places."],
+ table:[["Erwartung|Expectation","Was S3 per FUSE daraus macht|What S3 over FUSE makes of it"],
+   ["Datei umbenennen|Rename a file","Kopieren und löschen. Bei 2 GB dauert das entsprechend.|Copy and delete. On 2 GB it takes accordingly."],
+   ["An eine Datei anhängen|Append to a file","Geht nicht. Das Objekt wird komplett neu geschrieben — oder der Treiber lehnt ab.|Not possible. The object is rewritten whole — or the driver refuses."],
+   ["Sperrdatei, flock|Lock file, flock","Wirkungslos. Zwei Pods überschreiben sich gegenseitig, ohne es zu merken.|Ineffective. Two pods overwrite each other without noticing."],
+   ["ls im großen Verzeichnis|ls in a large directory","Eine API-Anfrage je 1000 Objekte. Sichtbar langsam, in der Cloud auch abgerechnet.|One API request per 1000 objects. Visibly slow, and billed in the cloud."],
+   ["Zeitstempel, Rechte|Timestamps, permissions","Erfunden. Was `stat` zeigt, kommt aus den Mount-Optionen.|Invented. What `stat` shows comes from the mount options."]],
+ steps:[
+   {h:"Weg 1 · die Anwendung spricht S3|Route 1 · the application speaks S3", p:["Der richtige Weg, und meist weniger Arbeit als gedacht: Zugangsdaten in ein Secret, Bucket und Endpunkt als Umgebungsvariablen. Jedes SDK — boto3, aws-sdk, minio-go — findet die Standardnamen von allein.|The right route, and usually less work than expected: credentials into a Secret, bucket and endpoint as environment variables. Every SDK — boto3, aws-sdk, minio-go — picks up the standard names on its own."], code:{de:"apiVersion: v1\nkind: Secret\nmetadata:\n  name: s3-zugang\ntype: Opaque\nstringData:\n  AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE\n  AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n---\n# im Container:\n    envFrom:\n      - secretRef:\n          name: s3-zugang\n    env:\n      - name: AWS_REGION\n        value: eu-central-1\n      - name: S3_BUCKET\n        value: meine-uploads\n      - name: AWS_ENDPOINT_URL          # nur bei MinIO, Ceph, Garage\n        value: http://minio.minio.svc.cluster.local:9000", en:"apiVersion: v1\nkind: Secret\nmetadata:\n  name: s3-access\ntype: Opaque\nstringData:\n  AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE\n  AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n---\n# in the container:\n    envFrom:\n      - secretRef:\n          name: s3-access\n    env:\n      - name: AWS_REGION\n        value: eu-central-1\n      - name: S3_BUCKET\n        value: my-uploads\n      - name: AWS_ENDPOINT_URL          # only for MinIO, Ceph, Garage\n        value: http://minio.minio.svc.cluster.local:9000"}},
+
+   {h:"In der Cloud: keine Schlüssel|In the cloud: no keys", p:["Bei AWS, Google und Azure gehören statische Schlüssel nicht in den Cluster. Der Pod bekommt über seinen ServiceAccount ein kurzlebiges Token, der Anbieter tauscht es gegen Rechte — bei AWS heißt das IRSA oder Pod Identity, bei Google Workload Identity. Es gibt dann schlicht nichts zu stehlen.|On AWS, Google and Azure static keys do not belong in the cluster. The pod gets a short-lived token through its ServiceAccount and the provider exchanges it for permissions — AWS calls it IRSA or Pod Identity, Google calls it Workload Identity. There is then simply nothing to steal."], code:{de:"apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: uploader\n  annotations:\n    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/uploads-schreiben\n---\n# im Pod:\n    spec:\n      serviceAccountName: uploader", en:"apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: uploader\n  annotations:\n    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/write-uploads\n---\n# in the pod:\n    spec:\n      serviceAccountName: uploader"}},
+
+   {h:"Weg 2 · S3 trotzdem als Verzeichnis|Route 2 · S3 as a directory anyway", p:["Manchmal ist die Anwendung nicht änderbar. Dann hängen Mountpoint for Amazon S3, s3fs, GeeseFS, rclone oder JuiceFS den Bucket per FUSE ein. Dynamisches Provisioning gibt es dabei nicht — du beschreibst den Bucket als statisches PV.|Sometimes the application cannot be changed. Then Mountpoint for Amazon S3, s3fs, GeeseFS, rclone or JuiceFS mount the bucket over FUSE. There is no dynamic provisioning — you describe the bucket as a static PV."], code:{de:"apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: pv-s3-bilder\nspec:\n  capacity:\n    storage: 1200Gi        # wird nicht ausgewertet, muss aber dastehen\n  accessModes:\n    - ReadWriteMany\n  persistentVolumeReclaimPolicy: Retain\n  storageClassName: \"\"\n  mountOptions:\n    - allow-delete\n    - uid=1000\n    - gid=1000\n  csi:\n    driver: s3.csi.aws.com\n    volumeHandle: s3-bilder     # frei wählbar, muss clusterweit eindeutig sein\n    volumeAttributes:\n      bucketName: meine-bilder", en:"apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: pv-s3-images\nspec:\n  capacity:\n    storage: 1200Gi        # not evaluated, but has to be there\n  accessModes:\n    - ReadWriteMany\n  persistentVolumeReclaimPolicy: Retain\n  storageClassName: \"\"\n  mountOptions:\n    - allow-delete\n    - uid=1000\n    - gid=1000\n  csi:\n    driver: s3.csi.aws.com\n    volumeHandle: s3-images     # free to choose, must be unique cluster-wide\n    volumeAttributes:\n      bucketName: my-images"}},
+
+   {h:"Weg 3 · S3 selbst betreiben|Route 3 · run S3 yourself", p:["Im eigenen Cluster liefert MinIO einen S3-Endpunkt auf deinen PVCs — also auf ZFS, NFS oder was du sonst eingerichtet hast. Damit bleibst du zu jedem S3-SDK kompatibel, ohne einen Anbieter zu brauchen. Alternativen mit demselben Zweck: Ceph RGW über Rook, SeaweedFS, Garage.|Inside your own cluster MinIO provides an S3 endpoint on top of your PVCs — that is, on ZFS, NFS or whatever else you set up. That keeps you compatible with every S3 SDK without needing a provider. Alternatives with the same purpose: Ceph RGW via Rook, SeaweedFS, Garage."], code:{de:"helm repo add minio https://charts.min.io/\nhelm install minio minio/minio -n minio --create-namespace \\\n  --set mode=distributed --set replicas=4 \\\n  --set persistence.storageClass=zfs-local \\\n  --set persistence.size=100Gi\n\n# Endpunkt im Cluster:\n#   http://minio.minio.svc.cluster.local:9000", en:"helm repo add minio https://charts.min.io/\nhelm install minio minio/minio -n minio --create-namespace \\\n  --set mode=distributed --set replicas=4 \\\n  --set persistence.storageClass=zfs-local \\\n  --set persistence.size=100Gi\n\n# endpoint inside the cluster:\n#   http://minio.minio.svc.cluster.local:9000"}},
+
+   {h:"Wofür S3 im Cluster wirklich taugt|What S3 is genuinely good for", p:["Sicherungen. Velero legt Cluster-Zustand und Volume-Snapshots dort ab, ein CronJob mit `pg_dump` genauso. Dazu Artefakte, Container-Images über eine Registry, Logs über Loki, Modelldateien. Alles groß, alles selten geändert — genau das, wofür Objektspeicher gebaut ist.|Backups. Velero puts cluster state and volume snapshots there, and so does a CronJob running `pg_dump`. Plus artifacts, container images via a registry, logs via Loki, model files. All large, all rarely changed — exactly what object storage was built for."], code:{de:"velero install --provider aws --plugins velero/velero-plugin-for-aws:v1.10.0 \\\n  --bucket k8s-backup --secret-file ./velero-zugang \\\n  --backup-location-config region=eu-central-1,s3ForcePathStyle=true,s3Url=http://minio.minio.svc:9000\n\nvelero backup create nacht --include-namespaces prod\nvelero backup describe nacht", en:"velero install --provider aws --plugins velero/velero-plugin-for-aws:v1.10.0 \\\n  --bucket k8s-backup --secret-file ./velero-access \\\n  --backup-location-config region=eu-central-1,s3ForcePathStyle=true,s3Url=http://minio.minio.svc:9000\n\nvelero backup create nightly --include-namespaces prod\nvelero backup describe nightly"}}],
+ p2:["Daraus folgt die Grenze: keine Datenbank, kein SQLite, kein Git-Repository, kein Verzeichnis mit Sperrdateien auf einem FUSE-Mount. Gut geeignet ist der umgekehrte Fall — viel lesen, selten schreiben: Medien, die ein nginx ausliefert, Modellgewichte, statische Dateien.|The limit follows from that: no database, no SQLite, no git repository, no directory with lock files on a FUSE mount. What suits it is the opposite case — read a lot, write rarely: media served by an nginx, model weights, static files."]},
+
+{h:"Was die Nodes mitbringen müssen|What the nodes have to bring",
+ p:["Fast jeder Speicherfehler, der wie ein Kubernetes-Problem aussieht, ist ein fehlendes Paket auf einem Node. Der kubelet hängt ein, nicht der Pod — also braucht die Maschine das Werkzeug dafür.|Almost every storage error that looks like a Kubernetes problem is a missing package on a node. The kubelet does the mounting, not the pod — so the machine needs the tooling."],
+ table:[["Speicherart|Storage kind","Auf jedem Node|On every node","Prüfen mit|Check with"],
+   ["NFS","nfs-common (Debian), nfs-utils (RHEL)","showmount -e SERVER"],
+   ["iSCSI","open-iscsi, Dienst iscsid läuft|open-iscsi, iscsid running","systemctl status iscsid"],
+   ["ZFS lokal|ZFS local","zfsutils-linux, Pool importiert|zfsutils-linux, pool imported","zpool status"],
+   ["S3 per FUSE|S3 over FUSE","nichts, aber /dev/fuse muss da sein|nothing, but /dev/fuse has to exist","ls -l /dev/fuse"],
+   ["CSI allgemein|CSI in general","kubelet-Pfad muss zum Treiber passen|kubelet path has to match the driver","kubectl get csidrivers"]],
+ p2:["Nach `kubeadm reset` oder auf einer neu aufgesetzten Maschine ist all das wieder weg. Es gehört in die Node-Einrichtung — Ansible, cloud-init, ein Skript — und nicht in den Kopf.|After `kubeadm reset` or on a freshly installed machine all of it is gone again. It belongs in your node setup — Ansible, cloud-init, a script — not in your head."]},
+
+{h:"Prüfen, ob der Speicher wirklich hält|Checking that storage really holds",
+ p:["Ein PVC im Zustand `Bound` heißt nur, dass Kubernetes ein Volume gefunden hat. Ob geschrieben werden darf, ob es einen Pod-Neustart überlebt und ob wirklich mehrere Nodes darauf dürfen, sagt erst der Versuch.|A PVC in state `Bound` only means Kubernetes found a volume. Whether writing is allowed, whether it survives a pod restart, and whether several nodes really may use it, only the attempt tells you."],
+ steps:[
+   {h:"Schreiben, Pod wegwerfen, nachsehen|Write, throw the pod away, look again", p:["Der Test dauert eine Minute und beantwortet die einzige Frage, die zählt.|The test takes a minute and answers the only question that matters."], code:{de:"apiVersion: v1\nkind: Pod\nmetadata:\n  name: speichertest\nspec:\n  restartPolicy: Never\n  containers:\n    - name: shell\n      image: busybox:1.36\n      command: [\"sh\",\"-c\",\"date >> /daten/probe.txt; cat /daten/probe.txt; sleep 3600\"]\n      volumeMounts:\n        - name: d\n          mountPath: /daten\n  volumes:\n    - name: d\n      persistentVolumeClaim:\n        claimName: daten", en:"apiVersion: v1\nkind: Pod\nmetadata:\n  name: storage-test\nspec:\n  restartPolicy: Never\n  containers:\n    - name: shell\n      image: busybox:1.36\n      command: [\"sh\",\"-c\",\"date >> /data/probe.txt; cat /data/probe.txt; sleep 3600\"]\n      volumeMounts:\n        - name: d\n          mountPath: /data\n  volumes:\n    - name: d\n      persistentVolumeClaim:\n        claimName: data"}},
+
+   {h:"Der eigentliche Beweis|The actual proof", p:["Nach dem zweiten Start müssen **zwei** Zeilen dastehen. Steht nur eine da, war es kein dauerhafter Speicher — dann hängt der Pfad neben dem mountPath oder es ist ein emptyDir.|After the second start there have to be **two** lines. If there is only one it was not persistent storage — then the path sits beside the mountPath, or it is an emptyDir."], code:{de:"kubectl logs speichertest\nkubectl delete pod speichertest\nkubectl apply -f speichertest.yaml\nkubectl logs speichertest          # zwei Zeilen = der Speicher hält\n\nkubectl exec speichertest -- df -h /daten    # zeigt die echte Quelle", en:"kubectl logs storage-test\nkubectl delete pod storage-test\nkubectl apply -f storage-test.yaml\nkubectl logs storage-test          # two lines = the storage holds\n\nkubectl exec storage-test -- df -h /data     # shows the real source"}},
+
+   {h:"Hält ReadWriteMany, was draufsteht|Does ReadWriteMany do what it says", p:["Denselben Pod ein zweites Mal starten, aber mit `nodeSelector` auf einen anderen Node. Bleibt der zweite in ContainerCreating stehen und meldet *Multi-Attach*, ist es kein RWX — egal, was im PVC steht.|Start the same pod a second time but with a `nodeSelector` pointing at a different node. If the second one sticks in ContainerCreating and reports *Multi-Attach*, it is not RWX — whatever the PVC says."], code:{de:"kubectl get pvc daten -o jsonpath='{.spec.accessModes}{\"\\n\"}'\nkubectl get pods -o wide           # auf welchem Node liegen sie?\nkubectl describe pod speichertest-2 | tail -20", en:"kubectl get pvc data -o jsonpath='{.spec.accessModes}{\"\\n\"}'\nkubectl get pods -o wide           # which nodes are they on?\nkubectl describe pod storage-test-2 | tail -20"}},
+
+   {h:"Wie schnell ist es|How fast is it", p:["`conv=fsync` ist der entscheidende Teil. Ohne diesen Zusatz misst du den Seitencache des Nodes und bekommst Zahlen, die mit dem Speicher nichts zu tun haben.|`conv=fsync` is the part that matters. Without it you measure the node's page cache and get numbers that have nothing to do with the storage."], code:{de:"kubectl exec speichertest -- sh -c \\\n  'dd if=/dev/zero of=/daten/t bs=1M count=512 conv=fsync; rm /daten/t'", en:"kubectl exec storage-test -- sh -c \\\n  'dd if=/dev/zero of=/data/t bs=1M count=512 conv=fsync; rm /data/t'"}}],
+ p2:["Und danach aufräumen: `kubectl delete pod speichertest`. Ein vergessener Testpod hält bei ReadWriteOnce das Volume fest und blockiert genau die Anwendung, für die du es angelegt hast.|And clean up afterwards: `kubectl delete pod storage-test`. A forgotten test pod holds a ReadWriteOnce volume and blocks the very application you created it for."]}
 ];
 
 function mdInline(x){
   return esc(x).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+               .replace(/\*(.+?)\*/g, "<em>$1</em>")
                .replace(/`(.+?)`/g, "<code>$1</code>");
 }
 
 /* Gemeinsame Darstellung für Speicher-Wiki und Spickzettel. */
 function sectionsHtml(list){
   let h = "";
-  list.forEach(sec => {
+  list.forEach((sec, si) => {
     /* Breite Tabellen bekommen im Spickzettel die volle Spaltenbreite. */
     const wide = (sec.table && sec.table[0].length >= 3) || (sec.code && !sec.table);
-    h += '<div class="swsec' + (wide ? " swsec--wide" : "") + '"><p class="hgroup">' + esc(t(sec.h)) + "</p>";
+    h += '<div class="swsec' + (wide ? " swsec--wide" : "") + '" data-sec="' + si + '">' +
+         '<p class="hgroup">' + esc(t(sec.h)) + "</p>";
     (sec.p || []).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
     if (sec.code) h += '<pre class="swcode">' + esc(t(sec.code)) + "</pre>";
     if (sec.table){
@@ -3483,6 +3578,13 @@ function sectionsHtml(list){
              "<td" + (i === 0 ? ' class="swkey"' : "") + ">" + mdInline(t(c)) + "</td>").join("") + "</tr>").join("") +
            "</tbody></table></div>";
     }
+    /* Rezepte: Zwischenschritt mit eigener Überschrift und eigenem Codeblock. */
+    (sec.steps || []).forEach(st => {
+      h += '<div class="swpart"><p class="swph">' + mdInline(t(st.h)) + "</p>";
+      (st.p || []).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
+      if (st.code) h += '<pre class="swcode">' + esc(t(st.code)) + "</pre>";
+      h += "</div>";
+    });
     (sec.p2 || []).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
     h += "</div>";
   });
@@ -3490,8 +3592,17 @@ function sectionsHtml(list){
 }
 
 function renderStorageWiki(){
-  $("storageWiki").innerHTML = sectionsHtml(STORAGE_WIKI);
+  const nav = '<div class="swnav">' + STORAGE_WIKI.map((s, i) =>
+    '<button class="swchip' + (s.steps ? " swchip--go" : "") + '" data-jump="' + i + '">' +
+    esc(t(s.h)) + "</button>").join("") + "</div>";
+  $("storageWiki").innerHTML = nav + sectionsHtml(STORAGE_WIKI);
 }
+$("storageWiki").addEventListener("click", e => {
+  const b = e.target.closest("button[data-jump]");
+  if (!b) return;
+  const sec = $("storageWiki").querySelector('[data-sec="' + b.dataset.jump + '"]');
+  if (sec) sec.scrollIntoView({behavior:"smooth", block:"start"});
+});
 
 /* Spickzettel: dicht, zum Nachschlagen und zum Ausdrucken. Keine Prosa. */
 const CHEATSHEET = [
@@ -4213,6 +4324,38 @@ function runSelfTests(){
       });
       LANG = keep; return good;
     }), "");
+  const swStrings = [];
+  STORAGE_WIKI.forEach(sec => {
+    swStrings.push(sec.h);
+    (sec.p||[]).concat(sec.p2||[]).forEach(x => swStrings.push(x));
+    (sec.table||[]).forEach(r => r.forEach(c => { if (String(c).trim()) swStrings.push(c); }));
+    (sec.steps||[]).forEach(st => { swStrings.push(st.h); (st.p||[]).forEach(x => swStrings.push(x)); });
+  });
+  ok("Speicher-Wiki: keine leeren Zeichenketten in DE oder EN",
+    swStrings.every(s => {
+      const keep = LANG; let good = true;
+      ["de","en"].forEach(l => { LANG = l; if (!String(t(s)).trim()) good = false; });
+      LANG = keep; return good;
+    }), "");
+  const swCodes = [];
+  STORAGE_WIKI.forEach(sec => {
+    if (sec.code) swCodes.push(sec.code);
+    (sec.steps||[]).forEach(st => { if (st.code) swCodes.push(st.code); });
+  });
+  ok("Speicher-Wiki: Codeblöcke überleben den Sprachwechsel",
+    swCodes.every(c => {
+      if (typeof c === "string") return c.indexOf("|") === -1;
+      const keep = LANG; let good = true;
+      ["de","en"].forEach(l => { LANG = l; if (t(c).split("\n").length !== c.de.split("\n").length) good = false; });
+      LANG = keep; return good;
+    }), "");
+  ok("Speicher-Wiki: jede Anleitung nennt NFS, ZFS und S3",
+    ["NFS anbinden", "ZFS anbinden", "S3 anbinden"].every(h =>
+      STORAGE_WIKI.some(s => String(s.h).indexOf(h) === 0)), "");
+  ok("Speicher-Wiki: Rezepte haben Schritte mit Code",
+    STORAGE_WIKI.filter(s => s.steps).every(s => s.steps.some(st => st.code)), "");
+  ok("Speicher-Wiki steht vollständig in der Suche",
+    searchIndex().filter(x => x.g === "wiki").length === STORAGE_WIKI.length, "");
   ok("Spickzettel steht in der Suche",
     searchIndex().filter(x => x.g === "cheat").length === CHEATSHEET.length, "");
 
@@ -4735,8 +4878,11 @@ function searchIndex(){
   STORAGE_WIKI.forEach((sec, i) => {
     const body = (sec.p||[]).concat(sec.p2||[]).map(t).join(" ");
     const tbl = (sec.table||[]).map(r => r.map(t).join(" ")).join(" ");
+    /* Auch die Anleitungsschritte samt Befehlen sind auffindbar. */
+    const stp = (sec.steps||[]).map(st =>
+      [t(st.h)].concat((st.p||[]).map(t), st.code ? [t(st.code)] : []).join(" ")).join(" ");
     idx.push({g:"wiki", title:t(sec.h), sub:LANG === "de" ? "Speicher" : "Storage",
-      text:t(sec.h) + " " + body + " " + tbl, body:body.slice(0, 220),
+      text:[t(sec.h), body, tbl, stp].join(" "), body:(body || stp).slice(0, 220),
       act:{type:"wiki", i:i}});
   });
   CHEATSHEET.forEach((sec, i) => {
@@ -4817,13 +4963,13 @@ function goSearchHit(hit){
   }
   if (a.type === "wiki"){
     $("wikiPanel").hidden = false; setWikiTab("storage");
-    const sec = $("storageWiki").children[a.i];
+    const sec = $("storageWiki").querySelector('[data-sec="' + a.i + '"]');
     if (sec) sec.scrollIntoView({behavior:"smooth", block:"start"});
     return;
   }
   if (a.type === "cheat"){
     $("wikiPanel").hidden = false; setWikiTab("cheat");
-    const sec = $("cheatWiki").children[a.i];
+    const sec = $("cheatWiki").querySelector('[data-sec="' + a.i + '"]');
     if (sec) sec.scrollIntoView({behavior:"smooth", block:"start"});
   }
 }

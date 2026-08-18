@@ -482,6 +482,20 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
 .swtable td{border-bottom:1px solid var(--brd);padding:10px 14px;vertical-align:top;line-height:1.55;color:var(--ink-2)}
 .swtable tr:last-child td{border-bottom:0}
 .swtable .swkey{font-family:var(--mono);font-size:11.5px;color:var(--ink);white-space:nowrap;font-weight:600}
+.swnav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 26px;padding:0 0 18px;border-bottom:1px solid var(--brd)}
+.swchip{
+  border:1px solid var(--brd);background:var(--surface);color:var(--ink-2);
+  padding:5px 11px;border-radius:999px;font:inherit;font-size:11.5px;cursor:pointer;
+  transition:background .12s,color .12s,border-color .12s;
+}
+.swchip:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+/* Abschnitte mit Anleitung heben sich ab. */
+.swchip--go{border-color:var(--accent);color:var(--accent);font-weight:640}
+.swpart{margin:0 0 20px;padding:0 0 0 15px;border-left:2px solid var(--brd)}
+.swpart:last-child{margin-bottom:11px}
+.swpart .swph{font-size:12.5px;font-weight:660;color:var(--ink);margin:0 0 8px;line-height:1.5}
+.swpart .swcode{margin-bottom:0}
+.swpart p + .swcode{margin-top:11px}
 
 /* ---------- Spickzettel ---------- */
 .cheatwiki{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:0 26px;align-items:start}
@@ -576,6 +590,9 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   .stepnav .btn{flex:1 1 auto;justify-content:center;text-align:center;white-space:nowrap}
   .stepnav .btn--go,.stepnav [data-nav="commit"]{flex-basis:100%;order:3}
   .stepnav .jump{flex:0 0 auto}
+  /* Sonst schiebt die Sprungleiste den Text sieben Reihen weit nach unten. */
+  .swnav{flex-wrap:nowrap;overflow-x:auto;margin-bottom:18px;padding-bottom:12px;scrollbar-width:thin}
+  .swchip{flex:0 0 auto}
 }
 @media (min-width:961px){
   .wikipanel,.profilepanel{left:auto;width:56%;border-left:1px solid var(--glass-brd)}
