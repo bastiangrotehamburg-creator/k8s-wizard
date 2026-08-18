@@ -4083,6 +4083,10 @@ function runSelfTests(){
   ok("Der Funktionstest deckt DNS, Service, LoadBalancer und Ingress ab",
     ["nslookup kubernetes.default","kubectl expose deployment","metallb","LoadBalancer","kubectl create ingress"]
       .every(x => allCmds({}).toLowerCase().indexOf(x.toLowerCase()) !== -1), "");
+  ok("Eine einzelne MetalLB-Adresse wird zu /32 ergänzt",
+    allCmds({lbRange:"172.18.42.240"}).indexOf("172.18.42.240/32") !== -1 &&
+    allCmds({lbRange:"172.18.42.240-172.18.42.250"}).indexOf("/32") === -1 &&
+    allCmds({lbRange:"172.18.42.0/24"}).indexOf("172.18.42.0/24") !== -1, "");
   ok("Der MetalLB-Bereich wird übernommen",
     allCmds({lbRange:"10.0.0.50-10.0.0.60"}).indexOf("10.0.0.50-10.0.0.60") !== -1 &&
     allCmds({}).indexOf("192.168.178.240-192.168.178.250") !== -1, "");
@@ -4268,7 +4272,7 @@ const CLUSTER_FIELDS = [
    hint:"Für Testcluster ohne eigene Worker. Entfernt den Taint, den kubeadm setzt.|For test clusters without separate workers. Removes the taint kubeadm sets."},
   {k:"firewall", t:"bool", l:"Firewall-Regeln mit ausgeben|Include firewall rules"},
   {k:"lbRange", t:"text", l:"MetalLB-Adressbereich|MetalLB address range", ph:"192.168.178.240-192.168.178.250",
-   hint:"Freier Bereich im **selben** Netz wie die Knoten und ausserhalb des DHCP-Bereichs des Routers. MetalLB kuendigt die Adressen per ARP an — das geht nur im eigenen Segment, ein beliebiges freies Netz reicht nicht. Mit ip -4 addr auf einem Knoten siehst du Adresse und Praefix.|A free range in the **same** network as the nodes and outside the router's DHCP range. MetalLB announces the addresses via ARP — that only works within its own segment, an arbitrary free network will not do. Use ip -4 addr on a node to see the address and prefix."}
+   hint:"Bereich, einzelne Adresse oder CIDR — eine einzelne Adresse wird zu /32 ergaenzt. Muss im **selben** Netz wie die Knoten liegen und ausserhalb des DHCP-Bereichs des Routers. MetalLB kuendigt die Adressen per ARP an — das geht nur im eigenen Segment, ein beliebiges freies Netz reicht nicht. Mit ip -4 addr auf einem Knoten siehst du Adresse und Praefix.|A range, a single address or a CIDR — a single address gets /32 appended. It has to sit in the **same** network as the nodes and outside the router's DHCP range. MetalLB announces the addresses via ARP — that only works within its own segment, an arbitrary free network will not do. Use ip -4 addr on a node to see the address and prefix."}
 ];
 
 /* Alle drei auf 10.244.0.0/16: Calicos dokumentierte Vorgabe 192.168.0.0/16 ueberschneidet
@@ -4290,7 +4294,11 @@ function clusterOpts(o){
     svcCidr: (o.svcCidr || "").trim(),
     singleNode: !!o.singleNode,
     firewall: !!o.firewall,
-    lbRange: (o.lbRange || "").trim() || "192.168.178.240-192.168.178.250"
+    /* MetalLB akzeptiert CIDR oder Bereich, keine nackte Adresse. */
+    lbRange: (function(v){
+      v = (v || "").trim() || "192.168.178.240-192.168.178.250";
+      return /^\d{1,3}(\.\d{1,3}){3}$/.test(v) ? v + "/32" : v;
+    })(o.lbRange)
   };
 }
 
@@ -4506,7 +4514,7 @@ function clusterGuide(raw){
       {c:"METALLB=v0.14.9   # aktuelle Version aus den Release Notes\nkubectl apply -f https://raw.githubusercontent.com/metallb/metallb/${METALLB}/config/manifests/metallb-native.yaml\nkubectl -n metallb-system wait --for=condition=available deploy/controller --timeout=120s",
        d:"Auf eigener Hardware vergibt niemand externe Adressen — MetalLB uebernimmt das. In der Cloud entfaellt dieser Schritt, dort macht es der Anbieter.|On your own hardware nothing hands out external addresses — MetalLB does that job. In the cloud you skip this step; the provider does it."},
       {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: metallb.io/v1beta1\nkind: IPAddressPool\nmetadata:\n  name: lan\n  namespace: metallb-system\nspec:\n  addresses:\n    - " + o.lbRange + "\n---\napiVersion: metallb.io/v1beta1\nkind: L2Advertisement\nmetadata:\n  name: lan\n  namespace: metallb-system\nspec:\n  ipAddressPools:\n    - lan\nEOF",
-       d:"Der Bereich muss im Netz der Knoten liegen und ausserhalb dessen, was der Router per DHCP vergibt — sonst bekommt irgendwann ein Laptop dieselbe Adresse wie dein Service.|The range has to sit in the nodes' network and outside what the router hands out via DHCP — otherwise a laptop eventually gets the same address as your service."},
+       d:"Der Bereich muss im Netz der Knoten liegen und ausserhalb dessen, was der Router per DHCP vergibt — sonst bekommt irgendwann ein Laptop dieselbe Adresse wie dein Service. Eine **einzelne** Adresse ist ein voellig ueblicher Fall: Sie geht an den Ingress-Controller, und alle Anwendungen teilen sie sich ueber ihre Hostnamen. Mit serviceAllocation und autoAssign false laesst sich ein Pool zusaetzlich auf bestimmte Namespaces oder Dienste festnageln.|The range has to sit in the nodes' network and outside what the router hands out via DHCP — otherwise a laptop eventually gets the same address as your service. A **single** address is a perfectly normal case: it goes to the ingress controller and every application shares it through its hostname. With serviceAllocation and autoAssign false a pool can additionally be pinned to particular namespaces or services."},
       {c:"kubectl patch svc web -p '{\"spec\":{\"type\":\"LoadBalancer\"}}'\nkubectl get svc web",
        d:"Erwartung: unter EXTERNAL-IP steht nach wenigen Sekunden eine Adresse aus dem Bereich oben. Bleibt dort dauerhaft Pending, findet MetalLB keinen freien Platz — oder der Pool passt nicht zum Netz der Knoten.|Expected: an address from the range above appears under EXTERNAL-IP within seconds. If it stays Pending, MetalLB finds no free slot — or the pool does not match the nodes' network."},
       {c:"curl http://ADRESSE-AUS-EXTERNAL-IP",
