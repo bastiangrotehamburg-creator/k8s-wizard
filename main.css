@@ -631,6 +631,7 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
 .crole--cp{background:var(--go-sh);color:var(--go-ink)}
 .crole--worker{background:var(--ok-bg);color:var(--ok)}
 .crole--admin{background:var(--accent-soft);color:var(--accent)}
+.crole--neu{background:var(--warn-bg);color:var(--warn)}
 .crole--user{background:var(--ok-bg);color:var(--ok)}
 /* white-space:pre ohne eigenes Scrollen zieht sonst das ganze Panel in die Breite. */
 .clusterout .cmd--big{white-space:pre;font-size:12px;line-height:1.6;max-width:100%;overflow-x:auto}

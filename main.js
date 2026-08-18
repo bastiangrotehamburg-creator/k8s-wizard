@@ -4357,6 +4357,28 @@ function runSelfTests(){
       (s.items||[]).forEach(it => mlbStrings.push(it.d));
     });
   });
+  const addGuide = clusterGuide({have:"node"}), newGuide = clusterGuide({});
+  const heads = g => g.map(s => t(s.h)).join(" | ");
+  ok("Installation: beim Hinzufügen entfällt kubeadm init",
+    heads(addGuide).indexOf("Hauptserver|") === -1 &&
+    addGuide.every(s => s.items.every(i => i.c.indexOf("kubeadm init") === -1)),
+    heads(addGuide));
+  ok("Installation: beim Neuaufsetzen bleibt kubeadm init drin",
+    newGuide.some(s => s.items.some(i => i.c.indexOf("kubeadm init") === 5 ||
+      i.c.indexOf("sudo kubeadm init") === 0)), "");
+  ok("Installation: beim Hinzufügen wird zuerst der Bestand ausgelesen",
+    addGuide[0].items.some(i => i.c.indexOf("kubectl get nodes") === 0) &&
+    addGuide[0].r.some(x => x.lvl === "err"), "");
+  ok("Installation: der Beitrittsbefehl bleibt in beiden Fällen dabei",
+    [addGuide, newGuide].every(g => g.some(s => s.items.some(i => i.c.indexOf("kubeadm join") !== -1))), "");
+  ok("Installation: Hinzufügen endet mit drain und delete node, nicht mit reset des Clusters",
+    addGuide.some(s => s.items.some(i => i.c.indexOf("kubectl drain") === 0)) &&
+    heads(addGuide).indexOf("Neu aufsetzen") === -1, "");
+  ok("Installation: jeder Abschnitt nennt weiterhin seinen Ort",
+    addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
+  ok("Benutzer-Assistent: die CA kommt aus der eigenen kubeconfig, nicht nur aus kubeadm",
+    tenantGuide({}).some(s => s.items.some(i =>
+      i.c.indexOf("certificate-authority-data") !== -1)), "");
   ok("MetalLB-Assistent: jeder Satz hat beide Sprachen",
     mlbStrings.every(s => String(s).split("|").length === 2),
     mlbStrings.filter(s => String(s).split("|").length !== 2).slice(0,2).join(" / "));
@@ -4502,6 +4524,10 @@ $("testClose").addEventListener("click", () => { $("testPanel").hidden = true; }
 /* ---------- Cluster aufsetzen ---------- */
 
 const CLUSTER_FIELDS = [
+  {k:"have", t:"select", l:"Ausgangslage|Starting point", structural:true,
+   opts:[["neu","Es gibt noch keinen Cluster|There is no cluster yet"],
+         ["node","Der Cluster läuft — ein Knoten kommt dazu|The cluster runs — a node is joining"]],
+   hint:"Beim Hinzufügen entfällt alles, was nur einmal passiert. Dafür kommt die Frage dazu, was zum bestehenden Cluster passen muss.|When adding, everything that only happens once falls away. In exchange comes the question of what has to match the existing cluster."},
   {k:"version", t:"text", l:"Kubernetes-Version|Kubernetes version", ph:"1.34", half:true,
    hint:"Nur Major.Minor — daraus entsteht die Paketquelle.|Major.minor only — the package repository is derived from it."},
   {k:"os", t:"select", l:"Betriebssystem|Operating system", half:true, structural:true,
@@ -4514,16 +4540,22 @@ const CLUSTER_FIELDS = [
          ["flannel","Flannel — einfach, ohne NetworkPolicy|Flannel — simple, no network policy"]]},
   {k:"endpoint", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de",
    hint:"Name oder VIP, unter dem der API-Server erreichbar ist. Leer lassen heißt: die IP des ersten Hauptservers — die lässt sich später nicht mehr ändern. Für mehrere Hauptserver ist die Angabe zwingend.|Name or VIP the API server answers on. Empty means the first control-plane node's IP — which cannot be changed later. With several control-plane nodes it is mandatory."},
-  {k:"ha", t:"bool", structural:true, l:"Mehrere Hauptserver (Hochverfügbarkeit)|Several control-plane nodes (high availability)",
+  {k:"ha", t:"bool", structural:true, when:o => o.have !== "node",
+   l:"Mehrere Hauptserver (Hochverfügbarkeit)|Several control-plane nodes (high availability)",
    hint:"Drei Hauptserver sind das Minimum, damit etcd eine Mehrheit bilden kann. Braucht einen Lastverteiler vor den API-Servern.|Three control-plane nodes are the minimum for etcd to form a majority. Requires a load balancer in front of the API servers."},
-  {k:"workers", t:"number", l:"Anzahl Worker|Number of workers", ph:"3", half:true},
+  {k:"workers", t:"number", l:"Anzahl Worker|Number of workers", ph:"3", half:true,
+   when:o => o.have !== "node"},
   {k:"podCidr", t:"text", l:"Pod-Netz|Pod network", ph:"10.244.0.0/16", half:true,
+   when:o => o.have !== "node",
    hint:"Darf sich mit keinem Netz überschneiden, das die Knoten sonst benutzen.|Must not overlap with any network the nodes already use."},
-  {k:"svcCidr", t:"text", adv:true, l:"Service-Netz|Service network", ph:"10.96.0.0/12", half:true},
-  {k:"singleNode", t:"bool", l:"Auch auf dem Hauptserver Pods zulassen|Run pods on the control plane too",
+  {k:"svcCidr", t:"text", adv:true, l:"Service-Netz|Service network", ph:"10.96.0.0/12", half:true,
+   when:o => o.have !== "node"},
+  {k:"singleNode", t:"bool", when:o => o.have !== "node",
+   l:"Auch auf dem Hauptserver Pods zulassen|Run pods on the control plane too",
    hint:"Für Testcluster ohne eigene Worker. Entfernt den Taint, den kubeadm setzt.|For test clusters without separate workers. Removes the taint kubeadm sets."},
   {k:"firewall", t:"bool", l:"Firewall-Regeln mit ausgeben|Include firewall rules"},
   {k:"lbRange", t:"text", l:"MetalLB-Adressbereich|MetalLB address range", ph:"192.168.178.240-192.168.178.250",
+   when:o => o.have !== "node",
    hint:"Bereich, einzelne Adresse oder CIDR — eine einzelne Adresse wird zu /32 ergaenzt. Muss im **selben** Netz wie die Knoten liegen und ausserhalb des DHCP-Bereichs des Routers. MetalLB kuendigt die Adressen per ARP an — das geht nur im eigenen Segment, ein beliebiges freies Netz reicht nicht. Mit ip -4 addr auf einem Knoten siehst du Adresse und Praefix.|A range, a single address or a CIDR — a single address gets /32 appended. It has to sit in the **same** network as the nodes and outside the router's DHCP range. MetalLB announces the addresses via ARP — that only works within its own segment, an arbitrary free network will not do. Use ip -4 addr on a node to see the address and prefix."}
 ];
 
@@ -4535,6 +4567,8 @@ const CNI_CIDR = {flannel:"10.244.0.0/16", calico:"10.244.0.0/16", cilium:"10.24
 function clusterOpts(o){
   const cni = o.cni || "cilium";
   return {
+    /* add: Der Cluster steht schon, es kommt nur ein Knoten dazu. */
+    add: o.have === "node",
     version: (o.version || "1.34").replace(/^v/, ""),
     os: o.os || "apt",
     runtime: o.runtime || "containerd",
@@ -4598,8 +4632,29 @@ function clusterGuide(raw){
   prep.push({c:"kubeadm version -o short\nkubelet --version\nip -4 addr show | grep 'inet '\nip -4 route | grep -v '^default'",
     d:"Vor dem Weitermachen pruefen. Die ersten beiden Zeilen muessen dieselbe Minor-Version melden — sonst bricht der naechste Schritt mit *the kubelet version is higher than the control plane version* ab. Die letzten beiden Zeilen zeigen alle Netze, die dieser Knoten kennt — eigene Adressen und erreichbare Routen, VPN und andere Standorte eingeschlossen. **Keines** davon darf sich mit dem Pod- oder dem Service-Netz ueberschneiden.|Check before moving on. The first two lines have to report the same minor version — otherwise the next step aborts with *the kubelet version is higher than the control plane version*. The last two lines show every network this node knows — its own addresses and reachable routes, VPNs and other sites included. **None** of them may overlap the pod or the service network."});
 
-  sec("Vorbereitung|Preparation", "all", {
-    p:["Diese Schritte laufen unverändert auf **jedem** Rechner — Hauptserver wie Worker. Am schnellsten geht es, wenn du sie parallel auf allen Knoten ausführst.|These steps run identically on **every** machine — control plane and workers alike. Fastest is to run them on all nodes in parallel."],
+  /* Beim Hinzufuegen kommt die wichtigste Frage zuerst: Passt der neue Knoten ueberhaupt? */
+  if (o.add){
+    sec("Was zum bestehenden Cluster passen muss|What has to match the existing cluster", "admin", {
+      p:["Ein Knoten tritt nicht in ein leeres Feld ein, sondern in einen Cluster mit bereits getroffenen Entscheidungen: eine Version, ein Pod-Netz, ein CNI, eine API-Adresse. Die liest man aus, statt sie zu raten — sonst wiederholt sich der Fehler, den man beim ersten Aufsetzen schon hatte.|A node does not join an empty field but a cluster with decisions already made: a version, a pod network, a CNI, an API address. You read those out instead of guessing them — otherwise the mistake from the first setup repeats itself.",
+         "Die wichtigste Zahl ist die Version. Der kubelet auf dem neuen Knoten darf **nicht neuer** sein als die Steuerungsebene. Die Paketquelle im nächsten Schritt muss deshalb auf die Minor-Version des Clusters zeigen, nicht auf die neueste.|The most important number is the version. The kubelet on the new node must **not be newer** than the control plane. So the package repository in the next step has to point at the cluster's minor version, not at the newest one."],
+      items:[
+        {c:"kubectl get nodes -o wide",
+         d:"Die Spalte VERSION nennt die Minor-Version, die auch der neue Knoten bekommen muss. Die Spalte OS-IMAGE zeigt nebenbei, ob die vorhandenen Knoten dasselbe Betriebssystem fahren.|The VERSION column names the minor version the new node has to get as well. The OS-IMAGE column shows in passing whether the existing nodes run the same operating system."},
+        {c:"kubectl -n kube-system get configmap kubeadm-config -o yaml \\\n  | grep -E 'podSubnet|serviceSubnet|controlPlaneEndpoint|kubernetesVersion'",
+         d:"Die Entscheidungen des ersten Aufsetzens, schwarz auf weiß. Pod- und Service-Netz stehen fest und lassen sich nachträglich nicht ändern — der neue Knoten fügt sich ein, nicht umgekehrt.|The decisions from the first setup, in black and white. Pod and service network are fixed and cannot be changed afterwards — the new node fits in, not the other way round."},
+        {c:"kubectl get pods -n kube-system -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image \\\n  | grep -Ei 'cilium|calico|flannel|weave'",
+         d:"Welches CNI läuft, entscheidet, welche Ports die Firewall braucht — und ob der neue Knoten ohne weiteres Zutun ein Pod-Netz bekommt. Ein CNI wird nicht je Knoten installiert: Das DaemonSet verteilt sich von allein.|Which CNI runs decides which ports the firewall needs — and whether the new node gets a pod network without further help. A CNI is not installed per node: the daemon set spreads by itself."},
+        {c:"kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}{.spec.podCIDR}{\"\\n\"}{end}'",
+         d:"Zeigt, wie viel vom Pod-Netz schon vergeben ist. Bei einem /16 und einem /24 je Knoten sind 256 Knoten möglich — bei einem /20 nur sechzehn, und der siebzehnte bekommt gar keines mehr.|Shows how much of the pod network is already handed out. With a /16 and a /24 per node, 256 nodes are possible — with a /20 only sixteen, and the seventeenth gets none at all."}
+      ],
+      r:[{lvl:"err", m:t("Trägst du oben eine neuere Version ein als die des Clusters, installiert die Paketquelle einen zu neuen kubelet, und der Beitritt scheitert an der Meldung the kubelet version is higher than the control plane version. Die Steuerungsebene wird zuerst aktualisiert, die Knoten danach — nie umgekehrt.|If you enter a version above that is newer than the cluster's, the repository installs a kubelet that is too new and the join fails with the kubelet version is higher than the control plane version. The control plane is upgraded first, the nodes afterwards — never the other way round.")}]
+    });
+  }
+
+  sec("Vorbereitung|Preparation", o.add ? "neu" : "all", {
+    p:[o.add
+       ? "Diese Schritte laufen **nur auf dem neuen Rechner**. Die vorhandenen Knoten bleiben unangetastet — nichts davon wirkt auf den laufenden Cluster.|These steps run **only on the new machine**. The existing nodes stay untouched — none of this affects the running cluster."
+       : "Diese Schritte laufen unverändert auf **jedem** Rechner — Hauptserver wie Worker. Am schnellsten geht es, wenn du sie parallel auf allen Knoten ausführst.|These steps run identically on **every** machine — control plane and workers alike. Fastest is to run them on all nodes in parallel."],
     items:prep,
     r:[{lvl:"warn", m:t("Alle Knoten brauchen unterschiedliche Hostnamen, MAC-Adressen und product_uuid. Geklonte VMs teilen sich diese Werte oft — dann treten Knoten dem Cluster bei und verdrängen sich gegenseitig.|Every node needs a distinct hostname, MAC address and product_uuid. Cloned VMs often share these — then nodes join and displace each other.")}]
   });
@@ -4651,7 +4706,7 @@ function clusterGuide(raw){
   if (o.singleNode) cp.push({c:"kubectl taint nodes --all node-role.kubernetes.io/control-plane-",
     d:"Nimmt den Taint weg, mit dem kubeadm normale Arbeitslast vom Hauptserver fernhält. Für einen Testcluster richtig, für Produktion nicht.|Removes the taint with which kubeadm keeps ordinary workloads off the control plane. Right for a test cluster, not for production."});
 
-  sec("Erster Hauptserver|First control-plane node", "cp", {
+  if (!o.add) sec("Erster Hauptserver|First control-plane node", "cp", {
     p:["Ab hier unterscheiden sich die Rechner. Diese Schritte laufen **nur auf dem ersten Hauptserver**.|From here the machines differ. These steps run **only on the first control-plane node**."],
     items:cp,
     r:cidrRisk.concat(noEndpoint ? [{lvl:"err", m:t("Fuer mehrere Hauptserver ist --control-plane-endpoint zwingend. Ohne ihn schreibt kubeadm keinen controlPlaneEndpoint in die Cluster-Konfiguration, und jeder weitere Hauptserver scheitert an der Meldung unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Nachtraeglich aendern heisst im Zweifel: Cluster zuruecksetzen und neu aufsetzen. Trag die Adresse oben ein, bevor du anfaengst.|For several control-plane nodes, --control-plane-endpoint is mandatory. Without it kubeadm writes no controlPlaneEndpoint into the cluster configuration, and every further control-plane node fails with unable to add a new control plane instance to a cluster that doesn't have a stable controlPlaneEndpoint address. Changing it afterwards usually means resetting the cluster and starting over. Enter the address above before you begin.")}] : [])
@@ -4672,7 +4727,9 @@ function clusterGuide(raw){
     d:"Beide Werte auf einmal, weil ein weiterer Hauptserver beide braucht: Der erste Befehl lädt die Zertifikate erneut in das Secret kubeadm-certs und gibt den neuen certificate-key als **letzte Zeile** aus, der zweite den vollständigen Beitrittsbefehl mit Token und Hash. Aneinandergehängt ergibt das die Zeile für den neuen Hauptserver.|Both values at once, because an additional control-plane node needs both: the first command uploads the certificates into the kubeadm-certs secret again and prints the new certificate key as its **last line**, the second prints the complete join command with token and hash. Put together they form the line for the new control-plane node."});
 
   sec("Beitrittsdaten besorgen|Getting the join values", "cp", {
-    p:["Die Platzhalter in den folgenden Befehlen stammen alle aus der Ausgabe von `kubeadm init`. Ist die verloren, holst du sie hier — **auf dem ersten Hauptserver**, nicht auf dem Rechner, der beitreten soll.|The placeholders in the commands below all come from the output of `kubeadm init`. If that is lost, this is where you get them — **on the first control-plane node**, not on the machine that wants to join.",
+    p:[o.add
+       ? "Genau hier fängt das Hinzufügen an. Das Token aus dem ersten Aufsetzen ist längst abgelaufen — es gilt 24 Stunden. Du erzeugst dir ein frisches, **auf einem vorhandenen Hauptserver**, nicht auf dem Rechner, der beitreten soll.|This is exactly where adding begins. The token from the first setup expired long ago — it is valid for 24 hours. You create a fresh one, **on an existing control-plane node**, not on the machine that wants to join."
+       : "Die Platzhalter in den folgenden Befehlen stammen alle aus der Ausgabe von `kubeadm init`. Ist die verloren, holst du sie hier — **auf dem ersten Hauptserver**, nicht auf dem Rechner, der beitreten soll.|The placeholders in the commands below all come from the output of `kubeadm init`. If that is lost, this is where you get them — **on the first control-plane node**, not on the machine that wants to join.",
        "Jeder Wert steht in der Ausgabe von `kubeadm init` — und lässt sich jederzeit neu beschaffen.|Every value appears in the output of `kubeadm init` — and can be obtained again at any time."],
     table:[
       ["Platzhalter|Placeholder","Was es ist|What it is","Gültig|Valid for","Woher|Where from"],
@@ -4720,19 +4777,24 @@ function clusterGuide(raw){
   });
 
   /* --- Worker --- */
-  sec("Auf jedem Worker|On every worker", "worker", {
-    p:[(o.workers ? "Auf allen " + o.workers + " Workern" : "Auf jedem Worker") + " — nach der Vorbereitung ganz oben, aber ohne die Schritte des Hauptservers.|" +
-       (o.workers ? "On all " + o.workers + " workers" : "On every worker") + " — after the preparation above, but without any of the control-plane steps."],
+  sec(o.add ? "Auf dem neuen Knoten|On the new node" : "Auf jedem Worker|On every worker", o.add ? "neu" : "worker", {
+    p:[o.add
+       ? "Der eigentliche Beitritt. Danach übernimmt der Cluster: Der CNI-DaemonSet verteilt sich von allein auf den neuen Knoten, und der Scheduler fängt an, Pods dorthin zu legen.|The actual join. After that the cluster takes over: the CNI daemon set spreads to the new node by itself, and the scheduler starts placing pods there."
+       : (o.workers ? "Auf allen " + o.workers + " Workern" : "Auf jedem Worker") + " — nach der Vorbereitung ganz oben, aber ohne die Schritte des Hauptservers.|" +
+         (o.workers ? "On all " + o.workers + " workers" : "On every worker") + " — after the preparation above, but without any of the control-plane steps."],
     items:[
       {c:"sudo kubeadm join " + api + ":6443 \\\n  --token <TOKEN> \\\n  --discovery-token-ca-cert-hash sha256:<HASH>",
-       d:"Der Befehl aus der Ausgabe von kubeadm init, ohne --control-plane. `<TOKEN>` und `<HASH>` kommen aus dem Abschnitt **Beitrittsdaten besorgen** — dort steht auch, wie du sie neu erzeugst.|The command from the kubeadm init output, without --control-plane. `<TOKEN>` and `<HASH>` come from the section **Getting the join values**, which also shows how to create them anew."}
-    ],
+       d:"Der Befehl für einen Worker, ohne --control-plane. `<TOKEN>` und `<HASH>` kommen aus dem Abschnitt **Beitrittsdaten besorgen** — dort steht auch, wie du sie neu erzeugst.|The command for a worker, without --control-plane. `<TOKEN>` and `<HASH>` come from the section **Getting the join values**, which also shows how to create them anew."}
+    ].concat(o.add ? [{c:"sudo kubeadm join " + api + ":6443 \\\n  --token <TOKEN> \\\n  --discovery-token-ca-cert-hash sha256:<HASH> \\\n  --control-plane --certificate-key <KEY>",
+       d:"Nur wenn der neue Knoten ein weiterer **Hauptserver** werden soll. Dafür braucht es zusätzlich den certificate-key, und der Cluster muss von Anfang an einen controlPlaneEndpoint haben — fehlt der, geht es nachträglich nicht.|Only if the new node is to become another **control-plane node**. That additionally needs the certificate key, and the cluster must have had a controlPlaneEndpoint from the start — without it, this is not possible afterwards."}] : []),
     r:[{lvl:"err", m:t("kubectl gehört nicht auf die Worker und die admin.conf schon gar nicht. Wer sie dorthin kopiert, gibt jedem mit Zugang zum Worker die volle Kontrolle über den Cluster.|kubectl does not belong on the workers and admin.conf certainly does not. Copying it there hands anyone with access to that worker full control of the cluster.")}]
   });
 
   /* --- Prüfen --- */
   sec("Prüfen|Checking", "cp", {
-    p:["Auf dem Hauptserver, sobald alle Knoten beigetreten sind.|On the control-plane node, once every node has joined."],
+    p:[o.add
+       ? "Auf einem Hauptserver, sobald der neue Knoten beigetreten ist. Er taucht zuerst als NotReady auf — das bleibt so, bis das CNI seine Pods dorthin verteilt hat, meist eine knappe Minute.|On a control-plane node, once the new node has joined. It first appears as NotReady — and stays that way until the CNI has spread its pods there, usually under a minute."
+       : "Auf dem Hauptserver, sobald alle Knoten beigetreten sind.|On the control-plane node, once every node has joined."],
     items:[
       {c:"kubectl get nodes -o wide",
        d:"Alle Knoten müssen Ready sein. NotReady direkt nach dem Beitritt ist normal, solange das CNI seine Pods noch verteilt.|Every node has to be Ready. NotReady right after joining is normal while the CNI is still distributing its pods."},
@@ -4745,7 +4807,8 @@ function clusterGuide(raw){
        d:"Jeder Knoten muss ein eigenes Teilnetz haben — bei einem /16 als Pod-Netz also 10.244.0.0/24, 10.244.1.0/24 und so weiter. Bleibt die Spalte bei einem Knoten leer, war das Pod-Netz zu klein gewaehlt.|Every node has to have its own subnet — with a /16 as the pod network that means 10.244.0.0/24, 10.244.1.0/24 and so on. If the column stays empty for a node, the pod network was chosen too small."},
       {c:"kubectl run probe --image=nginx:1.27-alpine --restart=Never --rm -it -- sh",
        d:"Ein Pod von Hand, um den Weg von der Registry bis in den Container einmal zu gehen.|A pod by hand, to walk the path from the registry into the container once."}
-    ]
+    ].concat(o.add ? [{c:"kubectl run neutest --image=busybox:1.36 --restart=Never --rm -it \\\n  --overrides='{\"spec\":{\"nodeName\":\"KNOTEN\"}}' -- \\\n  nslookup kubernetes.default.svc.cluster.local",
+       d:"Ein Pod, der ausdrücklich auf dem neuen Knoten landet. Erst das beweist, dass Registry, Pod-Netz und DNS auf **dieser** Maschine arbeiten — ein Pod irgendwo im Cluster beweist es nicht.|A pod that lands on the new node deliberately. Only that proves registry, pod network and DNS work on **this** machine — a pod somewhere in the cluster does not prove it."}] : [])
   });
 
   sec("Funktionstest|Smoke test", "cp", {
@@ -4791,7 +4854,7 @@ function clusterGuide(raw){
     r:[{lvl:"warn", m:t("Bleibt ein Service auf Pending oder ein Pod auf ContainerCreating, hilft kubectl describe auf genau dieses Objekt weiter — der Abschnitt Events ganz unten nennt die Ursache fast immer im Klartext.|If a service stays Pending or a pod stays in ContainerCreating, kubectl describe on exactly that object is the way forward — the Events section at the bottom almost always names the cause outright.")}]
   });
 
-  sec("Danach|Afterwards", "cp", {
+  if (!o.add) sec("Danach|Afterwards", "cp", {
     p:["Ein frischer Cluster kann noch nichts von außen annehmen und keinen Speicher bereitstellen. Diese drei Dinge fehlen praktisch immer.|A fresh cluster can neither accept anything from outside nor provide storage. These three are missing practically every time."],
     items:[
       {c:"kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml",
@@ -4809,7 +4872,24 @@ function clusterGuide(raw){
        {lvl:"warn", m:t("Beim Upgrade immer nur eine Minor-Version auf einmal, und kubeadm zuerst. kubelet darf höchstens eine Minor-Version hinter dem API-Server liegen, niemals davor.|When upgrading, only one minor version at a time, and kubeadm first. The kubelet may trail the API server by at most one minor version, and must never lead it.")}]
   });
 
-  sec("Neu aufsetzen|Starting over", "all", {
+  if (o.add){
+    sec("Den Knoten wieder entfernen|Removing the node again", "admin", {
+      p:["Der Rückbau geht in der umgekehrten Richtung und in genau dieser Reihenfolge: erst die Pods herunterfahren, dann den Knoten aus dem Cluster nehmen, zuletzt die Maschine selbst zurücksetzen. Wer mit dem `reset` anfängt, hinterlässt einen Knoten-Eintrag, den danach niemand mehr sauber loswird.|The teardown goes the other direction and in exactly this order: drain the pods first, then take the node out of the cluster, and reset the machine itself last. Starting with the `reset` leaves a node entry behind that nobody gets rid of cleanly afterwards."],
+      items:[
+        {c:"kubectl drain KNOTEN --ignore-daemonsets --delete-emptydir-data",
+         d:"Verschiebt alle Pods auf andere Knoten und lässt keine neuen mehr zu. --ignore-daemonsets ist nötig, weil DaemonSets sich nicht verschieben lassen — sie gehören zu jedem Knoten. --delete-emptydir-data heißt: Zwischendaten in emptyDir-Volumes gehen verloren, und das ist genau das, wofür emptyDir gedacht ist.|Moves all pods to other nodes and lets no new ones in. --ignore-daemonsets is needed because daemon sets cannot be moved — they belong to every node. --delete-emptydir-data means scratch data in emptyDir volumes is lost, which is exactly what emptyDir is for."},
+        {c:"kubectl get pods -A -o wide --field-selector spec.nodeName=KNOTEN",
+         d:"Die Gegenprobe vor dem nächsten Schritt. Was hier noch steht, sind DaemonSet-Pods — alles andere sollte weg sein.|The counter-check before the next step. What is left here are daemon-set pods — everything else should be gone."},
+        {c:"kubectl delete node KNOTEN",
+         d:"Nimmt den Knoten aus dem Cluster. Erst danach gibt der Cluster sein Pod-Teilnetz wieder frei.|Takes the node out of the cluster. Only after this does the cluster release its pod subnet again."},
+        {c:"# auf dem entfernten Knoten selbst:\nsudo kubeadm reset -f\nsudo rm -rf /etc/cni/net.d /etc/kubernetes $HOME/.kube\nsudo iptables -F && sudo iptables -t nat -F && sudo iptables -X",
+         d:"kubeadm reset räumt das CNI-Verzeichnis und die iptables-Regeln **nicht** auf. Bleiben sie stehen, verhält sich die Maschine bei einem späteren Beitritt unerklärlich — halb verbunden, mit Routen ins Nichts.|kubeadm reset does **not** clean up the CNI directory or the iptables rules. If they stay, the machine behaves inexplicably on a later join — half connected, with routes into nowhere."}
+      ],
+      r:[{lvl:"warn", m:t("Läuft auf dem Knoten ein Pod mit einem ReadWriteOnce-Volume, findet er anderswo kein neues — das Volume hängt an diesem Knoten. Vorher prüfen, welche PVCs betroffen sind.|If a pod with a ReadWriteOnce volume runs on the node, it finds no new home elsewhere — the volume is attached to that node. Check which PVCs are affected first.")}]
+    });
+  }
+
+  if (!o.add) sec("Neu aufsetzen|Starting over", "all", {
     p:["Manches laesst sich nachtraeglich nicht mehr aendern: das Pod-Netz, der controlPlaneEndpoint, das Service-Netz. Bei einem Cluster, auf dem noch nichts Produktives liegt, ist der Neuanfang schneller und sicherer als jede Reparatur.|Some things cannot be changed afterwards: the pod network, the controlPlaneEndpoint, the service network. On a cluster with nothing productive on it, starting over is faster and safer than any repair.",
        "**Die Reihenfolge ist wichtig: von aussen nach innen.** Erst alle Worker, dann die weiteren Hauptserver, zuletzt der erste Hauptserver. Wer den ersten Hauptserver zuerst zuruecksetzt, nimmt allen anderen die API — deren reset laeuft dann zwar durch, kann sich aber nicht mehr sauber aus dem Cluster abmelden.|**The order matters: from the outside in.** First all workers, then the further control-plane nodes, and the first control-plane node last. Resetting the first control-plane node first takes the API away from everyone else — their reset still runs, but can no longer deregister cleanly."],
     items:[
@@ -4957,7 +5037,8 @@ function tenantGuide(raw){
         {c:"kubectl get csr " + o.user + " -o jsonpath='{.status.certificate}' | base64 -d > " + o.user + ".crt\nopenssl x509 -in " + o.user + ".crt -noout -subject -dates",
          d:"Holt das unterschriebene Zertifikat heraus und zeigt zur Kontrolle Name und Laufzeit an.|Fetches the signed certificate and prints name and validity for checking."}
       ],
-      r:[{lvl:"err", m:t("Ein ausgestelltes Client-Zertifikat lässt sich nicht zurückziehen. Kubernetes führt keine Sperrliste. Bis zum Ablauf hilft nur, die RoleBindings zu entfernen: Der Benutzer kommt weiterhin an die API, darf dann aber nichts mehr. Deshalb eine kurze Laufzeit wählen.|An issued client certificate cannot be revoked. Kubernetes keeps no revocation list. Until it expires the only remedy is removing the role bindings: the user still reaches the API but may do nothing. So pick a short lifetime.")}]
+      r:[{lvl:"warn", m:t("Bei verwalteten Clustern — EKS, GKE, AKS — ist dieser Weg meist gesperrt: Die Steuerungsebene unterschreibt keine fremden Client-Anfragen, weil die Anmeldung über den Anbieter läuft. Dort führt der Weg über dessen Rechteverwaltung, oder über einen ServiceAccount.|With managed clusters — EKS, GKE, AKS — this route is usually closed: the control plane signs no external client requests because sign-in goes through the provider. There the way leads through the provider's own access management, or through a service account.")},
+         {lvl:"err", m:t("Ein ausgestelltes Client-Zertifikat lässt sich nicht zurückziehen. Kubernetes führt keine Sperrliste. Bis zum Ablauf hilft nur, die RoleBindings zu entfernen: Der Benutzer kommt weiterhin an die API, darf dann aber nichts mehr. Deshalb eine kurze Laufzeit wählen.|An issued client certificate cannot be revoked. Kubernetes keeps no revocation list. Until it expires the only remedy is removing the role bindings: the user still reaches the API but may do nothing. So pick a short lifetime.")}]
     });
   } else {
     sec("Die Identität: ein ServiceAccount|The identity: a service account", "admin", {
@@ -4983,8 +5064,10 @@ function tenantGuide(raw){
   sec("Die kubeconfig bauen|Building the kubeconfig", "admin", {
     p:["Eine kubeconfig besteht aus drei Teilen, die getrennt gesetzt und dann verbunden werden: **wo** der Cluster ist, **wer** du bist, und **welche Kombination** aus beidem gerade gilt. Der letzte Befehl setzt den Namespace mit — sonst landet der Benutzer in `default` und sieht nichts.|A kubeconfig consists of three parts that are set separately and then joined: **where** the cluster is, **who** you are, and **which combination** of the two is currently active. The last command sets the namespace too — otherwise the user lands in `default` and sees nothing."],
     items:[
-      {c:"kubectl config set-cluster cluster \\\n  --server=https://" + o.api + " \\\n  --certificate-authority=/etc/kubernetes/pki/ca.crt \\\n  --embed-certs=true --kubeconfig=" + kc,
-       d:"embed-certs schreibt die CA in die Datei hinein. Ohne das verweist die kubeconfig auf einen Pfad, den es auf dem Rechner des Benutzers nicht gibt.|embed-certs writes the CA into the file. Without it the kubeconfig points at a path that does not exist on the user's machine."},
+      {c:"kubectl config view --raw --minify \\\n  -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > ca.crt\nkubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}{\"\\n\"}'",
+       d:"Die CA und die Adresse aus deiner **eigenen** kubeconfig. Das ist der Weg, der überall funktioniert — bei kubeadm, bei k3s und bei einem verwalteten Cluster, wo es die Datei auf keiner Maschine gibt, an die du herankommst. Die zweite Zeile liefert genau den Wert, der oben ins Feld API-Adresse gehört.|The CA and the address out of your **own** kubeconfig. That is the route that works everywhere — with kubeadm, with k3s, and with a managed cluster where the file exists on no machine you can reach. The second line prints exactly the value that belongs in the API address field above."},
+      {c:"kubectl config set-cluster cluster \\\n  --server=https://" + o.api + " \\\n  --certificate-authority=ca.crt \\\n  --embed-certs=true --kubeconfig=" + kc,
+       d:"embed-certs schreibt die CA in die Datei hinein. Ohne das verweist die kubeconfig auf einen Pfad, den es auf dem Rechner des Benutzers nicht gibt. Auf einem kubeadm-Hauptserver liegt dieselbe Datei unter /etc/kubernetes/pki/ca.crt, bei k3s unter /var/lib/rancher/k3s/server/tls/server-ca.crt.|embed-certs writes the CA into the file. Without it the kubeconfig points at a path that does not exist on the user's machine. On a kubeadm control-plane node the same file sits at /etc/kubernetes/pki/ca.crt, with k3s at /var/lib/rancher/k3s/server/tls/server-ca.crt."},
       {c:credLine,
        d:cert ? "Zertifikat und Schlüssel wandern ebenfalls in die Datei. Danach ist sie eigenständig — und damit so schützenswert wie ein Kennwort.|Certificate and key go into the file as well. It is then self-contained — and as worth protecting as a password."
               : "Das Token wandert im Klartext in die Datei. Danach ist sie eigenständig — und damit so schützenswert wie ein Kennwort.|The token goes into the file in plain text. It is then self-contained — and as worth protecting as a password."},
@@ -5284,6 +5367,7 @@ const CLUSTER_ROLE = {
   all:  "auf allen Knoten|on every node",
   cp:   "nur Hauptserver|control plane only",
   worker:"nur Worker|workers only",
+  neu:  "nur der neue Knoten|the new node only",
   admin:"als Cluster-Verwalter|as the cluster admin",
   user: "beim Benutzer|on the user's machine"
 };
@@ -5439,7 +5523,7 @@ const CLUSTER_TAB_LABEL = {
   metallb:"MetalLB|MetalLB"
 };
 const CLUSTER_DESC = {
-  install:"Erzeugt eine Anleitung mit kubeadm, getrennt danach, was auf jedem Knoten, was nur auf dem Hauptserver und was nur auf den Workern zu tun ist. Klick kopiert den Befehl.|Builds a kubeadm guide, separated into what runs on every node, what only on the control plane and what only on the workers. Click copies the command.",
+  install:"Erzeugt eine Anleitung mit kubeadm — für einen neuen Cluster oder für einen Knoten, der zu einem laufenden dazukommt. Jeder Abschnitt sagt, auf welcher Maschine er auszuführen ist. Klick kopiert den Befehl.|Builds a kubeadm guide — for a new cluster or for a node joining a running one. Every section says which machine it runs on. Click copies the command.",
   tenant: "Richtet einen abgegrenzten Arbeitsbereich ein: eigener Namespace, eigene Anmeldung, begrenzte Rechte — und den passenden Linux-Benutzer auf dem Hauptserver. Klick kopiert den Befehl.|Sets up a bounded workspace: its own namespace, its own sign-in, limited rights — and the matching Linux user on the control plane. Click copies the command.",
   metallb:"Gibt Services vom Typ LoadBalancer eine echte Adresse aus dem eigenen Netz — die Rolle, die in der Cloud der Anbieter übernimmt. Klick kopiert den Befehl.|Gives services of type LoadBalancer a real address from your own network — the role the provider plays in the cloud. Click copies the command."
 };
