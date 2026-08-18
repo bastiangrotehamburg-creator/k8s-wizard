@@ -4331,6 +4331,57 @@ function runSelfTests(){
     (sec.table||[]).forEach(r => r.forEach(c => { if (String(c).trim()) swStrings.push(c); }));
     (sec.steps||[]).forEach(st => { swStrings.push(st.h); (st.p||[]).forEach(x => swStrings.push(x)); });
   });
+  const tenStrings = [];
+  [{}, {level:"admin", identity:"sa", linux:true, quota:true, netpol:true, pss:"privileged"},
+   {level:"view", identity:"cert", pss:"baseline"}].forEach(o => {
+    tenantGuide(o).forEach(s => {
+      tenStrings.push(s.h);
+      (s.p||[]).concat(s.p2||[]).forEach(x => tenStrings.push(x));
+      (s.table||[]).forEach(r => r.forEach(c => tenStrings.push(c)));
+      (s.items||[]).forEach(it => tenStrings.push(it.d));
+    });
+  });
+  /* Einzelne Fachbegriffe wie "edit" stehen bewusst nur einmal da; alles mit
+     einem Leerzeichen ist Prosa und braucht beide Sprachen. */
+  const zweisprachig = s => {
+    const n = String(s).split("|").length;
+    return n === 2 || (n === 1 && String(s).indexOf(" ") === -1);
+  };
+  ok("Benutzer-Assistent: jeder Satz hat beide Sprachen",
+    tenStrings.every(zweisprachig),
+    tenStrings.filter(s => !zweisprachig(s)).slice(0,2).join(" / "));
+  ok("Benutzer-Assistent: jeder Abschnitt nennt seinen Ort",
+    tenantGuide({linux:true}).every(s => CLUSTER_ROLE[s.role]), "");
+  ok("Benutzer-Assistent: Namespace, Rolle und Prüfung sind immer dabei",
+    (function(){
+      const c = tenantGuide({}).map(s => s.items.map(i => i.c).join(" ")).join(" ");
+      return c.indexOf("kind: Namespace") !== -1 && c.indexOf("kind: RoleBinding") !== -1 &&
+             c.indexOf("auth can-i") !== -1;
+    })(), "");
+  ok("Benutzer-Assistent: die Bindung bleibt auf den Namespace begrenzt",
+    tenantGuide({}).concat(tenantGuide({level:"admin"})).every(s =>
+      s.items.every(i => i.c.indexOf("kind: ClusterRoleBinding") === -1)), "");
+  ok("Benutzer-Assistent: der Name schlägt bis in die Befehle durch",
+    (function(){
+      const c = tenantGuide({user:"bastian", ns:"", linux:true}).map(s =>
+        s.items.map(i => i.c).join(" ")).join(" ");
+      return c.indexOf("team-bastian") !== -1 && c.indexOf("adduser --disabled-password --gecos \"\" bastian") !== -1;
+    })(), "");
+  ok("Benutzer-Assistent: ohne Zusatzhaken keine Quota-, Netz- und Linux-Abschnitte",
+    tenantGuide({}).length + 3 === tenantGuide({quota:true, netpol:true, linux:true}).length, "");
+  ok("Benutzer-Assistent: privileged wird als Fehler gemeldet",
+    tenantGuide({pss:"privileged"})[0].r.some(x => x.lvl === "err"), "");
+  ok("Benutzer-Assistent: das Zertifikat wird als unwiderruflich benannt",
+    tenantGuide({identity:"cert"}).some(s => s.r.some(x => x.lvl === "err" &&
+      (x.m.indexOf("zurückziehen") !== -1 || x.m.indexOf("revoked") !== -1))), "");
+  ok("Benutzer-Assistent: Markdown-Export nennt Benutzer und Namespace",
+    (function(){
+      const keep = {m:CLUSTER_MODE, t:TENANT};
+      CLUSTER_MODE = "tenant"; TENANT = {user:"anna"};
+      const md = clusterMarkdown();
+      CLUSTER_MODE = keep.m; TENANT = keep.t;
+      return md.indexOf("anna") !== -1 && md.indexOf("team-anna") !== -1;
+    })(), "");
   ok("Speicher-Wiki: keine leeren Zeichenketten in DE oder EN",
     swStrings.every(s => {
       const keep = LANG; let good = true;
@@ -4730,18 +4781,292 @@ function clusterGuide(raw){
   return out;
 }
 
+/* ---------- Benutzer und Namespace ----------
+   Erzeugt aus einem Namen alles, was ein abgegrenzter Arbeitsbereich braucht:
+   Namespace mit Sicherheitsstufe, Rolle, Quota, Netzregel, Identität, kubeconfig
+   und den Linux-Benutzer auf dem Hauptserver. */
+const TENANT_FIELDS = [
+  {k:"user", t:"text", l:"Benutzername|User name", ph:"anna", half:true, structural:true,
+   hint:"Wird zum Namen im Zertifikat, zum Linux-Konto und zur Vorgabe für den Namespace.|Becomes the name in the certificate, the Linux account and the default for the namespace."},
+  {k:"ns", t:"text", l:"Namespace", ph:"team-anna", half:true,
+   hint:"Leer lassen heißt team-BENUTZERNAME.|Leave empty for team-USERNAME."},
+  {k:"level", t:"select", l:"Was der Benutzer darf|What the user may do", structural:true,
+   opts:[["edit","Arbeiten — Pods, Deployments, Services anlegen und ändern|Work — create and change pods, deployments, services"],
+         ["view","Nur zusehen — alles lesen, nichts ändern|Watch only — read everything, change nothing"],
+         ["admin","Verwalten — zusätzlich Rechte im eigenen Namespace vergeben|Administer — additionally grant rights inside the own namespace"]]},
+  {k:"identity", t:"select", l:"Womit er sich anmeldet|How the user signs in", structural:true,
+   opts:[["cert","Client-Zertifikat — ein echter Benutzer im Cluster|Client certificate — a real user in the cluster"],
+         ["sa","ServiceAccount-Token — jederzeit widerrufbar|ServiceAccount token — revocable at any time"]]},
+  {k:"api", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de:6443",
+   hint:"Dieselbe Adresse, die auch in deiner eigenen kubeconfig unter server steht.|The same address your own kubeconfig has under server."},
+  {k:"days", t:"number", adv:true, l:"Zertifikat gültig (Tage)|Certificate valid for (days)", ph:"365", half:true},
+  {k:"pss", t:"select", l:"Pod Security Standard", half:true, structural:true,
+   opts:[["restricted","restricted — kein root, keine Rechteerweiterung|restricted — no root, no privilege escalation"],
+         ["baseline","baseline — verbietet das offensichtlich Gefährliche|baseline — forbids the obviously dangerous"],
+         ["privileged","privileged — keine Einschränkung|privileged — no restriction"]]},
+  {k:"linux", t:"bool", structural:true, l:"Linux-Benutzer auf dem Hauptserver anlegen|Create a Linux user on the control plane",
+   hint:"Für Zugriff per SSH oder VS Code Remote, mit eigener kubeconfig im Heimatverzeichnis.|For access over SSH or VS Code Remote, with its own kubeconfig in the home directory."},
+  {k:"quota", t:"bool", structural:true, l:"Verbrauch begrenzen (ResourceQuota)|Cap consumption (ResourceQuota)"},
+  {k:"cpu", t:"text", l:"CPU insgesamt|CPU in total", ph:"4", half:true},
+  {k:"mem", t:"text", l:"Speicher insgesamt|Memory in total", ph:"8Gi", half:true},
+  {k:"pods", t:"number", l:"Pods höchstens|Pods at most", ph:"20", half:true},
+  {k:"netpol", t:"bool", l:"Namespace nach außen abschotten (NetworkPolicy)|Seal the namespace off (NetworkPolicy)"}
+];
+
+function tenantOpts(o){
+  const user = (o.user || "").trim() || "anna";
+  return {
+    user: user,
+    ns: (o.ns || "").trim() || ("team-" + user),
+    level: o.level || "edit",
+    identity: o.identity || "cert",
+    api: (o.api || "").trim() || "API-ADRESSE:6443",
+    days: num(o.days) === undefined ? 365 : num(o.days),
+    pss: o.pss || "restricted",
+    linux: !!o.linux,
+    quota: !!o.quota,
+    cpu: (o.cpu || "").trim() || "4",
+    mem: (o.mem || "").trim() || "8Gi",
+    pods: num(o.pods) === undefined ? 20 : num(o.pods),
+    netpol: !!o.netpol
+  };
+}
+
+/* Der eingebaute ClusterRole-Name je Stufe. Es sind Vorgaben von Kubernetes,
+   keine selbst gebauten Rollen — deshalb überleben sie jedes Upgrade. */
+const TENANT_ROLE = {edit:"edit", view:"view", admin:"admin"};
+
+function tenantGuide(raw){
+  const o = tenantOpts(raw);
+  const out = [];
+  const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
+  const cert = o.identity === "cert";
+  /* Im RoleBinding steht entweder ein Benutzername aus dem Zertifikat oder ein ServiceAccount. */
+  const subject = cert
+    ? "  - kind: User\n    name: " + o.user + "\n    apiGroup: rbac.authorization.k8s.io"
+    : "  - kind: ServiceAccount\n    name: " + o.user + "\n    namespace: " + o.ns;
+  const asUser = cert ? o.user : "system:serviceaccount:" + o.ns + ":" + o.user;
+
+  /* --- 1. Namespace --- */
+  sec("Der Namespace mit Sicherheitsstufe|The namespace with its security level", "admin", {
+    p:["Ein Namespace ist zuerst nur ein Namensraum. Er trennt Objekte und Namen — sonst nichts. Weder Rechte noch Verbrauch noch Netzverkehr sind damit getrennt; das kommt in den nächsten drei Schritten dazu.|A namespace is first of all just a name space. It separates objects and names — nothing else. Neither rights nor consumption nor network traffic are separated by it; that comes in the next three steps.",
+       "Die drei Labels schalten den Pod Security Standard ein. `enforce` lehnt einen Pod ab, der dagegen verstößt, `warn` gibt beim Anlegen eine Meldung zurück, `audit` schreibt nur ins Prüfprotokoll. Alle drei auf dieselbe Stufe zu setzen ist die ehrliche Variante — sonst wundert man sich später, warum nichts blockiert wurde.|The three labels switch on the Pod Security Standard. `enforce` rejects a pod that violates it, `warn` returns a message on creation, `audit` only writes to the audit log. Setting all three to the same level is the honest variant — otherwise you wonder later why nothing was blocked."],
+    items:[
+      {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: " + o.ns + "\n  labels:\n    kubernetes.io/metadata.name: " + o.ns + "\n    pod-security.kubernetes.io/enforce: " + o.pss + "\n    pod-security.kubernetes.io/warn: " + o.pss + "\n    pod-security.kubernetes.io/audit: " + o.pss + "\nEOF",
+       d:"Legt den Namespace an und schaltet die Prüfung sofort scharf. Die Labels lassen sich später ändern — bereits laufende Pods werden dabei nicht rückwirkend geprüft.|Creates the namespace and arms the check right away. The labels can be changed later — pods already running are not re-checked retroactively."}
+    ],
+    r:o.pss === "privileged"
+      ? [{lvl:"err", m:t("Mit privileged darf ein Pod als root laufen, das Host-Dateisystem einhängen und den Kernel ansprechen. Wer darin Pods anlegen darf, ist faktisch root auf dem Node — die Rolle darunter ist dann Zierde.|With privileged a pod may run as root, mount the host filesystem and talk to the kernel. Whoever may create pods there is effectively root on the node — the role below is then decoration.")}]
+      : o.pss === "baseline"
+        ? [{lvl:"warn", m:t("baseline verbietet das offensichtlich Gefährliche, erlaubt aber weiterhin root im Container. Für fremden oder zugelieferten Code ist restricted die richtige Stufe.|baseline forbids the obviously dangerous but still allows root inside the container. For foreign or vendored code, restricted is the right level.")}]
+        : []
+  });
+
+  /* --- 2. Quota --- */
+  if (o.quota){
+    sec("Grenzen setzen|Setting limits", "admin", {
+      p:["Ohne Quota kann ein einzelner Namespace den gesamten Cluster leerräumen — nicht aus Bosheit, sondern durch ein Deployment mit zu vielen Replicas.|Without a quota a single namespace can drain the whole cluster — not out of malice but through a deployment with too many replicas.",
+         "Die ResourceQuota hat eine Falle, die fast jeden einmal trifft: Sobald sie CPU oder Speicher begrenzt, wird **jeder** Pod ohne requests und limits abgelehnt. Deshalb gehört die LimitRange direkt daneben — sie setzt die fehlenden Werte selbst ein.|The ResourceQuota has a trap that catches almost everyone once: as soon as it limits CPU or memory, **every** pod without requests and limits is rejected. That is why the LimitRange belongs right next to it — it fills in the missing values itself."],
+      items:[
+        {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind: ResourceQuota\nmetadata:\n  name: quota\n  namespace: " + o.ns + "\nspec:\n  hard:\n    requests.cpu: \"" + o.cpu + "\"\n    requests.memory: " + o.mem + "\n    limits.cpu: \"" + o.cpu + "\"\n    limits.memory: " + o.mem + "\n    pods: \"" + o.pods + "\"\n    persistentvolumeclaims: \"10\"\n    services.loadbalancers: \"1\"\n---\napiVersion: v1\nkind: LimitRange\nmetadata:\n  name: vorgaben\n  namespace: " + o.ns + "\nspec:\n  limits:\n    - type: Container\n      default:\n        cpu: 200m\n        memory: 256Mi\n      defaultRequest:\n        cpu: 50m\n        memory: 64Mi\n      max:\n        cpu: \"2\"\n        memory: 2Gi\nEOF",
+         d:"default gilt für limits, defaultRequest für requests. max ist die Obergrenze je Container — damit belegt kein einzelner Pod die ganze Quota.|default applies to limits, defaultRequest to requests. max is the ceiling per container — so no single pod occupies the entire quota."},
+        {c:"kubectl describe resourcequota quota -n " + o.ns,
+         d:"Zeigt Verbrauch gegen Grenze. Diese Ausgabe ist die erste Anlaufstelle, wenn ein Pod plötzlich nicht mehr startet.|Shows usage against the limit. This output is the first place to look when a pod suddenly stops starting."}
+      ],
+      r:[{lvl:"warn", m:t("Die Quota zählt requests, nicht den tatsächlichen Verbrauch. Ein Namespace mit großzügigen requests blockiert Platz, den er nie benutzt — und einer mit zu kleinen bekommt Pods, die unter Last gedrosselt werden.|The quota counts requests, not actual consumption. A namespace with generous requests blocks room it never uses — and one with requests too small gets pods that are throttled under load.")}]
+    });
+  }
+
+  /* --- 3. Rolle --- */
+  sec("Die Rolle: was er darf und wo|The role: what and where", "admin", {
+    p:["Kubernetes bringt die Rollen fertig mit. Du baust keine eigene — du bindest eine vorhandene **in einem Namespace**. Genau darin liegt der Trick: Eine ClusterRole ist nur eine Sammlung von Regeln. Ob sie clusterweit oder in einem einzigen Namespace gilt, entscheidet die Bindung.|Kubernetes ships the roles ready-made. You do not build your own — you bind an existing one **inside a namespace**. That is exactly the trick: a ClusterRole is merely a set of rules. Whether it applies cluster-wide or in a single namespace is decided by the binding.",
+       "Ein RoleBinding auf eine ClusterRole bedeutet: diese Regeln, aber nur hier. Ein ClusterRoleBinding auf dieselbe ClusterRole bedeutet: überall. Der Unterschied ist ein Wort und der ganze Sicherheitsgewinn.|A RoleBinding onto a ClusterRole means: these rules, but only here. A ClusterRoleBinding onto the same ClusterRole means: everywhere. The difference is one word and the entire security benefit."],
+    table:[["Stufe|Level","Darf|May","Darf nicht|May not"],
+      ["view","Alles lesen außer Secrets|Read everything except secrets","Nichts ändern|Change nothing"],
+      ["edit","Pods, Deployments, Services, ConfigMaps und Secrets anlegen und ändern|Create and change pods, deployments, services, config maps and secrets","Rollen vergeben, den Namespace löschen|Grant roles, delete the namespace"],
+      ["admin","Zusätzlich Rollen und Bindungen im eigenen Namespace vergeben|Additionally grant roles and bindings inside the own namespace","Mehr Rechte vergeben, als er selbst hat|Grant more rights than they hold themselves"]],
+    items:[
+      {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: " + o.user + "-" + TENANT_ROLE[o.level] + "\n  namespace: " + o.ns + "\nroleRef:\n  kind: ClusterRole\n  name: " + TENANT_ROLE[o.level] + "\n  apiGroup: rbac.authorization.k8s.io\nsubjects:\n" + subject + "\nEOF",
+       d:"kind ist RoleBinding, roleRef.kind ist ClusterRole — diese Mischung ist beabsichtigt und der übliche Weg. Der Namespace in metadata bestimmt, wo die Regeln greifen.|kind is RoleBinding, roleRef.kind is ClusterRole — that mixture is deliberate and the usual way. The namespace in metadata decides where the rules apply."},
+      {c:"kubectl get rolebindings -n " + o.ns + " -o wide",
+       d:"Zeigt, wer in diesem Namespace welche Rolle hat. Sollte kurz und überschaubar bleiben.|Shows who holds which role in this namespace. Should stay short and surveyable."}
+    ],
+    r:[{lvl:"warn", m:t("edit und admin dürfen die Secrets im eigenen Namespace lesen — auch die, die du dort später anlegst. Ein Namespace ist genau so vertraulich wie sein am wenigsten vertrauenswürdiger Benutzer.|edit and admin may read the secrets in their own namespace — including the ones you create there later. A namespace is exactly as confidential as its least trustworthy user.")}]
+      .concat(o.level === "admin" ? [{lvl:"warn", m:t("admin darf im eigenen Namespace weitere Bindungen anlegen. Mehr als die eigenen Rechte kann er dabei nicht vergeben — der API-Server verhindert das. Ein zweiter Benutzer im selben Namespace kann so aber ohne dein Zutun entstehen.|admin may create further bindings inside their own namespace. They cannot grant more than they hold — the API server prevents that. But a second user in the same namespace can appear without your involvement.")}] : [])
+  });
+
+  /* --- 4. Identität --- */
+  if (cert){
+    sec("Die Identität: ein Client-Zertifikat|The identity: a client certificate", "admin", {
+      p:["Kubernetes führt keine Benutzerliste. Es gibt keine Tabelle mit Konten, kein `kubectl create user`. Ein Benutzer ist schlicht ein Name, den der API-Server aus einem gültigen Zertifikat abliest: **CN wird zum Benutzernamen, O zur Gruppe**.|Kubernetes keeps no list of users. There is no table of accounts, no `kubectl create user`. A user is simply a name the API server reads out of a valid certificate: **CN becomes the user name, O becomes the group**.",
+         "Der private Schlüssel entsteht dabei auf deinem Rechner und verlässt ihn nie — unterschrieben wird nur die Anfrage. Das ist der Grund, warum dieser Weg trotz der drei Schritte der saubere ist.|The private key is created on your machine and never leaves it — only the request gets signed. That is why this route is the clean one despite its three steps."],
+      items:[
+        {c:"openssl genrsa -out " + o.user + ".key 4096\nopenssl req -new -key " + o.user + ".key -out " + o.user + ".csr \\\n  -subj \"/CN=" + o.user + "/O=" + o.ns + "\"",
+         d:"CN ist der Benutzername, mit dem der API-Server ihn später kennt. O ist die Gruppe — praktisch, wenn später mehrere Personen dieselben Rechte bekommen sollen.|CN is the user name the API server will know them by. O is the group — handy when several people are to get the same rights later."},
+        {c:"cat <<EOF | kubectl apply -f -\napiVersion: certificates.k8s.io/v1\nkind: CertificateSigningRequest\nmetadata:\n  name: " + o.user + "\nspec:\n  request: $(base64 -w0 " + o.user + ".csr)\n  signerName: kubernetes.io/kube-apiserver-client\n  expirationSeconds: " + (o.days * 86400) + "\n  usages:\n    - client auth\nEOF\n\nkubectl certificate approve " + o.user,
+         d:"Der Cluster unterschreibt selbst, mit seiner eigenen CA. Zu beachten: hier steht EOF ohne Anführungszeichen, damit die Shell base64 ausführt — bei den YAML-Blöcken darüber ist es Absicht, dass sie in Anführungszeichen stehen.|The cluster signs it itself, with its own CA. Note: here EOF has no quotes so the shell runs base64 — in the YAML blocks above the quotes are deliberate."},
+        {c:"kubectl get csr " + o.user + " -o jsonpath='{.status.certificate}' | base64 -d > " + o.user + ".crt\nopenssl x509 -in " + o.user + ".crt -noout -subject -dates",
+         d:"Holt das unterschriebene Zertifikat heraus und zeigt zur Kontrolle Name und Laufzeit an.|Fetches the signed certificate and prints name and validity for checking."}
+      ],
+      r:[{lvl:"err", m:t("Ein ausgestelltes Client-Zertifikat lässt sich nicht zurückziehen. Kubernetes führt keine Sperrliste. Bis zum Ablauf hilft nur, die RoleBindings zu entfernen: Der Benutzer kommt weiterhin an die API, darf dann aber nichts mehr. Deshalb eine kurze Laufzeit wählen.|An issued client certificate cannot be revoked. Kubernetes keeps no revocation list. Until it expires the only remedy is removing the role bindings: the user still reaches the API but may do nothing. So pick a short lifetime.")}]
+    });
+  } else {
+    sec("Die Identität: ein ServiceAccount|The identity: a service account", "admin", {
+      p:["Ein ServiceAccount ist ein Konto, das im Cluster selbst liegt — anders als beim Zertifikat gibt es hier ein Objekt, das du löschen kannst. Genau das ist sein Vorteil: Der Zugang lässt sich jederzeit zurücknehmen.|A service account is an account that lives inside the cluster — unlike the certificate there is an object here that you can delete. That is exactly its advantage: access can be withdrawn at any time.",
+         "Der Preis: Ein Token ist ein Kennwort im Klartext. Wer es sieht, ist der Benutzer. Es gehört nicht in ein Repository, nicht in eine Chatnachricht und nicht in eine Umgebungsvariable, die irgendwo protokolliert wird.|The price: a token is a password in plain text. Whoever sees it is the user. It does not belong in a repository, a chat message or an environment variable that gets logged somewhere."],
+      items:[
+        {c:"kubectl create serviceaccount " + o.user + " -n " + o.ns,
+         d:"Das Konto selbst. Ohne RoleBinding darf es nichts — der ServiceAccount allein ist kein Recht.|The account itself. Without a role binding it may do nothing — a service account alone is not a permission."},
+        {c:"kubectl create token " + o.user + " -n " + o.ns + " --duration=" + (o.days * 24) + "h",
+         d:"Erzeugt ein befristetes Token und gibt es aus. Der API-Server kann die Höchstdauer begrenzen, dann bekommst du eine kürzere zurück als angefragt — die Ausgabe zählt, nicht die Anfrage.|Creates a time-limited token and prints it. The API server can cap the maximum duration, in which case you get back a shorter one than requested — the output counts, not the request."},
+        {c:"kubectl delete serviceaccount " + o.user + " -n " + o.ns,
+         d:"Der Widerruf. Alle Token dieses Kontos sind damit sofort wertlos — das ist der Unterschied zum Zertifikat.|The revocation. Every token of this account becomes worthless immediately — that is the difference from the certificate."}
+      ],
+      r:[{lvl:"warn", m:t("ServiceAccounts sind für Programme gedacht, nicht für Menschen. Für zwei, drei Personen im Heimlabor ist das in Ordnung. Sobald es mehr werden oder Nachvollziehbarkeit zählt, gehört ein richtiger Anmeldedienst davor — OIDC über Keycloak, Entra ID oder Google.|Service accounts are meant for programs, not people. For two or three people in a home lab that is fine. As soon as there are more, or accountability matters, a proper sign-in service belongs in front — OIDC via Keycloak, Entra ID or Google.")}]
+    });
+  }
+
+  /* --- 5. kubeconfig --- */
+  const kc = o.user + ".kubeconfig";
+  const credLine = cert
+    ? "kubectl config set-credentials " + o.user + " \\\n  --client-certificate=" + o.user + ".crt --client-key=" + o.user + ".key \\\n  --embed-certs=true --kubeconfig=" + kc
+    : "kubectl config set-credentials " + o.user + " \\\n  --token=\"$(kubectl create token " + o.user + " -n " + o.ns + " --duration=" + (o.days * 24) + "h)\" \\\n  --kubeconfig=" + kc;
+  sec("Die kubeconfig bauen|Building the kubeconfig", "admin", {
+    p:["Eine kubeconfig besteht aus drei Teilen, die getrennt gesetzt und dann verbunden werden: **wo** der Cluster ist, **wer** du bist, und **welche Kombination** aus beidem gerade gilt. Der letzte Befehl setzt den Namespace mit — sonst landet der Benutzer in `default` und sieht nichts.|A kubeconfig consists of three parts that are set separately and then joined: **where** the cluster is, **who** you are, and **which combination** of the two is currently active. The last command sets the namespace too — otherwise the user lands in `default` and sees nothing."],
+    items:[
+      {c:"kubectl config set-cluster cluster \\\n  --server=https://" + o.api + " \\\n  --certificate-authority=/etc/kubernetes/pki/ca.crt \\\n  --embed-certs=true --kubeconfig=" + kc,
+       d:"embed-certs schreibt die CA in die Datei hinein. Ohne das verweist die kubeconfig auf einen Pfad, den es auf dem Rechner des Benutzers nicht gibt.|embed-certs writes the CA into the file. Without it the kubeconfig points at a path that does not exist on the user's machine."},
+      {c:credLine,
+       d:cert ? "Zertifikat und Schlüssel wandern ebenfalls in die Datei. Danach ist sie eigenständig — und damit so schützenswert wie ein Kennwort.|Certificate and key go into the file as well. It is then self-contained — and as worth protecting as a password."
+              : "Das Token wandert im Klartext in die Datei. Danach ist sie eigenständig — und damit so schützenswert wie ein Kennwort.|The token goes into the file in plain text. It is then self-contained — and as worth protecting as a password."},
+      {c:"kubectl config set-context " + o.user + " \\\n  --cluster=cluster --user=" + o.user + " --namespace=" + o.ns + " --kubeconfig=" + kc + "\nkubectl config use-context " + o.user + " --kubeconfig=" + kc,
+       d:"Der Namespace im Kontext erspart dem Benutzer das -n bei jedem Befehl — und verhindert, dass er aus Versehen in default arbeitet.|The namespace in the context saves the user the -n on every command — and keeps them from accidentally working in default."},
+      {c:"KUBECONFIG=" + kc + " kubectl get pods",
+       d:"Der erste echte Test, noch als du selbst. Kommt hier eine Fehlermeldung über Rechte, stimmt die Bindung nicht — kommt eine über die Verbindung, stimmt die Adresse nicht.|The first real test, still as yourself. An error about permissions here means the binding is wrong — one about the connection means the address is wrong."}
+    ]
+  });
+
+  /* --- 5b. beim Benutzer --- */
+  sec("Beim Benutzer ankommen|Arriving at the user", "user", {
+    p:["Die fertige Datei geht an die Person, für die sie ist — über einen Weg, dem du beide vertraut: verschlüsselt, nicht als Chatnachricht und nicht als Anhang in einem Ticket. Sie enthält den vollständigen Zugang.|The finished file goes to the person it is for — over a route you both trust: encrypted, not as a chat message and not as an attachment in a ticket. It contains complete access.",
+       "Wichtig zu wissen: Ein Konto auf dem Server braucht dafür niemand. Der Cluster ist über die API erreichbar, und kubectl läuft genauso gut auf dem eigenen Rechner. Der Linux-Benutzer im nächsten Schritt ist nur nötig, wenn wirklich **auf** dem Server gearbeitet werden soll.|Worth knowing: nobody needs an account on the server for this. The cluster is reachable over the API and kubectl runs just as well on your own machine. The Linux user in the next step is only needed if work really has to happen **on** the server."],
+    items:[
+      {c:"mkdir -p ~/.kube\nmv " + kc + " ~/.kube/config\nchmod 600 ~/.kube/config",
+       d:"Der übliche Ort. Wer schon eine kubeconfig hat, legt diese daneben und schaltet mit der Umgebungsvariable KUBECONFIG um, statt die vorhandene zu überschreiben.|The usual place. Anyone who already has a kubeconfig puts this one next to it and switches with the KUBECONFIG environment variable instead of overwriting the existing one."},
+      {c:"kubectl config get-contexts\nkubectl config current-context\nkubectl config view --minify",
+       d:"Zeigt, mit welchem Cluster, als wer und in welchem Namespace gearbeitet wird. Die dritte Zeile blendet alles aus, was gerade nicht gilt.|Shows which cluster, as whom and in which namespace you are working. The third line hides everything not currently in effect."},
+      {c:"kubectl get pods\nkubectl auth can-i --list",
+       d:"Der erste Befehl als der neue Benutzer selbst. Die Liste dahinter beantwortet gleich mit, was noch geht — bevor die erste Fehlermeldung Rätsel aufgibt.|The first command as the new user themselves. The list behind it answers what else is possible — before the first error message becomes a riddle."}
+    ],
+    r:[{lvl:"warn", m:t("In Visual Studio Code genügt die Kubernetes-Erweiterung mit dieser Datei — sie spricht die API direkt an. Remote-SSH auf den Hauptserver ist etwas anderes und für das reine Arbeiten mit kubectl nicht nötig.|In Visual Studio Code the Kubernetes extension with this file is enough — it talks to the API directly. Remote SSH onto the control plane is a different thing and not needed just to work with kubectl.")}]
+  });
+
+  /* --- 6. Linux-Benutzer --- */
+  if (o.linux){
+    sec("Der Linux-Benutzer auf dem Server|The Linux user on the server", "cp", {
+      p:["Zwei völlig verschiedene Benutzerbegriffe treffen hier aufeinander: Der Linux-Benutzer meldet sich am Server an, der Kubernetes-Benutzer an der API. Sie haben nichts miteinander zu tun — der eine kennt den anderen nicht. Die Verbindung entsteht allein dadurch, dass die kubeconfig im Heimatverzeichnis liegt.|Two entirely different notions of user meet here: the Linux user signs in to the server, the Kubernetes user to the API. They have nothing to do with each other — neither knows the other. The connection exists solely because the kubeconfig sits in the home directory.",
+         "Entscheidend ist, was du **nicht** vergibst. Drei Dinge machen jeden Benutzer sofort zum Cluster-Administrator, ganz gleich welche Rolle er in Kubernetes hat: sudo, Leserecht auf `/etc/kubernetes/admin.conf`, und Zugriff auf den Socket der Container-Runtime.|What matters is what you do **not** hand out. Three things turn any user into a cluster administrator immediately, no matter what role they hold in Kubernetes: sudo, read access to `/etc/kubernetes/admin.conf`, and access to the container runtime's socket."],
+      items:[
+        {c:"sudo adduser --disabled-password --gecos \"\" " + o.user,
+         d:"Kein Kennwort, keine Zusatzgruppen. Die Anmeldung läuft über den SSH-Schlüssel im nächsten Schritt.|No password, no extra groups. Sign-in goes through the SSH key in the next step."},
+        {c:"sudo install -d -o " + o.user + " -g " + o.user + " -m 700 /home/" + o.user + "/.ssh\nsudo tee /home/" + o.user + "/.ssh/authorized_keys <<< \"ssh-ed25519 AAAA... " + o.user + "\"\nsudo chown " + o.user + ":" + o.user + " /home/" + o.user + "/.ssh/authorized_keys\nsudo chmod 600 /home/" + o.user + "/.ssh/authorized_keys",
+         d:"Den öffentlichen Schlüssel lässt du dir schicken — der private bleibt beim Benutzer. Umgekehrt wäre es kein Schlüssel, sondern ein geteiltes Geheimnis.|Have the public key sent to you — the private one stays with the user. The other way round it would not be a key but a shared secret."},
+        {c:"sudo install -D -o " + o.user + " -g " + o.user + " -m 600 " + kc + " /home/" + o.user + "/.kube/config",
+         d:"600 ist hier keine Förmlichkeit: Die Datei enthält den vollständigen Zugang zum Cluster.|600 is not a formality here: the file contains complete access to the cluster."},
+        {c:"sudo -u " + o.user + " kubectl get pods\nsudo -u " + o.user + " kubectl get pods -n kube-system",
+         d:"Der erste Befehl muss gehen, der zweite muss scheitern. Geht der zweite auch, ist die Bindung clusterweit geraten statt auf den Namespace begrenzt.|The first command has to work, the second has to fail. If the second works too, the binding ended up cluster-wide instead of scoped to the namespace."},
+        {c:"getent group sudo\nls -l /etc/kubernetes/admin.conf\nls -l /run/containerd/containerd.sock",
+         d:"Die Gegenprobe: Der neue Name darf in keiner dieser drei Ausgaben auftauchen — weder in der Gruppe noch als Besitzer noch in einer Gruppe, die auf die Dateien darf.|The counter-check: the new name must appear in none of these three outputs — not in the group, not as owner, not in a group with access to those files."}
+      ],
+      r:[{lvl:"err", m:t("Wer sudo hat, liest /etc/kubernetes/admin.conf und ist damit Cluster-Administrator. Jede Rolle, jede Quota und jede Netzregel ist dann bedeutungslos. Dasselbe gilt für den containerd- oder docker-Socket: darüber startet man einen Container, der das Wirtsdateisystem einhängt.|Whoever has sudo reads /etc/kubernetes/admin.conf and is thereby a cluster administrator. Every role, every quota and every network policy is then meaningless. The same goes for the containerd or docker socket: through it you start a container that mounts the host filesystem.")},
+         {lvl:"warn", m:t("Auf einem Hauptserver arbeiten mehrere Menschen gleichzeitig selten gut. Bequemer und sicherer ist es, ihnen die kubeconfig auf den eigenen Rechner zu geben — der Cluster ist über die API erreichbar, ein Konto auf dem Server braucht es dafür nicht.|Several people working on a control-plane node at once rarely goes well. It is more convenient and safer to hand them the kubeconfig for their own machine — the cluster is reachable over the API, an account on the server is not needed for that.")}]
+    });
+  }
+
+  /* --- 7. Netz --- */
+  if (o.netpol){
+    sec("Den Namespace abschotten|Sealing the namespace off", "admin", {
+      p:["Ohne NetworkPolicy darf jeder Pod im Cluster mit jedem anderen sprechen — über alle Namespaces hinweg. Die Trennung, die du gerade gebaut hast, gilt für die API, nicht für das Netz.|Without a network policy every pod in the cluster may talk to every other one — across all namespaces. The separation you just built applies to the API, not to the network.",
+         "Das übliche Muster sind zwei Regeln: erst alles verbieten, dann das Nötige wieder erlauben. DNS muss dabei ausdrücklich erlaubt werden — sonst löst im Namespace kein einziger Name mehr auf, und die Fehlersuche führt in die Irre, weil es wie ein Anwendungsfehler aussieht.|The usual pattern is two rules: forbid everything first, then allow back what is needed. DNS has to be allowed explicitly — otherwise not a single name resolves in the namespace, and the hunt goes astray because it looks like an application error."],
+      items:[
+        {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: default-deny\n  namespace: " + o.ns + "\nspec:\n  podSelector: {}\n  policyTypes:\n    - Ingress\n    - Egress\n---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: erlaubt-intern-und-dns\n  namespace: " + o.ns + "\nspec:\n  podSelector: {}\n  policyTypes:\n    - Ingress\n    - Egress\n  ingress:\n    - from:\n        - podSelector: {}\n  egress:\n    - to:\n        - podSelector: {}\n    - to:\n        - namespaceSelector:\n            matchLabels:\n              kubernetes.io/metadata.name: kube-system\n      ports:\n        - protocol: UDP\n          port: 53\n        - protocol: TCP\n          port: 53\nEOF",
+         d:"Die erste Regel verbietet alles, die zweite erlaubt den Verkehr innerhalb des Namespace und DNS nach kube-system. Regeln addieren sich — es gibt kein Verbot, das ein Erlaubnis übersteuert.|The first rule forbids everything, the second allows traffic inside the namespace and DNS to kube-system. Rules add up — there is no deny that overrides an allow."},
+        {c:"kubectl run test --rm -it -n " + o.ns + " --image=busybox:1.36 --restart=Never -- \\\n  sh -c 'nslookup kubernetes.default.svc.cluster.local; wget -qO- -T3 http://example.com || echo blockiert'",
+         d:"Die Probe aufs Exempel: Der Name muss auflösen, der Zugriff nach außen muss scheitern. Nur eines von beiden zu prüfen führt regelmäßig zu einem falschen Ergebnis.|The actual test: the name has to resolve, the outward access has to fail. Checking only one of the two regularly leads to a wrong conclusion."}
+      ],
+      r:[{lvl:"warn", m:t("Flannel setzt NetworkPolicies nicht durch. Der API-Server nimmt sie an, kubectl meldet keinen Fehler, und es passiert schlicht nichts. Wirksam sind sie erst mit Calico, Cilium oder einem anderen CNI, das Policies unterstützt.|Flannel does not enforce network policies. The API server accepts them, kubectl reports no error, and simply nothing happens. They only take effect with Calico, Cilium or another CNI that supports policies.")},
+         {lvl:"warn", m:t("Die Regel schneidet auch den Weg nach außen ab. Braucht eine Anwendung im Namespace das Internet — für Paketquellen, eine API, einen Webhook — muss das ausdrücklich erlaubt werden.|The rule also cuts off the way out. If an application in the namespace needs the internet — for package repositories, an API, a webhook — that has to be allowed explicitly.")}]
+    });
+  }
+
+  /* --- 8. Prüfen --- */
+  sec("Prüfen, ob die Grenze hält|Checking that the boundary holds", "admin", {
+    p:["`kubectl auth can-i --as=` ist die ehrlichste Prüfung, die es gibt: Der API-Server beantwortet die Frage genau so, wie er es beim echten Benutzer täte — dieselbe Auswertung, dieselben Regeln. Was hier steht, gilt.|`kubectl auth can-i --as=` is the most honest check there is: the API server answers the question exactly as it would for the real user — same evaluation, same rules. What it says is what holds.",
+       "Wichtig ist, auch die Fragen zu stellen, deren Antwort **no** sein muss. Ein Test, der nur bestätigt, was funktionieren soll, findet keine zu weit geratene Bindung.|What matters is asking the questions whose answer has to be **no** as well. A test that only confirms what should work will never find a binding that turned out too wide."],
+    items:[
+      {c:"kubectl auth can-i --list --as=" + asUser + " -n " + o.ns,
+       d:"Die vollständige Liste dessen, was im eigenen Namespace erlaubt ist. Kurz durchlesen lohnt sich — hier fällt auf, wenn die Stufe zu hoch gewählt war.|The complete list of what is allowed in the own namespace. Worth a quick read — this is where an overly high level shows itself."},
+      {c:"kubectl auth can-i get secrets -n kube-system --as=" + asUser + "\nkubectl auth can-i delete namespace " + o.ns + " --as=" + asUser + "\nkubectl auth can-i create clusterrolebinding --as=" + asUser + "\nkubectl auth can-i get nodes --as=" + asUser,
+       d:"Vier Fragen, auf die viermal no kommen muss. Kommt irgendwo yes, ist eine Bindung clusterweit statt auf den Namespace begrenzt — dann ist ein ClusterRoleBinding im Spiel, wo ein RoleBinding hingehört.|Four questions that have to be answered no four times. A yes anywhere means a binding is cluster-wide instead of scoped — then a ClusterRoleBinding is in play where a RoleBinding belongs."},
+      {c:"kubectl get clusterrolebindings -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECTS:.subjects[*].name \\\n  | grep -v '^system:'",
+       d:"Der Blick aufs Ganze: Alles, was clusterweit gebunden ist und nicht von Kubernetes selbst stammt. Diese Liste sollte man kennen und erklären können.|The wider view: everything bound cluster-wide that does not come from Kubernetes itself. You should know this list and be able to explain it."}
+    ],
+    r:[{lvl:"warn", m:t("--as selbst ist ein Recht, das nur Administratoren haben. Ein Benutzer kann sich damit nicht zu jemand anderem machen — wer es könnte, wäre bereits Administrator.|--as is itself a permission only administrators have. A user cannot make themselves into someone else with it — anyone who could would already be an administrator.")}]
+  });
+
+  /* --- 9. Zurücknehmen --- */
+  sec("Wieder wegnehmen|Taking it back", "admin", {
+    p:["Der Weg hinaus ist kürzer als der hinein, hat aber eine scharfe Kante: `kubectl delete namespace` löscht **alles** darin — Deployments, Secrets, PVCs. Ob die Daten hinter den PVCs mitgehen, entscheidet die reclaimPolicy der StorageClass.|The way out is shorter than the way in but has a sharp edge: `kubectl delete namespace` deletes **everything** inside — deployments, secrets, PVCs. Whether the data behind the PVCs goes with them is decided by the storage class's reclaim policy."],
+    items:[
+      {c:"kubectl delete rolebinding " + o.user + "-" + TENANT_ROLE[o.level] + " -n " + o.ns,
+       d:"Der schonende Weg: Die Rechte sind weg, alles andere bleibt stehen. Bei einem Zertifikat ist das der einzige wirksame Widerruf.|The gentle way: the rights are gone, everything else stays. With a certificate this is the only effective revocation."},
+      {c:cert ? "kubectl delete csr " + o.user : "kubectl delete serviceaccount " + o.user + " -n " + o.ns,
+       d:cert ? "Räumt das Antragsobjekt weg. Das bereits ausgestellte Zertifikat bleibt davon unberührt und gilt bis zum Ablauf weiter — dagegen hilft nur die Zeit.|Cleans away the request object. The certificate already issued is untouched and remains valid until it expires — only time helps against that."
+              : "Der wirksame Widerruf: Mit dem Konto sind auch alle seine Token sofort wertlos.|The effective revocation: with the account gone, all its tokens are worthless immediately."},
+      {c:"kubectl delete namespace " + o.ns,
+       d:"Der große Schnitt. Vorher mit kubectl get all -n NAMESPACE nachsehen, was darin noch läuft.|The big cut. Check what is still running inside with kubectl get all -n NAMESPACE first."}
+    ].concat(o.linux ? [{c:"sudo deluser --remove-home " + o.user,
+       d:"Entfernt das Konto samt Heimatverzeichnis und damit auch die kubeconfig darin.|Removes the account together with its home directory, and with it the kubeconfig inside."}] : []),
+    r:[{lvl:"err", m:t("Ein gelöschter Namespace kommt nicht zurück. Bleibt er in Terminating hängen, wartet meist ein Finalizer auf eine Ressource, die es nicht mehr gibt — dann zeigt kubectl get namespace NAME -o yaml, worauf.|A deleted namespace does not come back. If it hangs in Terminating, usually a finalizer is waiting on a resource that no longer exists — kubectl get namespace NAME -o yaml then shows what it is.")}]
+  });
+
+  /* --- 10. Grenzen --- */
+  sec("Was diese Trennung nicht leistet|What this separation does not do", "admin", {
+    p:["Ein Namespace trennt die API, nicht den Rechner. Alle Pods aller Benutzer teilen sich denselben Kernel, dieselben Nodes und dieselbe Netzwerkkarte. Das ist kein Mangel der Einrichtung, sondern die Bauart von Kubernetes.|A namespace separates the API, not the machine. All pods of all users share the same kernel, the same nodes and the same network card. That is not a shortcoming of the setup but the way Kubernetes is built."],
+    table:[["Getrennt ist|Separated","Nicht getrennt ist|Not separated"],
+      ["Objekte, Namen, Rechte über RBAC|Objects, names, rights via RBAC","Kernel und Node — eine Lücke dort trifft alle|Kernel and node — a hole there hits everyone"],
+      ["Verbrauch über ResourceQuota|Consumption via ResourceQuota","Ein voller Node oder volles Dateisystem|A full node or a full filesystem"],
+      ["Netzverkehr über NetworkPolicy|Network traffic via NetworkPolicy","Verkehr innerhalb desselben Namespace|Traffic inside the same namespace"],
+      ["Was der Benutzer an der API darf|What the user may do at the API","Was ein Pod im Container tut|What a pod does inside the container"]],
+    p2:["Für Kolleginnen und Kollegen, die man kennt, reicht diese Trennung gut aus — sie verhindert Versehen und macht Zuständigkeiten sichtbar. Für Benutzer, die einander nicht vertrauen, oder für fremden Code reicht sie nicht: Dann braucht es getrennte Cluster, virtuelle Cluster wie vCluster, oder eine Laufzeit mit eigenem Kernel wie Kata oder gVisor.|For colleagues you know, this separation is quite sufficient — it prevents accidents and makes responsibilities visible. For users who do not trust each other, or for foreign code, it is not enough: then you need separate clusters, virtual clusters such as vCluster, or a runtime with its own kernel such as Kata or gVisor."]
+  });
+
+  return out;
+}
+
 let CLUSTER = {};
+let TENANT = {};
+let CLUSTER_MODE = "install";
 
 const CLUSTER_ROLE = {
   all:  "auf allen Knoten|on every node",
   cp:   "nur Hauptserver|control plane only",
-  worker:"nur Worker|workers only"
+  worker:"nur Worker|workers only",
+  admin:"als Cluster-Verwalter|as the cluster admin",
+  user: "beim Benutzer|on the user's machine"
 };
+
+/* Der Assistent hat zwei Modi: Cluster aufsetzen und Benutzer einrichten.
+   Beide liefern dieselbe Abschnittsform, also teilen sie Darstellung und Export. */
+function clusterFieldsOf(){ return CLUSTER_MODE === "tenant" ? TENANT_FIELDS : CLUSTER_FIELDS; }
+function clusterStateOf(){ return CLUSTER_MODE === "tenant" ? TENANT : CLUSTER; }
+function clusterGuideOf(){ return CLUSTER_MODE === "tenant" ? tenantGuide(TENANT) : clusterGuide(CLUSTER); }
 
 function renderClusterFields(){
   let h = "";
-  CLUSTER_FIELDS.filter(f => !SHORT || !f.adv).forEach(f => {
-    const v = CLUSTER[f.k] === undefined ? "" : CLUSTER[f.k];
+  const state = clusterStateOf();
+  clusterFieldsOf().filter(f => !SHORT || !f.adv).forEach(f => {
+    const v = state[f.k] === undefined ? "" : state[f.k];
     const cls = f.half ? "f f--in" : "f";
     const hint = f.hint ? '<span class="hint">' + esc(t(f.hint)) + "</span>" : "";
     if (f.t === "bool"){
@@ -4755,7 +5080,10 @@ function renderClusterFields(){
       h += "</select>" + hint + "</div>";
     } else {
       /* Das Pod-Netz hängt am CNI — der Platzhalter muss mitziehen. */
-      const ph = f.k === "podCidr" ? CNI_CIDR[CLUSTER.cni || "cilium"] : (f.ph ? t(f.ph) : "");
+      /* Zwei Platzhalter haengen an anderen Feldern und muessen mitziehen. */
+      const ph = f.k === "podCidr" ? CNI_CIDR[CLUSTER.cni || "cilium"]
+               : f.k === "ns" ? "team-" + ((TENANT.user || "").trim() || "anna")
+               : (f.ph ? t(f.ph) : "");
       h += '<div class="' + cls + '"><label>' + esc(t(f.l)) + '</label><input type="' +
         (f.t === "number" ? "number" : "text") + '" data-cl="' + f.k + '" value="' + esc(v) +
         '" placeholder="' + esc(ph) + '">' + hint + "</div>";
@@ -4766,7 +5094,7 @@ function renderClusterFields(){
 
 function renderClusterOut(){
   let h = "";
-  clusterGuide(CLUSTER).forEach((s, i) => {
+  clusterGuideOf().forEach((s, i) => {
     h += '<div class="cstep"><p class="hgroup">' + String(i+1).padStart(2,"0") + " · " + esc(t(s.h)) +
          '<span class="crole crole--' + s.role + '">' + esc(t(CLUSTER_ROLE[s.role])) + "</span></p>";
     (s.p||[]).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
@@ -4778,6 +5106,7 @@ function renderClusterOut(){
              "<td" + (n === 0 ? ' class="swkey"' : "") + ">" + mdInline(t(c)) + "</td>").join("") + "</tr>").join("") +
            "</tbody></table></div>";
     }
+    (s.p2||[]).forEach(x => { h += "<p>" + mdInline(t(x)) + "</p>"; });
     if ((s.r||[]).length)
       h += '<div class="crisks">' + s.r.map(x =>
         '<p class="crisk crisk--' + x.lvl + '"><b>' + (x.lvl === "err" ? "!" : "?") + "</b>" + esc(x.m) + "</p>").join("") + "</div>";
@@ -4789,7 +5118,9 @@ function renderClusterOut(){
 }
 
 function clusterMarkdown(){
-  const o = clusterOpts(CLUSTER), de = LANG === "de";
+  const de = LANG === "de";
+  if (CLUSTER_MODE === "tenant") return tenantMarkdown();
+  const o = clusterOpts(CLUSTER);
   let m = "# " + (de ? "Kubernetes-Cluster aufsetzen" : "Setting up a Kubernetes cluster") + "\n\n";
   m += "| " + (de ? "Angabe" : "Setting") + " | " + (de ? "Wert" : "Value") + " |\n|---|---|\n";
   [[de?"Version":"Version", "v" + o.version],
@@ -4802,7 +5133,31 @@ function clusterMarkdown(){
    [de?"Pod-Netz":"Pod network", o.podCidr]
   ].forEach(r => { m += "| " + r[0] + " | `" + r[1] + "` |\n"; });
   m += "\n";
-  clusterGuide(CLUSTER).forEach((s, i) => {
+  return m + guideMarkdown(clusterGuide(CLUSTER));
+}
+
+function tenantMarkdown(){
+  const o = tenantOpts(TENANT), de = LANG === "de";
+  let m = "# " + (de ? "Benutzer und Namespace einrichten" : "Setting up a user and a namespace") + "\n\n";
+  m += "| " + (de ? "Angabe" : "Setting") + " | " + (de ? "Wert" : "Value") + " |\n|---|---|\n";
+  [[de?"Benutzer":"User", o.user],
+   ["Namespace", o.ns],
+   [de?"Rechte":"Rights", TENANT_ROLE[o.level]],
+   [de?"Anmeldung":"Sign-in", o.identity === "cert" ? (de?"Client-Zertifikat":"client certificate") : "ServiceAccount"],
+   ["Pod Security Standard", o.pss],
+   [de?"API-Adresse":"API address", o.api],
+   [de?"Quota":"Quota", o.quota ? o.cpu + " CPU / " + o.mem + " / " + o.pods + " Pods" : (de?"keine":"none")],
+   ["NetworkPolicy", o.netpol ? (de?"ja":"yes") : (de?"nein":"no")],
+   [de?"Linux-Konto":"Linux account", o.linux ? (de?"ja":"yes") : (de?"nein":"no")]
+  ].forEach(r => { m += "| " + r[0] + " | `" + r[1] + "` |\n"; });
+  m += "\n";
+  return m + guideMarkdown(tenantGuide(TENANT));
+}
+
+/* Beide Anleitungen haben dieselbe Form, also genuegt ein Umsetzer. */
+function guideMarkdown(guide){
+  let m = "";
+  guide.forEach((s, i) => {
     m += "## " + (i+1) + ". " + t(s.h) + " — " + t(CLUSTER_ROLE[s.role]) + "\n\n";
     (s.p||[]).forEach(x => { m += t(x) + "\n\n"; });
     if (s.table){
@@ -4810,13 +5165,36 @@ function clusterMarkdown(){
       s.table.slice(1).forEach(r => { m += "| " + r.map(t).join(" | ") + " |\n"; });
       m += "\n";
     }
+    (s.p2||[]).forEach(x => { m += t(x) + "\n\n"; });
     (s.r||[]).forEach(x => { m += "> **" + (x.lvl === "err" ? "Achtung" : "Hinweis") + "** — " + x.m + "\n\n"; });
     (s.items||[]).forEach(it => { m += "```sh\n" + it.c + "\n```\n\n" + t(it.d) + "\n\n"; });
   });
   return m;
 }
 
-function renderCluster(){ renderClusterFields(); renderClusterOut(); }
+function clusterTexts(){
+  const de = LANG === "de", ten = CLUSTER_MODE === "tenant";
+  $("tabInstall").textContent = de ? "Installation" : "Installation";
+  $("tabTenant").textContent = de ? "Benutzer & Namespace" : "Users & namespaces";
+  $("tabInstall").setAttribute("aria-pressed", !ten);
+  $("tabTenant").setAttribute("aria-pressed", ten);
+  $("clusterMd").textContent = de ? "Anleitung herunterladen" : "Download the guide";
+  $("clusterDesc").textContent = ten
+    ? (de ? "Richtet einen abgegrenzten Arbeitsbereich ein: eigener Namespace, eigene Anmeldung, begrenzte Rechte — und den passenden Linux-Benutzer auf dem Hauptserver. Klick kopiert den Befehl."
+          : "Sets up a bounded workspace: its own namespace, its own sign-in, limited rights — and the matching Linux user on the control plane. Click copies the command.")
+    : (de ? "Erzeugt eine Anleitung mit kubeadm, getrennt danach, was auf jedem Knoten, was nur auf dem Hauptserver und was nur auf den Workern zu tun ist. Klick kopiert den Befehl."
+          : "Builds a kubeadm guide, separated into what runs on every node, what only on the control plane and what only on the workers. Click copies the command.");
+}
+
+function setClusterMode(mode){
+  CLUSTER_MODE = mode;
+  renderCluster();
+}
+
+function renderCluster(){ clusterTexts(); renderClusterFields(); renderClusterOut(); }
+
+$("tabInstall").addEventListener("click", () => setClusterMode("install"));
+$("tabTenant").addEventListener("click", () => setClusterMode("tenant"));
 
 $("clusterBtn").addEventListener("click", () => {
   if (togglePanel("clusterPanel")) renderCluster();
@@ -4824,12 +5202,12 @@ $("clusterBtn").addEventListener("click", () => {
 $("clusterClose").addEventListener("click", () => { $("clusterPanel").hidden = true; });
 $("clusterFields").addEventListener("input", e => {
   if (!e.target.dataset.cl) return;
-  CLUSTER[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+  clusterStateOf()[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
   renderClusterOut();
 });
 $("clusterFields").addEventListener("change", e => {
   if (!e.target.dataset.cl) return;
-  CLUSTER[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+  clusterStateOf()[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
   if (e.target.dataset.clstruct) renderClusterFields();
   renderClusterOut();
 });
@@ -4842,7 +5220,8 @@ $("clusterOut").addEventListener("click", e => {
   setTimeout(()=>{ s.textContent = old; }, 1000);
 });
 $("clusterMd").addEventListener("click", () => {
-  download(clusterMarkdown(), "cluster-installation.md", "text/markdown");
+  download(clusterMarkdown(),
+    CLUSTER_MODE === "tenant" ? "benutzer-namespace.md" : "cluster-installation.md", "text/markdown");
 });
 
 function searchIndex(){
@@ -5041,11 +5420,7 @@ function setLang(l){
     : "Assertions against the emitter, the resources and the checks. Run after editing this file yourself — whatever turns red here broke while you were changing it.";
   $("docBtn").textContent = l === "de" ? "doku" : "docs";
   $("clusterBtn").textContent = l === "de" ? "Cluster" : "Cluster";
-  $("clusterEyebrow").textContent = l === "de" ? "Cluster aufsetzen" : "Set up a cluster";
-  $("clusterMd").textContent = l === "de" ? "Anleitung herunterladen" : "Download the guide";
-  $("clusterDesc").textContent = l === "de"
-    ? "Erzeugt eine Anleitung mit kubeadm, getrennt danach, was auf jedem Knoten, was nur auf dem Hauptserver und was nur auf den Workern zu tun ist. Klick kopiert den Befehl."
-    : "Builds a kubeadm guide, separated into what runs on every node, what only on the control plane and what only on the workers. Click copies the command.";
+  clusterTexts();
   if (!$("clusterPanel").hidden) renderCluster();
   profileTexts();
   setWikiTab(WIKI_TAB);
