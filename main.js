@@ -4376,6 +4376,25 @@ function runSelfTests(){
     heads(addGuide).indexOf("Neu aufsetzen") === -1, "");
   ok("Installation: jeder Abschnitt nennt weiterhin seinen Ort",
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
+  const oidcGuide = tenantGuide({user:"bge", ns:"team-admin", identity:"oidc", api:"k8s-cp1.highq.org:6443"});
+  const oidcTxt = oidcGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
+  ok("Kennwort-Weg: Anmeldedienst und API-Server-Umstellung kommen dazu",
+    oidcGuide.some(s => t(s.h).indexOf("Dex") !== -1) &&
+    oidcTxt.indexOf("--oidc-issuer-url=") !== -1 && oidcTxt.indexOf("--oidc-username-prefix=oidc:") !== -1, "");
+  ok("Kennwort-Weg: der Name im RoleBinding trägt das Präfix",
+    oidcTxt.indexOf("name: oidc:bge@highq.org") !== -1, "");
+  ok("Kennwort-Weg: die Domain kommt aus der API-Adresse",
+    tenantOpts({user:"bge", api:"k8s-cp1.highq.org:6443"}).email === "bge@highq.org" &&
+    tenantOpts({user:"bge", api:"k8s-cp1.highq.org:6443"}).issuer === "https://dex.highq.org:32000", "");
+  ok("Kennwort-Weg: kein Zertifikat und kein openssl mehr im Ablauf",
+    oidcTxt.indexOf("openssl genrsa") === -1 && oidcTxt.indexOf("kind: CertificateSigningRequest") === -1, "");
+  ok("Kennwort-Weg: kubectl fragt auf der Kommandozeile, nicht im Browser",
+    oidcTxt.indexOf("--grant-type=password") !== -1, "");
+  ok("Kennwort-Weg: --as prüft gegen den Namen mit Präfix",
+    oidcTxt.indexOf("--as=oidc:bge@highq.org") !== -1, "");
+  ok("Alle drei Anmeldearten liefern eine kubeconfig",
+    ["cert","oidc","sa"].every(id => tenantGuide({identity:id}).some(s =>
+      s.items.some(i => i.c.indexOf("kubectl config set-credentials") !== -1))), "");
   ok("Benutzer-Assistent: die CA kommt aus der eigenen kubeconfig, nicht nur aus kubeadm",
     tenantGuide({}).some(s => s.items.some(i =>
       i.c.indexOf("certificate-authority-data") !== -1)), "");
@@ -4924,7 +4943,15 @@ const TENANT_FIELDS = [
          ["admin","Verwalten — zusätzlich Rechte im eigenen Namespace vergeben|Administer — additionally grant rights inside the own namespace"]]},
   {k:"identity", t:"select", l:"Womit er sich anmeldet|How the user signs in", structural:true,
    opts:[["cert","Client-Zertifikat — ein echter Benutzer im Cluster|Client certificate — a real user in the cluster"],
-         ["sa","ServiceAccount-Token — jederzeit widerrufbar|ServiceAccount token — revocable at any time"]]},
+         ["oidc","Benutzername und Kennwort — über einen Anmeldedienst|User name and password — through a sign-in service"],
+         ["sa","ServiceAccount-Token — jederzeit widerrufbar|ServiceAccount token — revocable at any time"]],
+   hint:"Kubernetes selbst kennt keine Kennwörter — die Prüfung übernimmt ein Dienst davor. Der Assistent nimmt dafür Dex mit hinterlegten Benutzern.|Kubernetes itself knows no passwords — a service in front does the checking. The wizard uses Dex with stored users for that."},
+  {k:"email", t:"text", l:"Anmeldename|Sign-in name", ph:"bge@firma.de", half:true,
+   when:o => o.identity === "oidc",
+   hint:"Womit sich der Benutzer anmeldet. Genau dieser Wert landet als Name im RoleBinding.|What the user signs in with. Exactly this value ends up as the name in the role binding."},
+  {k:"issuer", t:"text", l:"Adresse des Anmeldedienstes|Address of the sign-in service", ph:"https://dex.firma.de:32000", half:true,
+   when:o => o.identity === "oidc",
+   hint:"Muss **vom API-Server aus** erreichbar sein und HTTPS sprechen. Das ist die Stelle, an der es am häufigsten klemmt.|Has to be reachable **from the API server** and speak HTTPS. That is where it goes wrong most often."},
   {k:"api", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de:6443",
    hint:"Dieselbe Adresse, die auch in deiner eigenen kubeconfig unter server steht.|The same address your own kubeconfig has under server."},
   {k:"days", t:"number", half:true, l:"Zertifikat gültig (Tage)|Certificate valid for (days)", ph:"365",
@@ -4942,10 +4969,21 @@ const TENANT_FIELDS = [
   {k:"netpol", t:"bool", l:"Namespace nach außen abschotten (NetworkPolicy)|Seal the namespace off (NetworkPolicy)"}
 ];
 
+/* Aus k8s-cp1.firma.de:6443 wird firma.de — als Vorgabe fuer Anmeldename und Dienst. */
+function domainOf(api){
+  const host = String(api || "").split(":")[0];
+  const teile = host.split(".").filter(Boolean);
+  return teile.length >= 3 ? teile.slice(1).join(".") : (teile.join(".") || "firma.de");
+}
+
 function tenantOpts(o){
   const user = (o.user || "").trim() || "anna";
+  const api = (o.api || "").trim() || "API-ADRESSE:6443";
+  const dom = domainOf(api);
   return {
     user: user,
+    email: (o.email || "").trim() || (user + "@" + dom),
+    issuer: (o.issuer || "").trim().replace(/\/+$/, "") || ("https://dex." + dom + ":32000"),
     ns: (o.ns || "").trim() || ("team-" + user),
     level: o.level || "edit",
     identity: o.identity || "cert",
@@ -4970,11 +5008,15 @@ function tenantGuide(raw){
   const out = [];
   const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
   const cert = o.identity === "cert";
-  /* Im RoleBinding steht entweder ein Benutzername aus dem Zertifikat oder ein ServiceAccount. */
-  const subject = cert
-    ? "  - kind: User\n    name: " + o.user + "\n    apiGroup: rbac.authorization.k8s.io"
-    : "  - kind: ServiceAccount\n    name: " + o.user + "\n    namespace: " + o.ns;
-  const asUser = cert ? o.user : "system:serviceaccount:" + o.ns + ":" + o.user;
+  const oidc = o.identity === "oidc";
+  /* Der Name im RoleBinding haengt daran, woher der API-Server ihn liest:
+     aus dem Zertifikat, aus dem Token des Anmeldedienstes oder vom ServiceAccount. */
+  const asUser = cert ? o.user
+               : oidc ? "oidc:" + o.email
+               : "system:serviceaccount:" + o.ns + ":" + o.user;
+  const subject = o.identity === "sa"
+    ? "  - kind: ServiceAccount\n    name: " + o.user + "\n    namespace: " + o.ns
+    : "  - kind: User\n    name: " + asUser + "\n    apiGroup: rbac.authorization.k8s.io";
 
   /* --- 1. Namespace --- */
   sec("Der Namespace mit Sicherheitsstufe|The namespace with its security level", "admin", {
@@ -5024,6 +5066,41 @@ function tenantGuide(raw){
       .concat(o.level === "admin" ? [{lvl:"warn", m:t("admin darf im eigenen Namespace weitere Bindungen anlegen. Mehr als die eigenen Rechte kann er dabei nicht vergeben — der API-Server verhindert das. Ein zweiter Benutzer im selben Namespace kann so aber ohne dein Zutun entstehen.|admin may create further bindings inside their own namespace. They cannot grant more than they hold — the API server prevents that. But a second user in the same namespace can appear without your involvement.")}] : [])
   });
 
+  /* --- 3b. Anmeldedienst, nur beim Kennwort-Weg --- */
+  if (oidc){
+    const dexHost = o.issuer.replace(/^https?:\/\//, "").split(":")[0];
+    sec("Der Anmeldedienst: Dex|The sign-in service: Dex", "admin", {
+      p:["Kubernetes selbst hat keine Kennwörter. Die Anmeldung mit Benutzername und Kennwort wurde 2019 aus dem API-Server entfernt — was es dort noch gibt, sind Zertifikate, Token und **OIDC**. Ein Kennwort prüft also ein Dienst davor, und der API-Server glaubt anschließend dem Token, das dieser Dienst ausstellt.|Kubernetes itself has no passwords. Signing in with a user name and password was removed from the API server in 2019 — what remains there are certificates, tokens and **OIDC**. So a service in front checks the password, and the API server then trusts the token that service issues.",
+         "**Dex** ist die kleinste Ausführung davon: ein Dienst, der Benutzer entweder aus LDAP, GitHub oder Entra ID holt — oder schlicht aus einer Liste in seiner eigenen Konfiguration. Genau diese Liste nehmen wir hier.|**Dex** is the smallest version of that: a service that gets users from LDAP, GitHub or Entra ID — or simply from a list in its own configuration. That list is exactly what we use here."],
+      items:[
+        {c:"htpasswd -bnBC 10 \"\" 'HIER-DAS-KENNWORT' | tr -d ':\\n'",
+         d:"Erzeugt den bcrypt-Wert für das Kennwort. Nur dieser Wert kommt in die Konfiguration, das Kennwort selbst nirgendwo hin. Fehlt htpasswd, liefert es das Paket apache2-utils beziehungsweise httpd-tools.|Produces the bcrypt value for the password. Only that value goes into the configuration, the password itself goes nowhere. If htpasswd is missing, the package apache2-utils or httpd-tools provides it."},
+        {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: dex\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dex\n  namespace: dex\ndata:\n  config.yaml: |\n    issuer: " + o.issuer + "\n    storage:\n      type: kubernetes\n      config:\n        inCluster: true\n    web:\n      https: 0.0.0.0:5556\n      tlsCert: /etc/dex/tls/tls.crt\n      tlsKey: /etc/dex/tls/tls.key\n    oauth2:\n      skipApprovalScreen: true\n      passwordConnector: local\n    staticClients:\n      - id: kubernetes\n        name: Kubernetes\n        secret: KLIENT-GEHEIMNIS-HIER\n        redirectURIs:\n          - http://localhost:8000\n          - http://127.0.0.1:5555/callback\n    enablePasswordDB: true\n    staticPasswords:\n      - email: \"" + o.email + "\"\n        username: \"" + o.user + "\"\n        userID: \"" + o.user + "\"\n        hash: \"$2y$10$HIER-DER-BCRYPT-WERT\"\nEOF",
+         d:"Die Benutzerliste steht in staticPasswords. passwordConnector: local ist der Schalter, der die Anmeldung ohne Browser erlaubt — kubectl fragt dann Name und Kennwort direkt auf der Kommandozeile ab.|The user list sits in staticPasswords. passwordConnector: local is the switch that allows signing in without a browser — kubectl then asks for name and password right on the command line."},
+        {c:"# Dex selbst, mit Zertifikat für " + dexHost + ":\nhelm repo add dex https://charts.dexidp.io\nhelm install dex dex/dex -n dex --values dex-werte.yaml\n\nkubectl -n dex get pods\ncurl -k " + o.issuer + "/.well-known/openid-configuration",
+         d:"Der letzte Befehl ist die Probe: Kommt hier JSON zurück, ist der Dienst erreichbar. Genau diese Adresse muss gleich auch der API-Server erreichen können — von seinem Netz aus, nicht von deinem.|The last command is the test: if JSON comes back, the service is reachable. That same address has to be reachable by the API server in a moment — from its network, not from yours."}
+      ],
+      r:[{lvl:"err", m:t("Der Anmeldedienst braucht ein TLS-Zertifikat, dem der API-Server traut. Ein selbstsigniertes geht, dann muss dessen CA im nächsten Schritt als --oidc-ca-file mitgegeben werden. Ohne das lehnt der API-Server jedes Token ab, und die Meldung nennt nur oidc: authentication failed.|The sign-in service needs a TLS certificate the API server trusts. A self-signed one works, but then its CA has to be passed as --oidc-ca-file in the next step. Without that the API server rejects every token, and the message only says oidc: authentication failed.")},
+         {lvl:"warn", m:t("Die Adresse in issuer muss buchstabengleich mit der übereinstimmen, die später in der kubeconfig steht — samt Port und ohne abschließenden Schrägstrich. Eine Abweichung darin ist der häufigste Grund, warum die Anmeldung ohne erkennbaren Fehler scheitert.|The address in issuer has to match the one that later appears in the kubeconfig character for character — port included, no trailing slash. A mismatch there is the most common reason a sign-in fails without a visible error.")}]
+    });
+
+    sec("Den API-Server auf OIDC umstellen|Switching the API server to OIDC", "cp", {
+      p:["Dieser Schritt ist der einzige in der ganzen Anleitung, der den laufenden Cluster anfasst. Der API-Server ist ein statischer Pod: Sobald du seine Manifest-Datei speicherst, startet der kubelet ihn neu. Ein Tippfehler nimmt dir die API — deshalb vorher eine Kopie.|This step is the only one in the whole guide that touches the running cluster. The API server is a static pod: the moment you save its manifest file, the kubelet restarts it. A typo takes the API away from you — so make a copy first.",
+         "Die Beruhigung dabei: Deine eigene admin.conf arbeitet mit einem Client-Zertifikat, nicht mit OIDC. Selbst wenn die Umstellung misslingt, kommst du weiterhin an den Cluster und kannst zurückdrehen.|The reassuring part: your own admin.conf works with a client certificate, not with OIDC. Even if the change fails you still reach the cluster and can roll it back."],
+      items:[
+        {c:"sudo cp /etc/kubernetes/manifests/kube-apiserver.yaml ~/kube-apiserver.yaml.sicherung",
+         d:"Zuerst die Kopie. Geht etwas schief, spielst du sie zurück und der kubelet startet den API-Server erneut.|The copy first. If something goes wrong you put it back and the kubelet restarts the API server."},
+        {c:"# in /etc/kubernetes/manifests/kube-apiserver.yaml unter command: ergänzen\n    - --oidc-issuer-url=" + o.issuer + "\n    - --oidc-client-id=kubernetes\n    - --oidc-username-claim=email\n    - --oidc-username-prefix=oidc:\n    - --oidc-groups-claim=groups\n    - --oidc-groups-prefix=oidc:\n    - --oidc-ca-file=/etc/kubernetes/pki/dex-ca.crt",
+         d:"Das Präfix oidc: ist kein Schmuck: Ohne es könnte ein Anmeldedienst Namen ausstellen, die mit denen aus Zertifikaten oder mit system: kollidieren. Mit Präfix bleiben die Welten getrennt — und genau deshalb heißt der Benutzer im RoleBinding weiter oben oidc:" + o.email + " und nicht nur " + o.email + ".|The oidc: prefix is not decoration: without it a sign-in service could issue names that collide with those from certificates or with system:. With the prefix the worlds stay apart — which is exactly why the user in the role binding above is oidc:" + o.email + " and not just " + o.email + "."},
+        {c:"sudo cp dex-ca.crt /etc/kubernetes/pki/dex-ca.crt\nsudo crictl ps | grep kube-apiserver\nkubectl get --raw /healthz",
+         d:"Die CA muss im selben Verzeichnis liegen, das der API-Server ohnehin einhängt — sonst findet er die Datei im Container nicht. healthz muss ok melden; kommt keine Antwort, ist der Pod nicht hochgekommen.|The CA has to sit in the directory the API server mounts anyway — otherwise it cannot find the file inside the container. healthz has to report ok; if nothing answers, the pod did not come up."},
+        {c:"sudo journalctl -u kubelet -n 50 --no-pager | grep -i apiserver\nsudo crictl logs $(sudo crictl ps -a --name kube-apiserver -q | head -1) 2>&1 | tail -30",
+         d:"Nur nötig, wenn healthz stumm bleibt. Meist ist es ein Einrückungsfehler im YAML oder ein Pfad, den es im Container nicht gibt.|Only needed if healthz stays silent. Usually it is an indentation error in the YAML or a path that does not exist inside the container."}
+      ],
+      r:[{lvl:"err", m:t("Bei mehreren Hauptservern muss diese Änderung auf jedem einzeln gemacht werden. Solange sie nur auf einem steht, funktioniert die Anmeldung mal und mal nicht — je nachdem, welchen API-Server der Lastverteiler gerade erwischt. Das ist ein Fehlerbild, das lange in die Irre führt.|With several control-plane nodes this change has to be made on each one separately. As long as it is only on one, sign-in works sometimes and sometimes not — depending on which API server the load balancer happens to hit. That is a symptom that misleads for a long time.")}]
+    });
+  }
+
   /* --- 4. Identität --- */
   if (cert){
     sec("Die Identität: ein Client-Zertifikat|The identity: a client certificate", "admin", {
@@ -5039,6 +5116,21 @@ function tenantGuide(raw){
       ],
       r:[{lvl:"warn", m:t("Bei verwalteten Clustern — EKS, GKE, AKS — ist dieser Weg meist gesperrt: Die Steuerungsebene unterschreibt keine fremden Client-Anfragen, weil die Anmeldung über den Anbieter läuft. Dort führt der Weg über dessen Rechteverwaltung, oder über einen ServiceAccount.|With managed clusters — EKS, GKE, AKS — this route is usually closed: the control plane signs no external client requests because sign-in goes through the provider. There the way leads through the provider's own access management, or through a service account.")},
          {lvl:"err", m:t("Ein ausgestelltes Client-Zertifikat lässt sich nicht zurückziehen. Kubernetes führt keine Sperrliste. Bis zum Ablauf hilft nur, die RoleBindings zu entfernen: Der Benutzer kommt weiterhin an die API, darf dann aber nichts mehr. Deshalb eine kurze Laufzeit wählen.|An issued client certificate cannot be revoked. Kubernetes keeps no revocation list. Until it expires the only remedy is removing the role bindings: the user still reaches the API but may do nothing. So pick a short lifetime.")}]
+    });
+  } else if (oidc){
+    sec("Die Identität: der Eintrag im Anmeldedienst|The identity: the entry in the sign-in service", "admin", {
+      p:["Anders als beim Zertifikat gibt es hier nichts mehr auszustellen — der Benutzer steht bereits in der Liste von Dex. Was jetzt folgt, ist die Probe, dass Kennwort, Anmeldename und RoleBinding zusammenpassen.|Unlike with the certificate there is nothing left to issue — the user is already in Dex's list. What follows is the check that password, sign-in name and role binding fit together.",
+         "Der entscheidende Wert ist der **email**-Anspruch im Token. Genau er wird zum Benutzernamen im Cluster, mit dem Präfix davor. Weicht er ab, meldet sich der Benutzer erfolgreich an und darf trotzdem nichts.|The decisive value is the **email** claim in the token. That is what becomes the user name in the cluster, with the prefix in front. If it differs, the user signs in successfully and still may do nothing."],
+      items:[
+        {c:"curl -k -s " + o.issuer + "/token \\\n  -d grant_type=password -d client_id=kubernetes \\\n  -d client_secret=KLIENT-GEHEIMNIS-HIER \\\n  -d scope='openid profile email groups' \\\n  -d username='" + o.email + "' -d password='HIER-DAS-KENNWORT'",
+         d:"Holt ein Token, so wie es kubectl gleich auch tun wird. Kommt hier ein id_token zurück, stimmen Kennwort und Klient-Geheimnis. Kommt invalid_grant, stimmt eines von beiden nicht.|Fetches a token the way kubectl will in a moment. If an id_token comes back, password and client secret are right. If invalid_grant comes back, one of the two is wrong."},
+        {c:"# das id_token aus der Antwort hier einsetzen:\necho 'TOKEN' | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool",
+         d:"Zeigt den Inhalt des Tokens im Klartext — ein JWT ist nicht verschlüsselt, nur unterschrieben. Der Wert bei email muss genau **" + o.email + "** lauten, sonst passt der Name im RoleBinding nicht.|Shows the token's contents in plain text — a JWT is not encrypted, only signed. The email value has to read exactly **" + o.email + "**, otherwise the name in the role binding does not match."},
+        {c:"kubectl get configmap dex -n dex -o jsonpath='{.data.config\\.yaml}' | grep -A4 staticPasswords",
+         d:"Wer im Anmeldedienst eingetragen ist. Diese Liste ist die Benutzerverwaltung — es gibt keine zweite.|Who is entered in the sign-in service. That list is the user management — there is no second one."}
+      ],
+      r:[{lvl:"warn", m:t("Ein Kennwort ist so gut wie der Ort, an dem es aufbewahrt wird, und es hat keine zweite Stufe. Für eine Handvoll Personen im Heimlabor ist die Liste in Dex in Ordnung. Sobald es mehr werden, gehört ein richtiges Verzeichnis dahinter — LDAP, Entra ID oder Google —, damit Sperren, Ablauf und Zwei-Faktor dort geregelt sind und nicht in einer ConfigMap.|A password is only as good as the place it is kept, and it has no second factor. For a handful of people in a home lab, Dex's list is fine. Once there are more, a proper directory belongs behind it — LDAP, Entra ID or Google — so that blocking, expiry and two-factor are handled there and not in a config map.")},
+         {lvl:"warn", m:t("Das Token ist kurzlebig, meist einen Tag. Das ist der Vorteil gegenüber dem Zertifikat: Nimmst du den Benutzer aus der Liste, ist er nach Ablauf des laufenden Tokens draußen — ohne dass irgendwo eine Sperrliste geführt werden müsste.|The token is short-lived, usually a day. That is the advantage over the certificate: take the user out of the list and they are out once the current token expires — with no revocation list to maintain anywhere.")}]
     });
   } else {
     sec("Die Identität: ein ServiceAccount|The identity: a service account", "admin", {
@@ -5060,6 +5152,8 @@ function tenantGuide(raw){
   const kc = o.user + ".kubeconfig";
   const credLine = cert
     ? "kubectl config set-credentials " + o.user + " \\\n  --client-certificate=" + o.user + ".crt --client-key=" + o.user + ".key \\\n  --embed-certs=true --kubeconfig=" + kc
+    : oidc
+    ? "kubectl krew install oidc-login   # einmalig, auch beim Benutzer\n\nkubectl config set-credentials " + o.user + " \\\n  --exec-api-version=client.authentication.k8s.io/v1beta1 \\\n  --exec-command=kubectl \\\n  --exec-arg=oidc-login --exec-arg=get-token \\\n  --exec-arg=--oidc-issuer-url=" + o.issuer + " \\\n  --exec-arg=--oidc-client-id=kubernetes \\\n  --exec-arg=--oidc-client-secret=KLIENT-GEHEIMNIS-HIER \\\n  --exec-arg=--oidc-extra-scope=email --exec-arg=--oidc-extra-scope=groups \\\n  --exec-arg=--grant-type=password \\\n  --exec-arg=--certificate-authority=dex-ca.crt \\\n  --kubeconfig=" + kc
     : "kubectl config set-credentials " + o.user + " \\\n  --token=\"$(kubectl create token " + o.user + " -n " + o.ns + " --duration=" + (o.days * 24) + "h)\" \\\n  --kubeconfig=" + kc;
   sec("Die kubeconfig bauen|Building the kubeconfig", "admin", {
     p:["Eine kubeconfig besteht aus drei Teilen, die getrennt gesetzt und dann verbunden werden: **wo** der Cluster ist, **wer** du bist, und **welche Kombination** aus beidem gerade gilt. Der letzte Befehl setzt den Namespace mit — sonst landet der Benutzer in `default` und sieht nichts.|A kubeconfig consists of three parts that are set separately and then joined: **where** the cluster is, **who** you are, and **which combination** of the two is currently active. The last command sets the namespace too — otherwise the user lands in `default` and sees nothing."],
@@ -5070,10 +5164,12 @@ function tenantGuide(raw){
        d:"embed-certs schreibt die CA in die Datei hinein. Ohne das verweist die kubeconfig auf einen Pfad, den es auf dem Rechner des Benutzers nicht gibt. Auf einem kubeadm-Hauptserver liegt dieselbe Datei unter /etc/kubernetes/pki/ca.crt, bei k3s unter /var/lib/rancher/k3s/server/tls/server-ca.crt.|embed-certs writes the CA into the file. Without it the kubeconfig points at a path that does not exist on the user's machine. On a kubeadm control-plane node the same file sits at /etc/kubernetes/pki/ca.crt, with k3s at /var/lib/rancher/k3s/server/tls/server-ca.crt."},
       {c:credLine,
        d:cert ? "Zertifikat und Schlüssel wandern ebenfalls in die Datei. Danach ist sie eigenständig — und damit so schützenswert wie ein Kennwort.|Certificate and key go into the file as well. It is then self-contained — and as worth protecting as a password."
-              : "Das Token wandert im Klartext in die Datei. Danach ist sie eigenständig — und damit so schützenswert wie ein Kennwort.|The token goes into the file in plain text. It is then self-contained — and as worth protecting as a password."},
+         : oidc ? "In der Datei steht diesmal **kein** Zugangsdatum, sondern ein Aufruf: kubectl startet bei Bedarf das Werkzeug oidc-login, das nach Name und Kennwort fragt und ein Token holt. --grant-type=password ist dabei der Unterschied zwischen einer Abfrage auf der Kommandozeile und einem Browserfenster. Das Token landet im Zwischenspeicher unter ~/.kube/cache/oidc-login und wird bis zum Ablauf wiederverwendet.|This time the file contains **no** credential but a call: when needed, kubectl starts the oidc-login tool, which asks for name and password and fetches a token. --grant-type=password is the difference between a prompt on the command line and a browser window. The token lands in the cache under ~/.kube/cache/oidc-login and is reused until it expires."
+                : "Das Token wandert im Klartext in die Datei. Danach ist sie eigenständig — und damit so schützenswert wie ein Kennwort.|The token goes into the file in plain text. It is then self-contained — and as worth protecting as a password."},
       {c:"kubectl config set-context " + o.user + " \\\n  --cluster=cluster --user=" + o.user + " --namespace=" + o.ns + " --kubeconfig=" + kc + "\nkubectl config use-context " + o.user + " --kubeconfig=" + kc,
        d:"Der Namespace im Kontext erspart dem Benutzer das -n bei jedem Befehl — und verhindert, dass er aus Versehen in default arbeitet.|The namespace in the context saves the user the -n on every command — and keeps them from accidentally working in default."},
-      {c:"KUBECONFIG=" + kc + " kubectl get pods",
+      {c:oidc ? "KUBECONFIG=" + kc + " kubectl get pods   # fragt jetzt nach Name und Kennwort"
+              : "KUBECONFIG=" + kc + " kubectl get pods",
        d:"Der erste echte Test, noch als du selbst. Kommt hier eine Fehlermeldung über Rechte, stimmt die Bindung nicht — kommt eine über die Verbindung, stimmt die Adresse nicht.|The first real test, still as yourself. An error about permissions here means the binding is wrong — one about the connection means the address is wrong."}
     ]
   });
@@ -5142,7 +5238,8 @@ function tenantGuide(raw){
        d:"Vier Fragen, auf die viermal no kommen muss. Kommt irgendwo yes, ist eine Bindung clusterweit statt auf den Namespace begrenzt — dann ist ein ClusterRoleBinding im Spiel, wo ein RoleBinding hingehört.|Four questions that have to be answered no four times. A yes anywhere means a binding is cluster-wide instead of scoped — then a ClusterRoleBinding is in play where a RoleBinding belongs."},
       {c:"kubectl get clusterrolebindings -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECTS:.subjects[*].name \\\n  | grep -v '^system:'",
        d:"Der Blick aufs Ganze: Alles, was clusterweit gebunden ist und nicht von Kubernetes selbst stammt. Diese Liste sollte man kennen und erklären können.|The wider view: everything bound cluster-wide that does not come from Kubernetes itself. You should know this list and be able to explain it."},
-      {c:"shred -u " + o.user + ".key " + o.user + ".csr " + o.user + ".crt " + kc + " ca.crt",
+      {c:cert ? "shred -u " + o.user + ".key " + o.user + ".csr " + o.user + ".crt " + kc + " ca.crt"
+              : "shred -u " + kc + " ca.crt",
        d:"Zum Schluss aufräumen. Der private Schlüssel und die fertige kubeconfig sind vollständiger Zugang zu diesem Namespace — auf der Maschine des Verwalters haben sie nichts mehr verloren, sobald sie beim Benutzer angekommen sind. Der Cluster braucht sie nicht: Was er behält, ist das unterschriebene Zertifikat.|Clean up at the end. The private key and the finished kubeconfig are complete access to this namespace — they have no business on the admin's machine once they have reached the user. The cluster does not need them: what it keeps is the signed certificate."}
     ],
     r:[{lvl:"warn", m:t("--as selbst ist ein Recht, das nur Administratoren haben. Ein Benutzer kann sich damit nicht zu jemand anderem machen — wer es könnte, wäre bereits Administrator.|--as is itself a permission only administrators have. A user cannot make themselves into someone else with it — anyone who could would already be an administrator.")}]
@@ -5154,9 +5251,12 @@ function tenantGuide(raw){
     items:[
       {c:"kubectl delete rolebinding " + o.user + "-" + TENANT_ROLE[o.level] + " -n " + o.ns,
        d:"Der schonende Weg: Die Rechte sind weg, alles andere bleibt stehen. Bei einem Zertifikat ist das der einzige wirksame Widerruf.|The gentle way: the rights are gone, everything else stays. With a certificate this is the only effective revocation."},
-      {c:cert ? "kubectl delete csr " + o.user : "kubectl delete serviceaccount " + o.user + " -n " + o.ns,
+      {c:cert ? "kubectl delete csr " + o.user
+         : oidc ? "# den Eintrag aus staticPasswords in der ConfigMap entfernen, dann:\nkubectl -n dex rollout restart deployment dex"
+                : "kubectl delete serviceaccount " + o.user + " -n " + o.ns,
        d:cert ? "Räumt das Antragsobjekt weg. Das bereits ausgestellte Zertifikat bleibt davon unberührt und gilt bis zum Ablauf weiter — dagegen hilft nur die Zeit.|Cleans away the request object. The certificate already issued is untouched and remains valid until it expires — only time helps against that."
-              : "Der wirksame Widerruf: Mit dem Konto sind auch alle seine Token sofort wertlos.|The effective revocation: with the account gone, all its tokens are worthless immediately."},
+         : oidc ? "Der Benutzer kann sich danach nicht mehr anmelden. Ein bereits ausgestelltes Token gilt noch bis zum Ablauf — meist einen Tag. Wer sofort zumachen muss, entfernt zusätzlich das RoleBinding.|The user can no longer sign in afterwards. A token already issued remains valid until it expires — usually a day. Anyone who has to close the door immediately also removes the role binding."
+                : "Der wirksame Widerruf: Mit dem Konto sind auch alle seine Token sofort wertlos.|The effective revocation: with the account gone, all its tokens are worthless immediately."},
       {c:"kubectl delete namespace " + o.ns,
        d:"Der große Schnitt. Vorher mit kubectl get all -n NAMESPACE nachsehen, was darin noch läuft.|The big cut. Check what is still running inside with kubectl get all -n NAMESPACE first."}
     ].concat(o.linux ? [{c:"sudo deluser --remove-home " + o.user,
