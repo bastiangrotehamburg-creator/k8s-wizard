@@ -4347,6 +4347,54 @@ function runSelfTests(){
     const n = String(s).split("|").length;
     return n === 2 || (n === 1 && String(s).indexOf(" ") === -1);
   };
+  const mlbStrings = [];
+  [{}, {mode:"bgp", install:"helm", ipvs:true, ingress:true, autoAssign:false},
+   {mode:"l2", range:"10.0.0.5"}].forEach(o => {
+    metallbGuide(o).forEach(s => {
+      mlbStrings.push(s.h);
+      (s.p||[]).concat(s.p2||[]).forEach(x => mlbStrings.push(x));
+      (s.table||[]).forEach(r => r.forEach(c => mlbStrings.push(c)));
+      (s.items||[]).forEach(it => mlbStrings.push(it.d));
+    });
+  });
+  ok("MetalLB-Assistent: jeder Satz hat beide Sprachen",
+    mlbStrings.every(s => String(s).split("|").length === 2),
+    mlbStrings.filter(s => String(s).split("|").length !== 2).slice(0,2).join(" / "));
+  ok("MetalLB-Assistent: Pool und Ankündigung sind immer dabei",
+    (function(){
+      const c = metallbGuide({}).map(s => s.items.map(i => i.c).join(" ")).join(" ");
+      return c.indexOf("kind: IPAddressPool") !== -1 && c.indexOf("kind: L2Advertisement") !== -1;
+    })(), "");
+  ok("MetalLB-Assistent: BGP bringt den Peer mit, L2 nicht",
+    metallbGuide({mode:"bgp"}).some(s => s.items.some(i => i.c.indexOf("kind: BGPPeer") !== -1)) &&
+    metallbGuide({mode:"l2"}).every(s => s.items.every(i => i.c.indexOf("kind: BGPPeer") === -1)), "");
+  ok("MetalLB-Assistent: eine nackte Adresse wird zu /32",
+    metallbOpts({range:"172.18.42.240"}).range === "172.18.42.240/32", "");
+  ok("MetalLB-Assistent: der Bereich schlägt bis in die Befehle durch",
+    metallbGuide({range:"10.10.0.20-10.10.0.25", ingress:true}).some(s =>
+      s.items.some(i => i.c.indexOf("10.10.0.20") !== -1)), "");
+  ok("MetalLB-Assistent: die Version bekommt ihr v",
+    metallbOpts({version:"0.15.2"}).version === "v0.15.2", "");
+  ok("MetalLB-Assistent: strictARP nur im IPVS-Modus",
+    metallbGuide({ipvs:true}).length === metallbGuide({}).length + 1 &&
+    metallbGuide({ipvs:true, mode:"bgp"}).length === metallbGuide({mode:"bgp"}).length, "");
+  ok("MetalLB-Assistent: L2 wird als Ausfallsicherung benannt, nicht als Lastverteilung",
+    metallbGuide({}).some(s => s.r.some(x => x.lvl === "warn" &&
+      (x.m.indexOf("Lastverteilung") !== -1 || x.m.indexOf("load balancing") !== -1))), "");
+  ok("MetalLB-Assistent: Markdown-Export nennt den Bereich",
+    (function(){
+      const keep = {m:CLUSTER_MODE, s:METALLB};
+      CLUSTER_MODE = "metallb"; METALLB = {range:"10.10.0.20-10.10.0.25"};
+      const md = clusterMarkdown();
+      CLUSTER_MODE = keep.m; METALLB = keep.s;
+      return md.indexOf("10.10.0.20") !== -1 && md.indexOf("MetalLB") !== -1;
+    })(), "");
+  ok("Alle drei Modi liefern Abschnitte mit gültiger Rolle",
+    Object.keys(CLUSTER_MODES).every(m => {
+      const keep = CLUSTER_MODE; CLUSTER_MODE = m;
+      const g = clusterGuideOf(); CLUSTER_MODE = keep;
+      return g.length && g.every(s => CLUSTER_ROLE[s.role] && s.h);
+    }), "");
   ok("Benutzer-Assistent: jeder Satz hat beide Sprachen",
     tenStrings.every(zweisprachig),
     tenStrings.filter(s => !zweisprachig(s)).slice(0,2).join(" / "));
@@ -4799,7 +4847,8 @@ const TENANT_FIELDS = [
          ["sa","ServiceAccount-Token — jederzeit widerrufbar|ServiceAccount token — revocable at any time"]]},
   {k:"api", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de:6443",
    hint:"Dieselbe Adresse, die auch in deiner eigenen kubeconfig unter server steht.|The same address your own kubeconfig has under server."},
-  {k:"days", t:"number", adv:true, l:"Zertifikat gültig (Tage)|Certificate valid for (days)", ph:"365", half:true},
+  {k:"days", t:"number", half:true, l:"Zertifikat gültig (Tage)|Certificate valid for (days)", ph:"365",
+   when:o => (o.identity || "cert") === "cert"},
   {k:"pss", t:"select", l:"Pod Security Standard", half:true, structural:true,
    opts:[["restricted","restricted — kein root, keine Rechteerweiterung|restricted — no root, no privilege escalation"],
          ["baseline","baseline — verbietet das offensichtlich Gefährliche|baseline — forbids the obviously dangerous"],
@@ -4807,9 +4856,9 @@ const TENANT_FIELDS = [
   {k:"linux", t:"bool", structural:true, l:"Linux-Benutzer auf dem Hauptserver anlegen|Create a Linux user on the control plane",
    hint:"Für Zugriff per SSH oder VS Code Remote, mit eigener kubeconfig im Heimatverzeichnis.|For access over SSH or VS Code Remote, with its own kubeconfig in the home directory."},
   {k:"quota", t:"bool", structural:true, l:"Verbrauch begrenzen (ResourceQuota)|Cap consumption (ResourceQuota)"},
-  {k:"cpu", t:"text", l:"CPU insgesamt|CPU in total", ph:"4", half:true},
-  {k:"mem", t:"text", l:"Speicher insgesamt|Memory in total", ph:"8Gi", half:true},
-  {k:"pods", t:"number", l:"Pods höchstens|Pods at most", ph:"20", half:true},
+  {k:"cpu", t:"text", l:"CPU insgesamt|CPU in total", ph:"4", half:true, when:o => !!o.quota},
+  {k:"mem", t:"text", l:"Speicher insgesamt|Memory in total", ph:"8Gi", half:true, when:o => !!o.quota},
+  {k:"pods", t:"number", l:"Pods höchstens|Pods at most", ph:"20", half:true, when:o => !!o.quota},
   {k:"netpol", t:"bool", l:"Namespace nach außen abschotten (NetworkPolicy)|Seal the namespace off (NetworkPolicy)"}
 ];
 
@@ -5044,8 +5093,191 @@ function tenantGuide(raw){
   return out;
 }
 
+/* ---------- MetalLB ----------
+   Vergibt Adressen aus dem Knoten-Netz an Services vom Typ LoadBalancer —
+   die Rolle, die in der Cloud der Anbieter übernimmt und im eigenen Rechenzentrum
+   sonst niemand. */
+const METALLB_FIELDS = [
+  {k:"range", t:"text", l:"Adressbereich|Address range", ph:"172.18.42.240-172.18.42.250",
+   hint:"Bereich, einzelne Adresse oder CIDR. Muss im **selben** Netz liegen wie die Knoten und außerhalb des DHCP-Bereichs des Routers.|A range, a single address or a CIDR. Has to sit in the **same** network as the nodes and outside the router's DHCP range."},
+  {k:"mode", t:"select", l:"Betriebsart|Mode", half:true, structural:true,
+   opts:[["l2","L2 — antwortet per ARP, braucht nichts am Router|L2 — answers over ARP, needs nothing on the router"],
+         ["bgp","BGP — der Router lernt die Route, echte Lastverteilung|BGP — the router learns the route, real load spreading"]]},
+  {k:"install", t:"select", l:"Installation", half:true, structural:true,
+   opts:[["manifest","Manifest — eine Datei, keine weiteren Werkzeuge|Manifest — one file, no further tooling"],
+         ["helm","Helm — leichter zu aktualisieren|Helm — easier to update"]]},
+  {k:"version", t:"text", l:"Version", ph:"v0.15.2", half:true, when:o => (o.install || "manifest") === "manifest",
+   hint:"Steht fest in der Manifest-Adresse. Vor der Installation kurz nachsehen, ob es eine neuere gibt.|Baked into the manifest URL. Check for a newer one before installing."},
+  {k:"autoAssign", t:"bool", structural:true, l:"Adressen automatisch vergeben|Hand out addresses automatically",
+   hint:"Aus: Ein Service bekommt nur dann eine Adresse, wenn er den Pool ausdrücklich nennt. Sinnvoll, wenn der Bereich klein ist.|Off: a service only gets an address if it names the pool explicitly. Sensible when the range is small."},
+  {k:"ingress", t:"bool", l:"Ingress-Controller auf die erste Adresse setzen|Point the ingress controller at the first address"},
+  {k:"ipvs", t:"bool", l:"kube-proxy läuft im IPVS-Modus|kube-proxy runs in IPVS mode",
+   hint:"Dann braucht es strictARP. Im Standardmodus iptables schadet die Einstellung nicht.|Then strictARP is required. In the default iptables mode the setting does no harm."},
+  {k:"peer", t:"text", l:"Router-Adresse (BGP)|Router address (BGP)", ph:"172.18.42.1", half:true,
+   when:o => o.mode === "bgp"},
+  {k:"peerAsn", t:"number", l:"AS des Routers|Router AS", ph:"64512", half:true, when:o => o.mode === "bgp"},
+  {k:"myAsn", t:"number", l:"AS des Clusters|Cluster AS", ph:"64513", half:true, when:o => o.mode === "bgp"}
+];
+
+function metallbOpts(o){
+  /* MetalLB nimmt CIDR oder Bereich, keine nackte Adresse. */
+  let range = (o.range || "").trim() || "172.18.42.240-172.18.42.250";
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(range)) range += "/32";
+  return {
+    range: range,
+    mode: o.mode || "l2",
+    install: o.install || "manifest",
+    version: ((o.version || "").trim() || "v0.15.2").replace(/^(?!v)/, "v"),
+    autoAssign: o.autoAssign === undefined ? true : !!o.autoAssign,
+    ingress: !!o.ingress,
+    ipvs: !!o.ipvs,
+    peer: (o.peer || "").trim() || "172.18.42.1",
+    peerAsn: num(o.peerAsn) === undefined ? 64512 : num(o.peerAsn),
+    myAsn: num(o.myAsn) === undefined ? 64513 : num(o.myAsn)
+  };
+}
+
+/* Die erste Adresse des Bereichs — sie taucht in den Beispielen wieder auf. */
+function firstAddr(range){
+  return String(range).split("-")[0].split("/")[0].trim();
+}
+
+function metallbGuide(raw){
+  const o = metallbOpts(raw);
+  const out = [];
+  const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
+  const ip = firstAddr(o.range);
+  const l2 = o.mode === "l2";
+
+  /* --- 1. vorher --- */
+  sec("Vorher: passt der Bereich überhaupt|First: does the range fit at all", "all", {
+    p:["MetalLB erfindet kein Netz. Es vergibt Adressen aus dem Netz, in dem die Knoten schon stehen — deshalb ist die erste Frage nicht, wie man es installiert, sondern welche Adressen frei sind.|MetalLB does not invent a network. It hands out addresses from the network the nodes already sit in — so the first question is not how to install it but which addresses are free.",
+       "Zwei Bedingungen, und beide werden regelmäßig übersehen: Der Bereich muss im **selben** Segment liegen wie die Knoten, und er muss **außerhalb** dessen liegen, was der Router per DHCP verteilt. Ein beliebiges freies Netz genügt nicht — im L2-Modus antwortet MetalLB per ARP, und ARP kommt über keinen Router.|Two conditions, and both get overlooked regularly: the range has to be in the **same** segment as the nodes, and it has to be **outside** what the router hands out over DHCP. An arbitrary free network will not do — in L2 mode MetalLB answers over ARP, and ARP does not cross a router."],
+    items:[
+      {c:"ip -4 addr show | grep -w inet",
+       d:"Auf einem Knoten ausführen. Adresse und Präfix daraus bestimmen, welcher Bereich in Frage kommt.|Run on a node. Address and prefix from this determine which range is eligible."},
+      {c:"for i in $(seq 240 250); do ping -c1 -W1 " + ip.split(".").slice(0,3).join(".") + ".$i >/dev/null 2>&1 && echo \"$i belegt\"; done",
+       d:"Grobe Gegenprobe, ob im geplanten Bereich schon jemand antwortet. Ein Gerät, das gerade aus ist, verrät sich dabei allerdings nicht — der Blick in die DHCP-Einstellungen des Routers bleibt nötig.|A rough check whether something already answers in the planned range. A device that happens to be off will not show up though — a look at the router's DHCP settings stays necessary."}
+    ],
+    r:[{lvl:"err", m:t("Überschneidet sich der Bereich mit dem DHCP-Bereich des Routers, vergibt irgendwann jemand dieselbe Adresse zweimal. Der Fehler tritt nicht sofort auf, sondern Wochen später und sieht dann nach einem Netzwerkproblem aus.|If the range overlaps the router's DHCP range, sooner or later the same address gets handed out twice. The fault does not appear immediately but weeks later, and then looks like a network problem.")}]
+  });
+
+  /* --- 2. strictARP --- */
+  if (o.ipvs && l2){
+    sec("kube-proxy auf strictARP stellen|Setting kube-proxy to strictARP", "admin", {
+      p:["Im IPVS-Modus beantwortet kube-proxy ARP-Anfragen auch für Adressen, die ihm nicht gehören. MetalLB und kube-proxy antworten dann beide, und wer gewinnt, entscheidet der Zufall.|In IPVS mode kube-proxy answers ARP requests even for addresses that are not its own. MetalLB and kube-proxy then both answer, and chance decides who wins."],
+      items:[
+        {c:"kubectl -n kube-system get configmap kube-proxy -o yaml \\\n  | sed -e 's/strictARP: false/strictARP: true/' \\\n  | kubectl apply -f -\nkubectl -n kube-system rollout restart daemonset kube-proxy",
+         d:"Ohne den Neustart bleibt die alte Einstellung im laufenden Prozess. Im Standardmodus iptables ist der Schritt nicht nötig und richtet auch keinen Schaden an.|Without the restart the old setting stays in the running process. In the default iptables mode this step is unnecessary and does no harm either."}
+      ]
+    });
+  }
+
+  /* --- 3. Installation --- */
+  sec("MetalLB installieren|Installing MetalLB", "admin", {
+    p:["Die Installation bringt zwei Dinge mit: den **Controller**, der Adressen vergibt, und den **Speaker**, der auf jedem Knoten läuft und die Adresse nach außen bekannt macht. Ohne Konfiguration tut beides nichts — der nächste Schritt ist der eigentliche.|The installation brings two things: the **controller**, which hands out addresses, and the **speaker**, which runs on every node and announces the address to the outside. Without configuration neither does anything — the next step is the actual one."],
+    items:o.install === "helm"
+      ? [{c:"helm repo add metallb https://metallb.github.io/metallb\nhelm repo update\nhelm install metallb metallb/metallb -n metallb-system --create-namespace",
+          d:"Helm legt den Namespace mit an und setzt die nötigen Sicherheitslabels selbst.|Helm creates the namespace as well and sets the required security labels itself."},
+         {c:"kubectl -n metallb-system get pods\nkubectl -n metallb-system rollout status deployment/metallb-controller",
+          d:"Der Controller ist ein Deployment, der Speaker ein DaemonSet — es muss also je Knoten ein Speaker laufen.|The controller is a deployment, the speaker a daemon set — so there has to be one speaker per node."}]
+      : [{c:"kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/" + o.version + "/config/manifests/metallb-native.yaml",
+          d:"Eine Datei, kein Helm. Die Version steht fest in der Adresse — für ein Upgrade tauscht man sie aus und wendet erneut an.|One file, no Helm. The version is fixed in the URL — for an upgrade you swap it and apply again."},
+         {c:"kubectl -n metallb-system get pods -w",
+          d:"Warten, bis Controller und Speaker laufen. Erst danach nimmt der Cluster die Konfiguration im nächsten Schritt an — sie wird von einem Webhook geprüft, den die Installation mitbringt.|Wait until controller and speaker are running. Only then does the cluster accept the configuration in the next step — it is checked by a webhook the installation brings along."}],
+    r:[{lvl:"warn", m:t("Der Speaker braucht erweiterte Rechte am Netz und läuft deshalb nicht unter dem Pod Security Standard restricted. Die Installation setzt am Namespace metallb-system die Stufe privileged — das ist beabsichtigt und darf nicht überschrieben werden.|The speaker needs elevated network privileges and therefore does not run under the restricted Pod Security Standard. The installation sets the metallb-system namespace to privileged — that is deliberate and must not be overridden.")}]
+  });
+
+  /* --- 4. Konfiguration --- */
+  const poolYaml = "cat <<'EOF' | kubectl apply -f -\napiVersion: metallb.io/v1beta1\nkind: IPAddressPool\nmetadata:\n  name: haupt\n  namespace: metallb-system\nspec:\n  addresses:\n    - " + o.range + "\n  autoAssign: " + (o.autoAssign ? "true" : "false") + "\n---\napiVersion: metallb.io/v1beta1\nkind: " + (l2 ? "L2Advertisement" : "BGPAdvertisement") + "\nmetadata:\n  name: haupt\n  namespace: metallb-system\nspec:\n  ipAddressPools:\n    - haupt\nEOF";
+  sec("Den Adressbereich bekanntgeben|Announcing the address range", "admin", {
+    p:l2
+      ? ["Zwei Objekte, und beide werden gebraucht: Der **IPAddressPool** sagt, welche Adressen es gibt. Die **L2Advertisement** sagt, dass sie per ARP angekündigt werden sollen. Fehlt das zweite, bleibt jeder Service auf `EXTERNAL-IP: <pending>` stehen — ohne Fehlermeldung, denn falsch ist daran nichts.|Two objects, and both are needed: the **IPAddressPool** says which addresses exist. The **L2Advertisement** says they should be announced over ARP. Without the second one every service stays at `EXTERNAL-IP: <pending>` — with no error message, because nothing about it is wrong."]
+      : ["Im BGP-Modus kommen drei Objekte zusammen: der **IPAddressPool**, die **BGPAdvertisement** und der **BGPPeer**, der dem Router gegenübersteht. Der Router muss die Gegenstelle ebenfalls kennen — diese Hälfte macht MetalLB nicht.|In BGP mode three objects come together: the **IPAddressPool**, the **BGPAdvertisement** and the **BGPPeer** facing the router. The router has to know its counterpart too — MetalLB does not do that half."],
+    items:[{c:poolYaml,
+      d:o.autoAssign
+        ? "autoAssign: true heißt, dass jeder Service vom Typ LoadBalancer eine Adresse aus diesem Pool bekommt, ohne dass man ihn nennen muss.|autoAssign: true means every service of type LoadBalancer gets an address from this pool without having to name it."
+        : "autoAssign: false heißt, dass der Pool nur auf ausdrückliche Anfrage vergibt. Services ohne die passende Annotation bleiben pending — das ist gewollt, überrascht aber beim ersten Mal.|autoAssign: false means the pool only hands out on explicit request. Services without the matching annotation stay pending — that is intended but surprises you the first time."}]
+      .concat(l2 ? [] : [{c:"cat <<'EOF' | kubectl apply -f -\napiVersion: metallb.io/v1beta2\nkind: BGPPeer\nmetadata:\n  name: router\n  namespace: metallb-system\nspec:\n  myASN: " + o.myAsn + "\n  peerASN: " + o.peerAsn + "\n  peerAddress: " + o.peer + "\nEOF\n\nkubectl -n metallb-system logs -l app=metallb,component=speaker | grep -i bgp",
+        d:"Die Gegenstelle. In den Logs des Speakers steht danach, ob die Sitzung zustande kommt — solange dort established fehlt, kündigt niemand etwas an.|The counterpart. The speaker's logs then say whether the session comes up — as long as established is missing there, nobody announces anything."}]),
+    r:l2
+      ? [{lvl:"warn", m:t("Im L2-Modus hält immer genau ein Knoten die Adresse und beantwortet alle Anfragen. Das ist Ausfallsicherung, keine Lastverteilung: Der gesamte Verkehr für diese Adresse läuft über einen Knoten, auch bei zehn Knoten im Cluster.|In L2 mode exactly one node holds the address and answers all requests. That is failover, not load balancing: all traffic for that address goes through one node, even with ten nodes in the cluster.")}]
+      : [{lvl:"warn", m:t("BGP braucht einen Router, der mitspielt. Eine gewöhnliche Fritzbox tut das nicht — dafür braucht es OPNsense, pfSense, Mikrotik oder Vergleichbares. Im Zweifel ist L2 die Betriebsart, die einfach funktioniert.|BGP needs a router that plays along. An ordinary home router does not — that calls for OPNsense, pfSense, Mikrotik or similar. When in doubt, L2 is the mode that simply works.")}]
+  });
+
+  /* --- 5. feste Adresse --- */
+  sec("Eine feste Adresse vergeben|Pinning a fixed address", "admin", {
+    p:["Ohne weitere Angabe nimmt MetalLB die nächste freie Adresse aus dem Pool. Für etwas, worauf ein DNS-Eintrag zeigt, will man das nicht dem Zufall überlassen — die Annotation `metallb.io/loadBalancerIPs` legt sie fest.|Without further instruction MetalLB takes the next free address from the pool. For something a DNS record points at you do not want that left to chance — the annotation `metallb.io/loadBalancerIPs` pins it.",
+       "Das alte Feld `spec.loadBalancerIP` im Service tut dasselbe, ist in Kubernetes aber als veraltet markiert. Neue Manifeste benutzen die Annotation.|The old `spec.loadBalancerIP` field in the service does the same but is marked deprecated in Kubernetes. New manifests use the annotation."],
+    items:[
+      {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind: Service\nmetadata:\n  name: web\n  annotations:\n    metallb.io/loadBalancerIPs: " + ip + (o.autoAssign ? "" : "\n    metallb.io/address-pool: haupt") + "\nspec:\n  type: LoadBalancer\n  selector:\n    app: web\n  ports:\n    - name: http\n      port: 80\n      targetPort: http\nEOF",
+       d:o.autoAssign
+         ? "Die Adresse muss innerhalb des Pools liegen, sonst bleibt der Service pending.|The address has to lie inside the pool, otherwise the service stays pending."
+         : "Beide Annotationen sind nötig: die eine wählt den Pool, die andere die Adresse darin.|Both annotations are needed: one picks the pool, the other the address within it."},
+      {c:"kubectl get svc -A -o wide | grep LoadBalancer",
+       d:"Die Übersicht über alles, was gerade eine Adresse von außen hält. Bei einem kleinen Bereich lohnt sich der Blick regelmäßig.|The overview of everything currently holding an outside address. With a small range it is worth looking regularly."}
+    ]
+  });
+
+  /* --- 6. Ingress --- */
+  if (o.ingress){
+    sec("Den Ingress-Controller darauf setzen|Pointing the ingress controller at it", "admin", {
+      p:["Damit schließt sich der Kreis: **Eine** Adresse von außen, dahinter der Ingress-Controller, der anhand des Host-Namens verteilt. Jede weitere Anwendung braucht dann nur noch eine Ingress-Regel und keine eigene Adresse mehr.|That closes the circle: **one** address from outside, behind it the ingress controller distributing by host name. Every further application then needs only an ingress rule, no address of its own.",
+         "Genau dafür lohnt sich ein kleiner Bereich — im Grunde reicht eine einzige Adresse, solange alles über HTTP und HTTPS läuft.|That is exactly why a small range pays off — one single address is enough as long as everything runs over HTTP and HTTPS."],
+      items:[
+        {c:"kubectl -n ingress-nginx annotate service ingress-nginx-controller \\\n  metallb.io/loadBalancerIPs=" + ip + " --overwrite" + (o.autoAssign ? "" : " \\\n  metallb.io/address-pool=haupt"),
+         d:"Wirkt sofort, ohne Neustart. Ein bereits vergebener Wert wird durch --overwrite ersetzt.|Takes effect immediately, no restart. An existing value is replaced by --overwrite."},
+        {c:"kubectl -n ingress-nginx get svc ingress-nginx-controller",
+         d:"In der Spalte EXTERNAL-IP muss die gewünschte Adresse stehen. Bleibt dort pending, ist der Pool nicht erreichbar oder die Adresse liegt außerhalb.|The EXTERNAL-IP column has to show the wanted address. If it stays pending, the pool is unreachable or the address lies outside it."}
+      ]
+    });
+  }
+
+  /* --- 7. Testen --- */
+  sec("Prüfen, ob die Adresse wirklich antwortet|Checking that the address really answers", "admin", {
+    p:["Der Test gehört auf einen Rechner, der **nicht** im Cluster ist. Von einem Knoten aus antwortet die Adresse auch dann, wenn die Ankündigung nach außen gar nicht funktioniert — der Weg dorthin führt über die interne Weiterleitung.|The test belongs on a machine that is **not** in the cluster. From a node the address answers even when the outside announcement does not work at all — the route there goes through internal forwarding."],
+    items:[
+      {c:"kubectl get svc -A | grep " + ip + "\nkubectl -n metallb-system logs -l component=speaker --tail=20 | grep -i " + ip,
+       d:"Erst die Zuweisung, dann die Ankündigung. Im Log des Speakers steht, welcher Knoten die Adresse übernommen hat.|First the assignment, then the announcement. The speaker's log says which node took over the address."},
+      {c:"# vom Arbeitsplatz, nicht von einem Knoten:\nping -c2 " + ip + "\ncurl -sI http://" + ip + "/\narping -c2 " + ip + "   # zeigt die MAC — sie gehört einem der Knoten",
+       d:"Antwortet ping, aber curl nicht, stimmt der Port oder der Service dahinter nicht. Antwortet gar nichts, kommt die ARP-Ankündigung nicht durch — anderes VLAN, WLAN dazwischen, oder ein Switch mit Port-Sicherheit.|If ping answers but curl does not, the port or the service behind it is wrong. If nothing answers, the ARP announcement is not getting through — a different VLAN, WiFi in between, or a switch with port security."},
+      {c:"kubectl cordon KNOTEN-DER-DIE-ADRESSE-HAELT\nsleep 5 && ping -c3 " + ip + "\nkubectl uncordon KNOTEN-DER-DIE-ADRESSE-HAELT",
+       d:"Die Probe auf die Ausfallsicherung: Ein anderer Knoten muss die Adresse übernehmen. Ein paar verlorene Pakete dabei sind normal, der Umzug dauert Sekunden.|The failover test: another node has to take over the address. A few lost packets are normal, the move takes seconds."}
+    ]
+  });
+
+  /* --- 8. Fehlerbilder --- */
+  sec("Wenn es nicht geht|When it does not work", "admin", {
+    table:[["Bild|Symptom","Meist die Ursache|Usually the cause"],
+      ["EXTERNAL-IP bleibt pending|EXTERNAL-IP stays pending","Kein IPAddressPool, keine Advertisement, oder autoAssign steht auf false und der Service nennt den Pool nicht.|No IPAddressPool, no advertisement, or autoAssign is false and the service does not name the pool."],
+      ["Adresse vergeben, antwortet aber nicht|Address assigned but silent","Die Ankündigung kommt nicht durch: anderes Segment, WLAN dazwischen, oder im IPVS-Modus fehlt strictARP.|The announcement is not getting through: different segment, WiFi in between, or strictARP is missing in IPVS mode."],
+      ["Antwortet nur von einem Knoten|Only one node answers","Kein Fehler. Im L2-Modus ist das die Bauart — ein Knoten hält die Adresse.|Not a fault. In L2 mode that is by design — one node holds the address."],
+      ["Speaker startet nicht|Speaker does not start","Der Namespace metallb-system braucht die Stufe privileged. Eine clusterweite Regel, die restricted erzwingt, hält ihn auf.|The metallb-system namespace needs the privileged level. A cluster-wide rule enforcing restricted stops it."],
+      ["Adresse doppelt im Netz|Address duplicated on the network","Der Bereich überschneidet sich mit dem DHCP-Bereich des Routers.|The range overlaps the router's DHCP range."],
+      ["Webhook denied|Webhook denied","Die Konfiguration wurde angewendet, bevor der Controller lief. Kurz warten und erneut anwenden.|The configuration was applied before the controller was running. Wait a moment and apply again."]],
+    items:[
+      {c:"kubectl -n metallb-system get pods -o wide\nkubectl -n metallb-system logs -l component=controller --tail=50\nkubectl describe svc SERVICE | tail -20",
+       d:"Die drei Blicke in dieser Reihenfolge. Die Events unter describe nennen den Grund meistens im Klartext.|The three looks in that order. The events under describe usually name the reason in plain words."}
+    ]
+  });
+
+  /* --- 9. Einordnung --- */
+  sec("Was MetalLB ist und was nicht|What MetalLB is and is not", "admin", {
+    p:["MetalLB füllt genau eine Lücke: In der Cloud beantwortet der Anbieter einen Service vom Typ LoadBalancer mit einer echten Adresse. Im eigenen Rechenzentrum beantwortet ihn niemand, und der Service bleibt für immer pending. MetalLB ist die Antwort auf diese Frage — nicht mehr und nicht weniger.|MetalLB fills exactly one gap: in the cloud the provider answers a service of type LoadBalancer with a real address. In your own data centre nobody answers, and the service stays pending forever. MetalLB is the answer to that question — no more and no less."],
+    table:[["Es leistet|It does","Es leistet nicht|It does not"],
+      ["Adressen aus dem eigenen Netz vergeben|Hand out addresses from your own network","TLS beenden, Namen unterscheiden, Pfade verteilen — das ist der Ingress-Controller.|Terminate TLS, distinguish names, route paths — that is the ingress controller."],
+      ["Bei Knotenausfall die Adresse umziehen|Move the address on node failure","Den Verkehr im L2-Modus auf mehrere Knoten verteilen.|Spread traffic across several nodes in L2 mode."],
+      ["Im BGP-Modus mehrere Wege ankündigen|Announce several paths in BGP mode","Einen Router ersetzen, der BGP nicht kann.|Replace a router that cannot do BGP."],
+      ["Auch UDP und beliebige Ports|UDP and arbitrary ports too","Etwas gegen einen ausgefallenen Uplink.|Anything about a failed uplink."]],
+    p2:["Die übliche und meist beste Aufteilung: **eine** Adresse für den Ingress-Controller, und alles Weitere läuft über Host-Namen darauf. Eigene LoadBalancer-Adressen lohnen sich nur für das, was kein HTTP spricht — eine Datenbank nach außen, ein Spieleserver, ein Syslog-Empfänger.|The usual and mostly best split: **one** address for the ingress controller, and everything else runs over host names on it. Separate LoadBalancer addresses only pay off for what does not speak HTTP — a database exposed outward, a game server, a syslog receiver."]
+  });
+
+  return out;
+}
+
 let CLUSTER = {};
 let TENANT = {};
+let METALLB = {autoAssign:true};
 let CLUSTER_MODE = "install";
 
 const CLUSTER_ROLE = {
@@ -5058,17 +5290,28 @@ const CLUSTER_ROLE = {
 
 /* Der Assistent hat zwei Modi: Cluster aufsetzen und Benutzer einrichten.
    Beide liefern dieselbe Abschnittsform, also teilen sie Darstellung und Export. */
-function clusterFieldsOf(){ return CLUSTER_MODE === "tenant" ? TENANT_FIELDS : CLUSTER_FIELDS; }
-function clusterStateOf(){ return CLUSTER_MODE === "tenant" ? TENANT : CLUSTER; }
-function clusterGuideOf(){ return CLUSTER_MODE === "tenant" ? tenantGuide(TENANT) : clusterGuide(CLUSTER); }
+const CLUSTER_MODES = {
+  install: {fields:() => CLUSTER_FIELDS, state:() => CLUSTER, guide:() => clusterGuide(CLUSTER),
+            file:"cluster-installation.md"},
+  tenant:  {fields:() => TENANT_FIELDS,  state:() => TENANT,  guide:() => tenantGuide(TENANT),
+            file:"benutzer-namespace.md"},
+  metallb: {fields:() => METALLB_FIELDS, state:() => METALLB, guide:() => metallbGuide(METALLB),
+            file:"metallb.md"}
+};
+function clusterModeOf(){ return CLUSTER_MODES[CLUSTER_MODE] || CLUSTER_MODES.install; }
+function clusterFieldsOf(){ return clusterModeOf().fields(); }
+function clusterStateOf(){ return clusterModeOf().state(); }
+function clusterGuideOf(){ return clusterModeOf().guide(); }
 
 function renderClusterFields(){
   let h = "";
   const state = clusterStateOf();
-  clusterFieldsOf().filter(f => !SHORT || !f.adv).forEach(f => {
+  /* when blendet Felder aus, die zur getroffenen Auswahl nicht passen. */
+  clusterFieldsOf().filter(f => (!SHORT || !f.adv) && (!f.when || f.when(state))).forEach(f => {
     const v = state[f.k] === undefined ? "" : state[f.k];
     const cls = f.half ? "f f--in" : "f";
-    const hint = f.hint ? '<span class="hint">' + esc(t(f.hint)) + "</span>" : "";
+    /* Hinweise duerfen hier **fett** und `code` enthalten wie der Text daneben. */
+    const hint = f.hint ? '<span class="hint">' + mdInline(t(f.hint)) + "</span>" : "";
     if (f.t === "bool"){
       h += '<div class="f"><label class="check"><input type="checkbox" data-cl="' + f.k + '"' +
         (f.structural ? ' data-clstruct="1"' : "") + (v ? " checked" : "") + "><span>" + esc(t(f.l)) + "</span></label>" + hint + "</div>";
@@ -5120,6 +5363,7 @@ function renderClusterOut(){
 function clusterMarkdown(){
   const de = LANG === "de";
   if (CLUSTER_MODE === "tenant") return tenantMarkdown();
+  if (CLUSTER_MODE === "metallb") return metallbMarkdown();
   const o = clusterOpts(CLUSTER);
   let m = "# " + (de ? "Kubernetes-Cluster aufsetzen" : "Setting up a Kubernetes cluster") + "\n\n";
   m += "| " + (de ? "Angabe" : "Setting") + " | " + (de ? "Wert" : "Value") + " |\n|---|---|\n";
@@ -5154,7 +5398,23 @@ function tenantMarkdown(){
   return m + guideMarkdown(tenantGuide(TENANT));
 }
 
-/* Beide Anleitungen haben dieselbe Form, also genuegt ein Umsetzer. */
+function metallbMarkdown(){
+  const o = metallbOpts(METALLB), de = LANG === "de";
+  let m = "# " + (de ? "MetalLB einrichten" : "Setting up MetalLB") + "\n\n";
+  m += "| " + (de ? "Angabe" : "Setting") + " | " + (de ? "Wert" : "Value") + " |\n|---|---|\n";
+  [[de?"Adressbereich":"Address range", o.range],
+   [de?"Betriebsart":"Mode", o.mode === "l2" ? "L2 (ARP)" : "BGP"],
+   ["Installation", o.install === "helm" ? "Helm" : "Manifest " + o.version],
+   ["autoAssign", o.autoAssign ? "true" : "false"],
+   [de?"Ingress-Controller":"Ingress controller", o.ingress ? firstAddr(o.range) : (de?"nicht gesetzt":"not set")]
+  ].concat(o.mode === "bgp" ? [[de?"Router":"Router", o.peer + " (AS " + o.peerAsn + ")"],
+                               [de?"Cluster-AS":"Cluster AS", String(o.myAsn)]] : [])
+   .forEach(r => { m += "| " + r[0] + " | `" + r[1] + "` |\n"; });
+  m += "\n";
+  return m + guideMarkdown(metallbGuide(METALLB));
+}
+
+/* Alle Anleitungen haben dieselbe Form, also genuegt ein Umsetzer. */
 function guideMarkdown(guide){
   let m = "";
   guide.forEach((s, i) => {
@@ -5172,18 +5432,24 @@ function guideMarkdown(guide){
   return m;
 }
 
+const CLUSTER_TABS = {install:"tabInstall", tenant:"tabTenant", metallb:"tabMetallb"};
+const CLUSTER_TAB_LABEL = {
+  install:"Installation|Installation",
+  tenant: "Benutzer & Namespace|Users & namespaces",
+  metallb:"MetalLB|MetalLB"
+};
+const CLUSTER_DESC = {
+  install:"Erzeugt eine Anleitung mit kubeadm, getrennt danach, was auf jedem Knoten, was nur auf dem Hauptserver und was nur auf den Workern zu tun ist. Klick kopiert den Befehl.|Builds a kubeadm guide, separated into what runs on every node, what only on the control plane and what only on the workers. Click copies the command.",
+  tenant: "Richtet einen abgegrenzten Arbeitsbereich ein: eigener Namespace, eigene Anmeldung, begrenzte Rechte — und den passenden Linux-Benutzer auf dem Hauptserver. Klick kopiert den Befehl.|Sets up a bounded workspace: its own namespace, its own sign-in, limited rights — and the matching Linux user on the control plane. Click copies the command.",
+  metallb:"Gibt Services vom Typ LoadBalancer eine echte Adresse aus dem eigenen Netz — die Rolle, die in der Cloud der Anbieter übernimmt. Klick kopiert den Befehl.|Gives services of type LoadBalancer a real address from your own network — the role the provider plays in the cloud. Click copies the command."
+};
 function clusterTexts(){
-  const de = LANG === "de", ten = CLUSTER_MODE === "tenant";
-  $("tabInstall").textContent = de ? "Installation" : "Installation";
-  $("tabTenant").textContent = de ? "Benutzer & Namespace" : "Users & namespaces";
-  $("tabInstall").setAttribute("aria-pressed", !ten);
-  $("tabTenant").setAttribute("aria-pressed", ten);
-  $("clusterMd").textContent = de ? "Anleitung herunterladen" : "Download the guide";
-  $("clusterDesc").textContent = ten
-    ? (de ? "Richtet einen abgegrenzten Arbeitsbereich ein: eigener Namespace, eigene Anmeldung, begrenzte Rechte — und den passenden Linux-Benutzer auf dem Hauptserver. Klick kopiert den Befehl."
-          : "Sets up a bounded workspace: its own namespace, its own sign-in, limited rights — and the matching Linux user on the control plane. Click copies the command.")
-    : (de ? "Erzeugt eine Anleitung mit kubeadm, getrennt danach, was auf jedem Knoten, was nur auf dem Hauptserver und was nur auf den Workern zu tun ist. Klick kopiert den Befehl."
-          : "Builds a kubeadm guide, separated into what runs on every node, what only on the control plane and what only on the workers. Click copies the command.");
+  Object.keys(CLUSTER_TABS).forEach(m => {
+    $(CLUSTER_TABS[m]).textContent = t(CLUSTER_TAB_LABEL[m]);
+    $(CLUSTER_TABS[m]).setAttribute("aria-pressed", CLUSTER_MODE === m);
+  });
+  $("clusterMd").textContent = LANG === "de" ? "Anleitung herunterladen" : "Download the guide";
+  $("clusterDesc").textContent = t(CLUSTER_DESC[CLUSTER_MODE] || CLUSTER_DESC.install);
 }
 
 function setClusterMode(mode){
@@ -5193,8 +5459,9 @@ function setClusterMode(mode){
 
 function renderCluster(){ clusterTexts(); renderClusterFields(); renderClusterOut(); }
 
-$("tabInstall").addEventListener("click", () => setClusterMode("install"));
-$("tabTenant").addEventListener("click", () => setClusterMode("tenant"));
+Object.keys(CLUSTER_TABS).forEach(m => {
+  $(CLUSTER_TABS[m]).addEventListener("click", () => setClusterMode(m));
+});
 
 $("clusterBtn").addEventListener("click", () => {
   if (togglePanel("clusterPanel")) renderCluster();
@@ -5220,8 +5487,7 @@ $("clusterOut").addEventListener("click", e => {
   setTimeout(()=>{ s.textContent = old; }, 1000);
 });
 $("clusterMd").addEventListener("click", () => {
-  download(clusterMarkdown(),
-    CLUSTER_MODE === "tenant" ? "benutzer-namespace.md" : "cluster-installation.md", "text/markdown");
+  download(clusterMarkdown(), clusterModeOf().file, "text/markdown");
 });
 
 function searchIndex(){
