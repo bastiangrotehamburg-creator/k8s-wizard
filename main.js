@@ -4378,6 +4378,18 @@ function runSelfTests(){
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
   const oidcGuide = tenantGuide({user:"bge", ns:"team-admin", identity:"oidc", api:"k8s-cp1.highq.org:6443"});
   const oidcTxt = oidcGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
+  ok("Mengenangaben: gueltige Werte gehen durch",
+    [["4","8Gi"],["500m","512Mi"],["2.5","2G"]].every(f =>
+      mengenRisiken(tenantOpts({cpu:f[0], mem:f[1]})).length === 0), "");
+  ok("Mengenangaben: Komma, Leerzeichen, GB und Gb werden abgefangen",
+    [["2,5","8Gi"],["4","8 Gi"],["4","8GB"],["4","8Gb"],["4 Kerne","8Gi"]].every(f =>
+      mengenRisiken(tenantOpts({cpu:f[0], mem:f[1]})).some(x => x.lvl === "err")), "");
+  ok("Mengenangaben: Speicher ohne Einheit wird als Byte benannt",
+    mengenRisiken(tenantOpts({cpu:"4", mem:"8"})).some(x => x.lvl === "err" &&
+      (x.m.indexOf("Byte") !== -1 || x.m.indexOf("bytes") !== -1)), "");
+  ok("Mengenangaben: die Warnung steht am Quota-Abschnitt",
+    tenantGuide({quota:true, mem:"8GB"}).some(s =>
+      s.r.some(x => x.lvl === "err" && x.m.indexOf("8GB") !== -1)), "");
   const pinGuide = tenantGuide({ns:"team-admin", pin:true, pool:"pool=team-admin", taint:true});
   const pinTxt = pinGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
   ok("Node-Bindung: Label, Annotation und Plugin gehören zusammen",
@@ -5032,6 +5044,26 @@ function tenantOpts(o){
    keine selbst gebauten Rollen — deshalb überleben sie jedes Upgrade. */
 const TENANT_ROLE = {edit:"edit", view:"view", admin:"admin"};
 
+/* Kubernetes prueft Mengenangaben gegen genau diesen Ausdruck. Wer hier
+   4 Kerne, 8 GB oder 2,5 eintraegt, bekommt vom API-Server nur die Regel
+   zurueck und nicht das Feld, an dem es liegt — also pruefen wir vorher. */
+const MENGE = /^([+-]?[0-9.]+)([eEinumkKMGTP]*[-+]?[0-9]*)$/;
+
+function mengenRisiken(o){
+  const out = [];
+  [["CPU", o.cpu], ["Speicher|Memory", o.mem]].forEach(f => {
+    if (MENGE.test(String(f[1]))) return;
+    out.push({lvl:"err", m:t("Die Angabe für " + t(f[0]) + " ist keine gültige Mengenangabe: \"" + f[1] +
+      "\". Der API-Server lehnt das Manifest mit quantities must match the regular expression ab und nennt dabei nicht, welches Feld gemeint war. Erlaubt sind eine Zahl und ein Suffix ohne Leerzeichen — 4, 500m, 2.5, 8Gi, 512Mi. Nicht erlaubt sind Komma statt Punkt, GB oder Gb statt Gi oder G, und jedes Leerzeichen.|The value for " + t(f[0]) + " is not a valid quantity: \"" + f[1] +
+      "\". The API server rejects the manifest with quantities must match the regular expression and does not say which field it meant. Allowed is a number and a suffix without a space — 4, 500m, 2.5, 8Gi, 512Mi. Not allowed are a comma instead of a dot, GB or Gb instead of Gi or G, and any space.")});
+  });
+  if (MENGE.test(String(o.mem)) && /^[0-9.]+$/.test(String(o.mem)))
+    out.push({lvl:"err", m:t("Der Speicherwert \"" + o.mem + "\" hat keine Einheit und bedeutet damit " + o.mem +
+      " **Byte**. Der Namespace kann danach keinen einzigen Pod starten. Gemeint ist vermutlich " + o.mem + "Gi.|The memory value \"" + o.mem + "\" has no unit and therefore means " + o.mem +
+      " **bytes**. The namespace cannot start a single pod afterwards. What is meant is probably " + o.mem + "Gi.")});
+  return out;
+}
+
 function tenantGuide(raw){
   const o = tenantOpts(raw);
   const out = [];
@@ -5073,7 +5105,7 @@ function tenantGuide(raw){
         {c:"kubectl describe resourcequota quota -n " + o.ns,
          d:"Zeigt Verbrauch gegen Grenze. Diese Ausgabe ist die erste Anlaufstelle, wenn ein Pod plötzlich nicht mehr startet.|Shows usage against the limit. This output is the first place to look when a pod suddenly stops starting."}
       ],
-      r:[{lvl:"warn", m:t("Die Quota zählt requests, nicht den tatsächlichen Verbrauch. Ein Namespace mit großzügigen requests blockiert Platz, den er nie benutzt — und einer mit zu kleinen bekommt Pods, die unter Last gedrosselt werden.|The quota counts requests, not actual consumption. A namespace with generous requests blocks room it never uses — and one with requests too small gets pods that are throttled under load.")}]
+      r:mengenRisiken(o).concat([{lvl:"warn", m:t("Die Quota zählt requests, nicht den tatsächlichen Verbrauch. Ein Namespace mit großzügigen requests blockiert Platz, den er nie benutzt — und einer mit zu kleinen bekommt Pods, die unter Last gedrosselt werden.|The quota counts requests, not actual consumption. A namespace with generous requests blocks room it never uses — and one with requests too small gets pods that are throttled under load.")}])
     });
   }
 
