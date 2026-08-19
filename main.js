@@ -4399,6 +4399,43 @@ function runSelfTests(){
     ymlTest.indexOf("executable: /bin/bash") !== -1, "");
   ok("Ansible-Export: die Risiken stehen als Kommentar dabei",
     ymlTest.indexOf("    # ACHTUNG") !== -1 || ymlTest.indexOf("    # Hinweis") !== -1, "");
+  const bundleTest = (function(){
+    const keep = CLUSTER_MODE; CLUSTER_MODE = "install";
+    const b = ansibleBundle(); CLUSTER_MODE = keep; return b;
+  })();
+  const bNamen = bundleTest.map(f => f.name);
+  ok("Ansible-Bündel: site.yml, Inventar und README sind dabei",
+    bNamen.indexOf("site.yml") === 0 && bNamen.indexOf("inventory.ini") !== -1 &&
+    bNamen.indexOf("README.md") !== -1, bNamen.join(" "));
+  ok("Ansible-Bündel: je Rollenblock eine eigene Datei",
+    bNamen.indexOf("01-all-nodes.yml") !== -1 && bNamen.indexOf("02-control-plane.yml") !== -1 &&
+    bNamen.indexOf("03-workers.yml") !== -1, bNamen.join(" "));
+  ok("Ansible-Bündel: jede Teildatei steht in site.yml",
+    (function(){
+      const site = bundleTest[0].text;
+      return bNamen.filter(n => /^\d\d-/.test(n)).every(n => site.indexOf("- import_playbook: " + n) !== -1);
+    })(), "");
+  ok("Ansible-Bündel: jede Teildatei nennt genau einen hosts-Eintrag",
+    bundleTest.filter(f => /^\d\d-/.test(f.name)).every(f =>
+      f.text.split("\n").filter(z => z.indexOf("  hosts: ") === 0).length === 1), "");
+  ok("tar: Groesse ist ein Vielfaches von 512 und endet mit Nullbloecken",
+    (function(){
+      const b = tarBytes(bundleTest);
+      if (b.length % 512 !== 0) return false;
+      for (let i = b.length - 1024; i < b.length; i++) if (b[i] !== 0) return false;
+      return true;
+    })(), "");
+  ok("tar: der Kopf traegt Namen, Groesse und ustar",
+    (function(){
+      const b = tarBytes([{name:"site.yml", text:"hallo"}]);
+      let name = "", magic = "";
+      for (let i = 0; i < 8 && b[i]; i++) name += String.fromCharCode(b[i]);
+      for (let i = 257; i < 262; i++) magic += String.fromCharCode(b[i]);
+      /* 5 Zeichen, oktal 5, in elf Stellen mit fuehrenden Nullen */
+      let groesse = "";
+      for (let i = 124; i < 135; i++) groesse += String.fromCharCode(b[i]);
+      return name === "site.yml" && magic === "ustar" && parseInt(groesse, 8) === 5;
+    })(), "");
   ok("Ansible-Export: alle drei Modi liefern etwas",
     Object.keys(CLUSTER_MODES).every(m => {
       const keep = CLUSTER_MODE; CLUSTER_MODE = m;
@@ -5602,11 +5639,14 @@ const CLUSTER_ROLE = {
    Beide liefern dieselbe Abschnittsform, also teilen sie Darstellung und Export. */
 const CLUSTER_MODES = {
   install: {fields:() => CLUSTER_FIELDS, state:() => CLUSTER, guide:() => clusterGuide(CLUSTER),
-            file:"cluster-installation.md", yml:"cluster-installation.yml"},
+            file:"cluster-installation.md", yml:"cluster-installation.yml",
+            tar:"cluster-installation-ansible.tar"},
   tenant:  {fields:() => TENANT_FIELDS,  state:() => TENANT,  guide:() => tenantGuide(TENANT),
-            file:"benutzer-namespace.md", yml:"benutzer-namespace.yml"},
+            file:"benutzer-namespace.md", yml:"benutzer-namespace.yml",
+            tar:"benutzer-namespace-ansible.tar"},
   metallb: {fields:() => METALLB_FIELDS, state:() => METALLB, guide:() => metallbGuide(METALLB),
-            file:"metallb.md", yml:"metallb.yml"}
+            file:"metallb.md", yml:"metallb.yml",
+            tar:"metallb-ansible.tar"}
 };
 function clusterModeOf(){ return CLUSTER_MODES[CLUSTER_MODE] || CLUSTER_MODES.install; }
 function clusterFieldsOf(){ return clusterModeOf().fields(); }
@@ -5759,35 +5799,146 @@ function ansibleKopf(){
   return h + "\n";
 }
 
-function ansibleExport(){
+/* Dateinamen bleiben englisch, egal in welcher Sprache die Oberflaeche steht —
+   sie landen in einem Repository und sollen dort stabil heissen. */
+const ROLE_SLUG = {
+  all:"all-nodes", cp:"control-plane", worker:"workers",
+  neu:"new-node", admin:"admin", user:"user"
+};
+
+/* Ein Eintrag je zusammenhaengendem Rollenblock, in der Reihenfolge der Anleitung. */
+function ansiblePlays(){
   const de = LANG === "de";
-  let out = ansibleKopf() + "---\n";
-  const guide = clusterGuideOf();
-  let letzteRolle = null, teil = 0;
-  guide.forEach((s, i) => {
-    const rolle = s.role;
-    if (rolle !== letzteRolle){
-      if (letzteRolle !== null) out += "\n";
-      const host = ROLE_HOSTS[rolle] || "localhost";
-      teil++;
-      out += "- name: " + ynString((de ? "Teil " : "Part ") + teil + " · " + t(CLUSTER_ROLE[rolle])) + "\n" +
-             "  hosts: " + host + "\n" +
-             (host === "localhost" ? "  connection: local\n  gather_facts: false\n" : "  gather_facts: true\n") +
-             "  tasks:\n";
-      letzteRolle = rolle;
+  const teile = [];
+  let letzteRolle = null, akt = null;
+  clusterGuideOf().forEach((s, i) => {
+    if (s.role !== letzteRolle){
+      const host = ROLE_HOSTS[s.role] || "localhost";
+      akt = {rolle:s.role, host:host, slug:ROLE_SLUG[s.role] || "tasks",
+             nr:teile.length + 1, titel:t(CLUSTER_ROLE[s.role]), abschnitte:[], text:""};
+      teile.push(akt);
+      letzteRolle = s.role;
+      akt.text = "- name: " + ynString((de ? "Teil " : "Part ") + akt.nr + " · " + akt.titel) + "\n" +
+                 "  hosts: " + host + "\n" +
+                 (host === "localhost" ? "  connection: local\n  gather_facts: false\n" : "  gather_facts: true\n") +
+                 "  tasks:\n";
     }
+    akt.abschnitte.push(t(s.h));
     /* Die Hinweise des Assistenten gehen als Kommentar mit — sie sind der Grund,
        warum ein Schritt so aussieht, wie er aussieht. */
-    out += "\n    # " + String(i + 1).padStart(2, "0") + " · " + t(s.h) + "\n";
+    akt.text += "\n    # " + String(i + 1).padStart(2, "0") + " · " + t(s.h) + "\n";
     (s.r || []).forEach(x => {
-      out += "    # " + (x.lvl === "err" ? (de ? "ACHTUNG" : "WARNING") : (de ? "Hinweis" : "Note")) +
-             ": " + x.m.replace(/\*\*/g, "").replace(/\n/g, " ") + "\n";
+      akt.text += "    # " + (x.lvl === "err" ? (de ? "ACHTUNG" : "WARNING") : (de ? "Hinweis" : "Note")) +
+                  ": " + x.m.replace(/\*\*/g, "").replace(/\n/g, " ") + "\n";
     });
     (s.items || []).forEach((it, n) => {
-      out += ansibleAufgabe(t(s.h) + " · " + (n + 1), it.c) + "\n";
+      akt.text += ansibleAufgabe(t(s.h) + " · " + (n + 1), it.c) + "\n";
     });
   });
-  return out;
+  return teile;
+}
+
+/* Alles in einer Datei — bleibt fuer den Blick zwischendurch. */
+function ansibleExport(){
+  return ansibleKopf() + "---\n" + ansiblePlays().map(x => x.text).join("\n");
+}
+
+function ansibleBundle(){
+  const de = LANG === "de";
+  const modus = t(CLUSTER_TAB_LABEL[CLUSTER_MODE] || CLUSTER_TAB_LABEL.install);
+  const teile = ansiblePlays();
+  teile.forEach(x => { x.datei = String(x.nr).padStart(2, "0") + "-" + x.slug + ".yml"; });
+
+  const dateien = teile.map(x => ({name:x.datei, text:
+    "# " + modus + " — " + (de ? "Teil " : "Part ") + x.nr + ": " + x.titel + "\n" +
+    "# hosts: " + x.host + "\n" +
+    "# " + (de ? "einzeln laufen lassen" : "run on its own") + ": ansible-playbook -i inventory.ini " + x.datei + "\n" +
+    "---\n" + x.text}));
+
+  dateien.unshift({name:"site.yml", text:
+    "# " + modus + " — " + (de ? "alles der Reihe nach" : "everything in order") + "\n" +
+    "#   ansible-playbook -i inventory.ini site.yml\n" +
+    "# " + (de ? "Nur ein Teil" : "A single part") + ":\n" +
+    "#   ansible-playbook -i inventory.ini " + (teile[0] ? teile[0].datei : "01-tasks.yml") + "\n" +
+    "---\n" + teile.map(x => "- import_playbook: " + x.datei + "\n").join("")});
+
+  dateien.push({name:"inventory.ini", text:
+    "; " + (de ? "Namen durch die eigenen ersetzen." : "Replace the names with your own.") + "\n" +
+    "[k8s_control_plane]\nk8s-cp1\n\n[k8s_workers]\nk8s-w1\nk8s-w2\n\n" +
+    "[k8s_new_node]\n; " + (de ? "nur beim Hinzufuegen eines Knotens" : "only when adding a node") + "\n; k8s-w3\n\n" +
+    "[k8s_all:children]\nk8s_control_plane\nk8s_workers\n"});
+
+  dateien.push({name:"README.md", text:
+    "# " + modus + "\n\n" +
+    (de ? "Erzeugt mit dem k8s-wizard. Ein Playbook je Rolle, `site.yml` ruft sie der Reihe nach auf.\n"
+        : "Generated with the k8s wizard. One playbook per role; `site.yml` calls them in order.\n") + "\n" +
+    "| " + (de ? "Datei" : "File") + " | hosts | " + (de ? "Inhalt" : "Contents") + " |\n|---|---|---|\n" +
+    teile.map(x => "| `" + x.datei + "` | `" + x.host + "` | " + x.abschnitte.join(", ") + " |\n").join("") + "\n" +
+    (de
+      ? "## Vor dem ersten Lauf\n\n" +
+        "```sh\nansible-galaxy collection install kubernetes.core\npip install kubernetes\n```\n\n" +
+        "## Was du noch anfassen musst\n\n" +
+        "- Platzhalter in Großbuchstaben — `<TOKEN>`, `<HASH>`, `NODE-1`, `HIER-DAS-KENNWORT` — ersetzen.\n" +
+        "- Der letzte Teil kann den Rückbau enthalten. Vor dem Lauf ansehen und gegebenenfalls aus `site.yml` nehmen.\n" +
+        "- Erst mit `--check --diff` probieren.\n\n" +
+        "## Wie es gebaut ist\n\n" +
+        "YAML-Manifeste laufen über `kubernetes.core.k8s` und sind wiederholbar. Alles andere steht als\n" +
+        "`shell`-Aufgabe genau so da, wie es im Terminal stünde — samt `sudo`, damit die Zeilen auch ohne\n" +
+        "`become` stimmen. Lesende Befehle tragen `changed_when: false`.\n"
+      : "## Before the first run\n\n" +
+        "```sh\nansible-galaxy collection install kubernetes.core\npip install kubernetes\n```\n\n" +
+        "## What you still have to touch\n\n" +
+        "- Replace the placeholders in capitals — `<TOKEN>`, `<HASH>`, `NODE-1`, `HIER-DAS-KENNWORT`.\n" +
+        "- The last part may contain the teardown. Look at it and drop it from `site.yml` if need be.\n" +
+        "- Try it with `--check --diff` first.\n\n" +
+        "## How it is built\n\n" +
+        "YAML manifests run through `kubernetes.core.k8s` and are repeatable. Everything else appears as a\n" +
+        "`shell` task exactly as it would in the terminal — `sudo` included, so the lines are right without\n" +
+        "`become`. Read-only commands carry `changed_when: false`.\n")});
+
+  return dateien;
+}
+
+/* Ein tar aus dem Stand: 512-Byte-Kopf je Datei, Inhalt auf 512 aufgefuellt,
+   am Ende zwei Nullbloecke. Kein Packen, keine Bibliothek. */
+function tarBytes(dateien){
+  const enc = new TextEncoder();
+  const bloecke = [];
+  const zeit = Math.floor(Date.now() / 1000);
+  dateien.forEach(f => {
+    const daten = enc.encode(f.text);
+    const kopf = new Uint8Array(512);
+    const setz = (pos, s) => { for (let i = 0; i < s.length; i++) kopf[pos + i] = s.charCodeAt(i) & 0xff; };
+    const oktal = (n, len) => {
+      let s = n.toString(8);
+      while (s.length < len - 1) s = "0" + s;
+      return s + "\0";
+    };
+    setz(0, f.name);
+    setz(100, "0000644\0");
+    setz(108, "0000000\0");
+    setz(116, "0000000\0");
+    setz(124, oktal(daten.length, 12));
+    setz(136, oktal(zeit, 12));
+    setz(148, "        ");          /* Pruefsumme zunaechst acht Leerzeichen */
+    setz(156, "0");
+    setz(257, "ustar\0" + "00");
+    let summe = 0;
+    for (let i = 0; i < 512; i++) summe += kopf[i];
+    let ps = summe.toString(8);
+    while (ps.length < 6) ps = "0" + ps;
+    setz(148, ps + "\0 ");
+    bloecke.push(kopf, daten);
+    const rest = (512 - (daten.length % 512)) % 512;
+    if (rest) bloecke.push(new Uint8Array(rest));
+  });
+  bloecke.push(new Uint8Array(1024));
+  let laenge = 0;
+  bloecke.forEach(b => { laenge += b.length; });
+  const alles = new Uint8Array(laenge);
+  let pos = 0;
+  bloecke.forEach(b => { alles.set(b, pos); pos += b.length; });
+  return alles;
 }
 
 function clusterMarkdown(){
@@ -5921,7 +6072,7 @@ $("clusterMd").addEventListener("click", () => {
   download(clusterMarkdown(), clusterModeOf().file, "text/markdown");
 });
 $("clusterYml").addEventListener("click", () => {
-  download(ansibleExport(), clusterModeOf().yml, "text/yaml");
+  download(tarBytes(ansibleBundle()), clusterModeOf().tar, "application/x-tar");
 });
 
 function searchIndex(){
