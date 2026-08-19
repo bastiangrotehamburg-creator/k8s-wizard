@@ -4404,6 +4404,30 @@ function runSelfTests(){
     const b = ansibleBundle(); CLUSTER_MODE = keep; return b;
   })();
   const bNamen = bundleTest.map(f => f.name);
+  const tenantBundle = (function(){
+    const keep = {m:CLUSTER_MODE, t:TENANT};
+    CLUSTER_MODE = "tenant";
+    TENANT = {user:"bge", ns:"team-admin", api:"k8s-cp1.highq.org:6443", linux:true, quota:true, netpol:true};
+    const b = ansibleBundle();
+    CLUSTER_MODE = keep.m; TENANT = keep.t;
+    return b;
+  })();
+  const tNamen = tenantBundle.map(f => f.name);
+  ok("Benutzer-Bündel: der Rückbau steht in einer eigenen Datei",
+    tNamen.some(n => n.indexOf("-teardown.yml") !== -1), tNamen.join(" "));
+  ok("Benutzer-Bündel: site.yml ruft den Rückbau nicht auf",
+    (function(){
+      const site = tenantBundle[0].text;
+      const rueck = tNamen.filter(n => n.indexOf("-teardown.yml") !== -1);
+      return rueck.every(n => site.indexOf("\n- import_playbook: " + n) === -1 &&
+                              site.indexOf("# - import_playbook: " + n) !== -1);
+    })(), "");
+  ok("Benutzer-Bündel: delete-Befehle stehen nur im Rückbau",
+    tenantBundle.filter(f => /^\d\d-/.test(f.name)).every(f =>
+      f.name.indexOf("-teardown.yml") !== -1 || f.text.indexOf("kubectl delete namespace") === -1), "");
+  ok("Ansible-Export: Abschnitte ohne Befehle erzeugen keine leeren Plays",
+    tenantBundle.filter(f => /^\d\d-/.test(f.name)).every(f =>
+      f.text.indexOf("    - name: ") !== -1), "");
   ok("Ansible-Bündel: site.yml, Inventar und README sind dabei",
     bNamen.indexOf("site.yml") === 0 && bNamen.indexOf("inventory.ini") !== -1 &&
     bNamen.indexOf("README.md") !== -1, bNamen.join(" "));
@@ -4985,6 +5009,7 @@ function clusterGuide(raw){
 
   if (o.add){
     sec("Den Knoten wieder entfernen|Removing the node again", "admin", {
+      back:true,
       p:["Der Rückbau geht in der umgekehrten Richtung und in genau dieser Reihenfolge: erst die Pods herunterfahren, dann den Knoten aus dem Cluster nehmen, zuletzt die Maschine selbst zurücksetzen. Wer mit dem `reset` anfängt, hinterlässt einen Knoten-Eintrag, den danach niemand mehr sauber loswird.|The teardown goes the other direction and in exactly this order: drain the pods first, then take the node out of the cluster, and reset the machine itself last. Starting with the `reset` leaves a node entry behind that nobody gets rid of cleanly afterwards."],
       items:[
         {c:"kubectl drain KNOTEN --ignore-daemonsets --delete-emptydir-data",
@@ -5001,6 +5026,7 @@ function clusterGuide(raw){
   }
 
   if (!o.add) sec("Neu aufsetzen|Starting over", "all", {
+    back:true,
     p:["Manches laesst sich nachtraeglich nicht mehr aendern: das Pod-Netz, der controlPlaneEndpoint, das Service-Netz. Bei einem Cluster, auf dem noch nichts Produktives liegt, ist der Neuanfang schneller und sicherer als jede Reparatur.|Some things cannot be changed afterwards: the pod network, the controlPlaneEndpoint, the service network. On a cluster with nothing productive on it, starting over is faster and safer than any repair.",
        "**Die Reihenfolge ist wichtig: von aussen nach innen.** Erst alle Worker, dann die weiteren Hauptserver, zuletzt der erste Hauptserver. Wer den ersten Hauptserver zuerst zuruecksetzt, nimmt allen anderen die API — deren reset laeuft dann zwar durch, kann sich aber nicht mehr sauber aus dem Cluster abmelden.|**The order matters: from the outside in.** First all workers, then the further control-plane nodes, and the first control-plane node last. Resetting the first control-plane node first takes the API away from everyone else — their reset still runs, but can no longer deregister cleanly."],
     items:[
@@ -5408,6 +5434,7 @@ function tenantGuide(raw){
 
   /* --- 9. Zurücknehmen --- */
   sec("Wieder wegnehmen|Taking it back", "admin", {
+    back:true,
     p:["Der Weg hinaus ist kürzer als der hinein, hat aber eine scharfe Kante: `kubectl delete namespace` löscht **alles** darin — Deployments, Secrets, PVCs. Ob die Daten hinter den PVCs mitgehen, entscheidet die reclaimPolicy der StorageClass.|The way out is shorter than the way in but has a sharp edge: `kubectl delete namespace` deletes **everything** inside — deployments, secrets, PVCs. Whether the data behind the PVCs goes with them is decided by the storage class's reclaim policy."],
     items:[
       {c:"kubectl delete rolebinding " + o.user + "-" + TENANT_ROLE[o.level] + " -n " + o.ns,
@@ -5810,15 +5837,21 @@ const ROLE_SLUG = {
 function ansiblePlays(){
   const de = LANG === "de";
   const teile = [];
-  let letzteRolle = null, akt = null;
-  clusterGuideOf().forEach((s, i) => {
-    if (s.role !== letzteRolle){
+  let letzteRolle = null, letzterBack = null, akt = null;
+  /* Abschnitte ohne Befehle sind reine Erläuterung und haben im Playbook nichts verloren. */
+  clusterGuideOf().filter(s => (s.items || []).length).forEach((s, i) => {
+    const back = !!s.back;
+    /* Der Rückbau bekommt ein eigenes Play — sonst legt site.yml alles an
+       und löscht es in derselben Runde wieder. */
+    if (s.role !== letzteRolle || back !== letzterBack){
       const host = ROLE_HOSTS[s.role] || "localhost";
-      akt = {rolle:s.role, host:host, slug:ROLE_SLUG[s.role] || "tasks",
+      akt = {rolle:s.role, host:host, back:back,
+             slug:back ? "teardown" : (ROLE_SLUG[s.role] || "tasks"),
              nr:teile.length + 1, titel:t(CLUSTER_ROLE[s.role]), abschnitte:[], text:""};
       teile.push(akt);
-      letzteRolle = s.role;
-      akt.text = "- name: " + ynString((de ? "Teil " : "Part ") + akt.nr + " · " + akt.titel) + "\n" +
+      letzteRolle = s.role; letzterBack = back;
+      akt.text = "- name: " + ynString((de ? "Teil " : "Part ") + akt.nr + " · " +
+                   (back ? (de ? "Rückbau — " : "Teardown — ") : "") + akt.titel) + "\n" +
                  "  hosts: " + host + "\n" +
                  (host === "localhost" ? "  connection: local\n  gather_facts: false\n" : "  gather_facts: true\n") +
                  "  tasks:\n";
@@ -5855,12 +5888,20 @@ function ansibleBundle(){
     "# " + (de ? "einzeln laufen lassen" : "run on its own") + ": ansible-playbook -i inventory.ini " + x.datei + "\n" +
     "---\n" + x.text}));
 
+  const rueck = teile.filter(x => x.back);
   dateien.unshift({name:"site.yml", text:
     "# " + modus + " — " + (de ? "alles der Reihe nach" : "everything in order") + "\n" +
     "#   ansible-playbook -i inventory.ini site.yml\n" +
     "# " + (de ? "Nur ein Teil" : "A single part") + ":\n" +
     "#   ansible-playbook -i inventory.ini " + (teile[0] ? teile[0].datei : "01-tasks.yml") + "\n" +
-    "---\n" + teile.map(x => "- import_playbook: " + x.datei + "\n").join("")});
+    (rueck.length
+      ? "#\n# " + (de ? "Der Rückbau steht am Ende und ist bewusst auskommentiert." :
+                         "The teardown sits at the end and is deliberately commented out.") + "\n"
+      : "") +
+    "---\n" +
+    teile.filter(x => !x.back).map(x => "- import_playbook: " + x.datei + "\n").join("") +
+    rueck.map(x => "\n# " + (de ? "Rückbau, löscht was oben entsteht" : "Teardown, deletes what is created above") +
+                   ":\n# - import_playbook: " + x.datei + "\n").join("")});
 
   dateien.push({name:"inventory.ini", text:
     "; " + (de ? "Namen durch die eigenen ersetzen." : "Replace the names with your own.") + "\n" +
@@ -5873,13 +5914,14 @@ function ansibleBundle(){
     (de ? "Erzeugt mit dem k8s-wizard. Ein Playbook je Rolle, `site.yml` ruft sie der Reihe nach auf.\n"
         : "Generated with the k8s wizard. One playbook per role; `site.yml` calls them in order.\n") + "\n" +
     "| " + (de ? "Datei" : "File") + " | hosts | " + (de ? "Inhalt" : "Contents") + " |\n|---|---|---|\n" +
-    teile.map(x => "| `" + x.datei + "` | `" + x.host + "` | " + x.abschnitte.join(", ") + " |\n").join("") + "\n" +
+    teile.map(x => "| `" + x.datei + "` | `" + x.host + "` | " +
+      (x.back ? (de ? "**Rückbau** — " : "**Teardown** — ") : "") + x.abschnitte.join(", ") + " |\n").join("") + "\n" +
     (de
       ? "## Vor dem ersten Lauf\n\n" +
         "```sh\nansible-galaxy collection install kubernetes.core\npip install kubernetes\n```\n\n" +
         "## Was du noch anfassen musst\n\n" +
         "- Platzhalter in Großbuchstaben — `<TOKEN>`, `<HASH>`, `NODE-1`, `HIER-DAS-KENNWORT` — ersetzen.\n" +
-        "- Der letzte Teil kann den Rückbau enthalten. Vor dem Lauf ansehen und gegebenenfalls aus `site.yml` nehmen.\n" +
+        "- Der Rückbau steht in einer eigenen Datei und ist in `site.yml` auskommentiert. Er löscht, was die übrigen Teile anlegen.\n" +
         "- Erst mit `--check --diff` probieren.\n\n" +
         "## Wie es gebaut ist\n\n" +
         "YAML-Manifeste laufen über `kubernetes.core.k8s` und sind wiederholbar. Alles andere steht als\n" +
@@ -5889,7 +5931,7 @@ function ansibleBundle(){
         "```sh\nansible-galaxy collection install kubernetes.core\npip install kubernetes\n```\n\n" +
         "## What you still have to touch\n\n" +
         "- Replace the placeholders in capitals — `<TOKEN>`, `<HASH>`, `NODE-1`, `HIER-DAS-KENNWORT`.\n" +
-        "- The last part may contain the teardown. Look at it and drop it from `site.yml` if need be.\n" +
+        "- The teardown sits in a file of its own and is commented out in `site.yml`. It deletes what the other parts create.\n" +
         "- Try it with `--check --diff` first.\n\n" +
         "## How it is built\n\n" +
         "YAML manifests run through `kubernetes.core.k8s` and are repeatable. Everything else appears as a\n" +
