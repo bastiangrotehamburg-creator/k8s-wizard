@@ -4404,6 +4404,59 @@ function runSelfTests(){
     const b = ansibleBundle(); CLUSTER_MODE = keep; return b;
   })();
   const bNamen = bundleTest.map(f => f.name);
+  const up = upgradeGuide({von:"1.33", nach:"1.34", cps:3, etcd:true, cni:true});
+  const upTxt = up.map(s => s.items.map(i => i.c).join(" ")).join(" ");
+  ok("Upgrade: apply nur einmal, node für die weiteren",
+    upTxt.indexOf("kubeadm upgrade apply v1.34") !== -1 &&
+    upTxt.split("kubeadm upgrade apply").length === 2 &&
+    upTxt.indexOf("kubeadm upgrade node") !== -1, "");
+  ok("Upgrade: Reihenfolge Steuerungsebene vor Worker",
+    (function(){
+      const h = up.map(s => t(s.h));
+      return h.indexOf("Erster Hauptserver") < h.indexOf("Die Worker");
+    })(), "");
+  ok("Upgrade: ein Sprung über zwei Minor-Versionen ist ein Fehler",
+    upgradeGuide({von:"1.32", nach:"1.34"})[0].r.some(x => x.lvl === "err") &&
+    !upgradeGuide({von:"1.33", nach:"1.34"})[0].r.some(x => x.lvl === "err"), "");
+  ok("Upgrade: rückwärts ist ebenfalls ein Fehler",
+    upgradeGuide({von:"1.34", nach:"1.33"})[0].r.some(x => x.lvl === "err"), "");
+  ok("Upgrade: die Zielversion wird ohne Angabe hochgezählt",
+    upgradeOpts({von:"1.33"}).nach === "1.34" && upgradeOpts({von:"v1.33.4"}).von === "1.33", "");
+  ok("Upgrade: weitere Hauptserver nur bei mehreren",
+    upgradeGuide({cps:3}).some(s => t(s.h).indexOf("Weitere Hauptserver") === 0) &&
+    !upgradeGuide({cps:1}).some(s => t(s.h).indexOf("Weitere Hauptserver") === 0), "");
+  ok("Upgrade: die Paketquelle zieht auf die Zielversion um",
+    upTxt.indexOf("/v1.34/") !== -1, "");
+  ok("Upgrade: apply und node landen in getrennten Plays",
+    (function(){
+      const keep = {m:CLUSTER_MODE, u:UPGRADE};
+      CLUSTER_MODE = "upgrade"; UPGRADE = {von:"1.33", cps:3};
+      const b = ansibleBundle();
+      CLUSTER_MODE = keep.m; UPGRADE = keep.u;
+      const erst = b.filter(f => f.text.indexOf("hosts: k8s_control_plane[0]") !== -1 &&
+                                 f.text.indexOf("kubeadm upgrade apply") !== -1);
+      const weiter = b.filter(f => f.text.indexOf("hosts: k8s_control_plane[1:]") !== -1);
+      return erst.length === 1 && weiter.length === 1 &&
+             erst[0].text.indexOf("hosts: k8s_control_plane[1:]") === -1 &&
+             weiter[0].text.indexOf("kubeadm upgrade apply") === -1;
+    })(), "");
+  ok("Upgrade: weitere Hauptserver und Worker laufen einzeln",
+    (function(){
+      const keep = {m:CLUSTER_MODE, u:UPGRADE};
+      CLUSTER_MODE = "upgrade"; UPGRADE = {von:"1.33", cps:3};
+      const b = ansibleBundle();
+      CLUSTER_MODE = keep.m; UPGRADE = keep.u;
+      return b.filter(f => f.text.indexOf("  serial: 1") !== -1).length === 2;
+    })(), "");
+  ok("Upgrade: der Rückweg ist als Rückbau markiert und nicht in site.yml",
+    (function(){
+      const keep = {m:CLUSTER_MODE, u:UPGRADE};
+      CLUSTER_MODE = "upgrade"; UPGRADE = {von:"1.33", etcd:true};
+      const b = ansibleBundle();
+      CLUSTER_MODE = keep.m; UPGRADE = keep.u;
+      const r = b.map(f => f.name).filter(n => n.indexOf("-teardown.yml") !== -1);
+      return r.length === 1 && b[0].text.indexOf("# - import_playbook: " + r[0]) !== -1;
+    })(), "");
   ok("Einzelbezug: die Liste kennt jede Datei des Bündels",
     (function(){
       const keep = {m:CLUSTER_MODE, o:YML_OFFEN};
@@ -5716,9 +5769,215 @@ function metallbGuide(raw){
   return out;
 }
 
+/* ---------- Cluster aktualisieren ----------
+   Der Vorgang, bei dem die Reihenfolge wirklich zählt: erst die Steuerungsebene,
+   dann die Worker, und immer nur eine Minor-Version auf einmal. */
+const UPGRADE_FIELDS = [
+  {k:"von", t:"text", l:"Von Version|From version", ph:"1.33", half:true,
+   hint:"Was `kubectl get nodes` heute in der Spalte VERSION zeigt.|What `kubectl get nodes` shows today in the VERSION column."},
+  {k:"nach", t:"text", l:"Auf Version|To version", ph:"1.34", half:true, structural:true,
+   hint:"Immer nur **eine** Minor-Version weiter. Zwei Sprünge auf einmal lehnt kubeadm ab.|Always only **one** minor version further. kubeadm refuses two jumps at once."},
+  {k:"os", t:"select", l:"Betriebssystem|Operating system", half:true, structural:true,
+   opts:[["apt","Debian / Ubuntu"],["dnf","RHEL / Rocky / AlmaLinux"]]},
+  {k:"cps", t:"number", l:"Anzahl Hauptserver|Control-plane nodes", ph:"1", half:true, structural:true},
+  {k:"workers", t:"number", l:"Anzahl Worker|Number of workers", ph:"3", half:true},
+  {k:"etcd", t:"bool", l:"Vorher etcd sichern|Back up etcd first",
+   hint:"Der einzige Weg zurück, wenn die Steuerungsebene nach dem Upgrade nicht mehr hochkommt.|The only way back if the control plane does not come up after the upgrade."},
+  {k:"cni", t:"bool", l:"CNI und Zusätze mit prüfen|Check CNI and add-ons too",
+   hint:"Calico, Cilium, MetalLB und metrics-server haben eigene Verträglichkeitslisten.|Calico, Cilium, MetalLB and metrics-server have compatibility lists of their own."}
+];
+
+function upgradeOpts(o){
+  const kurz = v => String(v || "").replace(/^v/, "").split(".").slice(0, 2).join(".");
+  const von = kurz(o.von) || "1.33";
+  let nach = kurz(o.nach);
+  if (!nach){
+    const teile = von.split(".");
+    nach = teile[0] + "." + (parseInt(teile[1], 10) + 1);
+  }
+  return {
+    von: von, nach: nach, os: o.os || "apt",
+    cps: num(o.cps) === undefined ? 1 : num(o.cps),
+    workers: num(o.workers) === undefined ? 3 : num(o.workers),
+    etcd: !!o.etcd, cni: !!o.cni,
+    /* Wie weit der Sprung ist — daraus entsteht die Warnung. */
+    sprung: (function(){
+      const a = von.split("."), b = nach.split(".");
+      if (a.length < 2 || b.length < 2) return 1;
+      return (parseInt(b[0], 10) - parseInt(a[0], 10)) * 100 + (parseInt(b[1], 10) - parseInt(a[1], 10));
+    })()
+  };
+}
+
+function upgradeGuide(raw){
+  const o = upgradeOpts(raw);
+  const apt = o.os === "apt";
+  const out = [];
+  const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
+  const halten = (paket) => apt
+    ? "sudo apt-mark hold " + paket
+    : "# in /etc/yum.repos.d/kubernetes.repo:  exclude=" + paket;
+  const quelle = apt
+    ? "sudo sed -i 's|/v1\\.[0-9]*/|/v" + o.nach + "/|' /etc/apt/sources.list.d/kubernetes.list\nsudo apt-get update"
+    : "sudo sed -i 's|/v1\\.[0-9]*/|/v" + o.nach + "/|g' /etc/yum.repos.d/kubernetes.repo\nsudo dnf makecache";
+  const inst = (paket, ver) => apt
+    ? "sudo apt-mark unhold " + paket + " && \\\n  sudo apt-get install -y " + paket + "='" + ver + "-*' && \\\n  sudo apt-mark hold " + paket
+    : "sudo dnf install -y " + paket + "-'" + ver + ".*' --disableexcludes=kubernetes";
+
+  /* --- 1. Vorher --- */
+  sec("Vorher: was gilt und was geht|First: what holds and what works", "admin", {
+    p:["Ein Upgrade ist kein Befehl, sondern eine Reihenfolge. Die Steuerungsebene geht zuerst, die Worker danach — nie umgekehrt. Der kubelet darf dem API-Server bis zu drei Minor-Versionen **hinterher** sein, ihm aber niemals vorauslaufen.|An upgrade is not a command but an order of operations. The control plane goes first, the workers after — never the other way round. The kubelet may trail the API server by up to three minor versions but must never lead it.",
+       "Und immer nur eine Minor-Version auf einmal. Von " + o.von + " auf " + o.nach + " geht direkt; wer zwei Schritte überspringen will, macht zwei Durchläufe.|And always only one minor version at a time. From " + o.von + " to " + o.nach + " works directly; skipping two steps means two passes."],
+    items:[
+      {c:"kubectl get nodes -o wide\nkubectl version -o yaml | grep -A2 serverVersion",
+       d:"Der Ist-Zustand. Stehen die Knoten auf unterschiedlichen Versionen, ist ein früheres Upgrade steckengeblieben — das gehört zuerst zu Ende gebracht.|The current state. If the nodes sit on different versions, an earlier upgrade got stuck — that has to be finished first."},
+      {c:"kubectl get pods -A --field-selector=status.phase!=Running\nkubectl get pdb -A",
+       d:"Was jetzt schon nicht läuft, läuft nachher erst recht nicht. Und ein PodDisruptionBudget, das keine Störung erlaubt, blockiert später das Leeren des Knotens — der drain hängt dann still.|What is broken now will be more broken later. And a PodDisruptionBudget that allows no disruption blocks the node drain later — the drain then hangs silently."},
+      {c:apt ? "apt-cache madison kubeadm | grep " + o.nach : "dnf --showduplicates list kubeadm | grep " + o.nach,
+       d:"Zeigt, welche Fassungen der Zielversion die Paketquelle überhaupt kennt. Kommt nichts zurück, zeigt die Quelle noch auf die alte Minor-Version — das ändert der nächste Schritt.|Shows which builds of the target version the repository knows at all. If nothing comes back, the repository still points at the old minor version — the next step changes that."}
+    ],
+    r:(o.sprung > 1 || o.sprung < 1
+        ? [{lvl:"err", m:t("Von " + o.von + " auf " + o.nach + " ist kein einzelner Schritt. kubeadm lässt genau eine Minor-Version zu und bricht sonst mit \"specified version to upgrade to is too high\" ab. Rückwärts geht gar nicht. Mach es in Etappen, jede mit eigenem Durchlauf und eigener Prüfung.|From " + o.von + " to " + o.nach + " is not a single step. kubeadm allows exactly one minor version and otherwise aborts with \"specified version to upgrade to is too high\". Backwards does not work at all. Do it in stages, each with its own pass and its own check.")}]
+        : [])
+      .concat([{lvl:"warn", m:t("Vor dem Upgrade die Änderungshinweise der Zielversion lesen — dort stehen entfernte APIs. Was in " + o.nach + " wegfällt, macht nach dem Upgrade Deployments unbrauchbar, die vorher liefen. kubectl api-resources und der pluto- oder kubent-Prüfer finden solche Stellen vorher.|Read the release notes of the target version first — removed APIs are listed there. What disappears in " + o.nach + " renders deployments unusable that worked before. kubectl api-resources and the pluto or kubent checkers find such places beforehand.")}])
+  });
+
+  /* --- 2. etcd sichern --- */
+  if (o.etcd){
+    sec("etcd sichern|Backing up etcd", "cp", {
+      hosts:"k8s_control_plane[0]",
+      p:["Die einzige Versicherung, die es hier gibt. Geht die Steuerungsebene nach dem Upgrade nicht mehr hoch, ist dieser Schnappschuss der Weg zurück — sonst bleibt nur der Neuaufbau.|The only insurance there is here. If the control plane does not come back up after the upgrade, this snapshot is the way back — otherwise only a rebuild remains."],
+      items:[
+        {c:"sudo ETCDCTL_API=3 etcdctl \\\n  --endpoints=https://127.0.0.1:2379 \\\n  --cacert=/etc/kubernetes/pki/etcd/ca.crt \\\n  --cert=/etc/kubernetes/pki/etcd/server.crt \\\n  --key=/etc/kubernetes/pki/etcd/server.key \\\n  snapshot save /root/etcd-$(date +%F-%H%M).db",
+         d:"Auf einem Hauptserver. Fehlt etcdctl, liefert es das Paket etcd-client — oder man greift auf den laufenden Container zurück: kubectl -n kube-system exec etcd-HOSTNAME -- etcdctl ...|On a control-plane node. If etcdctl is missing, the etcd-client package provides it — or you reach into the running container: kubectl -n kube-system exec etcd-HOSTNAME -- etcdctl ..."},
+        {c:"sudo etcdutl snapshot status /root/etcd-*.db -w table\nsudo tar czf /root/pki-$(date +%F).tgz /etc/kubernetes/pki",
+         d:"Erst prüfen, dann weitermachen. Die zweite Zeile sichert die Zertifikate mit — ohne sie nützt der Schnappschuss wenig, weil der neue etcd sonst niemandem mehr traut.|Check first, then continue. The second line also saves the certificates — without them the snapshot is of little use, because the new etcd would trust nobody."},
+        {c:"scp k8s-cp1:/root/etcd-*.db ./\nscp k8s-cp1:/root/pki-*.tgz ./",
+         d:"Vom Server herunterholen. Eine Sicherung, die auf derselben Maschine liegt wie das, was sie sichern soll, ist keine.|Fetch it off the server. A backup that sits on the same machine as the thing it backs up is not one."}
+      ],
+      r:[{lvl:"warn", m:t("Der Schnappschuss enthält jedes Secret des Clusters im Klartext. Er gehört verschlüsselt aufbewahrt und nicht in ein Repository.|The snapshot contains every secret in the cluster in plain text. Keep it encrypted and out of any repository.")}]
+    });
+  }
+
+  /* --- 3. erster Hauptserver --- */
+  sec("Erster Hauptserver|First control-plane node", "cp", {
+    hosts:"k8s_control_plane[0]",
+    p:["Hier entscheidet sich alles. Auf **einem** Hauptserver, und erst wenn dieser durch ist, kommen die anderen.|Everything is decided here. On **one** control-plane node, and only once that one is through do the others follow."],
+    items:[
+      {c:quelle,
+       d:"Die Paketquelle ist auf die alte Minor-Version festgenagelt — pkgs.k8s.io führt je Minor-Version eine eigene. Ohne diesen Schritt findet der Paketmanager die neue Fassung gar nicht.|The repository is pinned to the old minor version — pkgs.k8s.io keeps a separate one per minor version. Without this step the package manager does not find the new build at all."},
+      {c:inst("kubeadm", o.nach) + "\nkubeadm version -o short",
+       d:"Nur kubeadm, noch nicht kubelet. Die Ausgabe muss v" + o.nach + " zeigen, bevor es weitergeht.|Only kubeadm, not the kubelet yet. The output has to show v" + o.nach + " before continuing."},
+      {c:"sudo kubeadm upgrade plan",
+       d:"Sagt, was passieren würde, und prüft die Vorbedingungen. Diese Ausgabe lohnt sich zu lesen — sie nennt auch, ob Zertifikate im Zuge des Upgrades erneuert werden.|Says what would happen and checks the preconditions. This output is worth reading — it also says whether certificates get renewed along the way."},
+      {c:"sudo kubeadm upgrade apply v" + o.nach,
+       d:"Der eigentliche Schritt. Tauscht die statischen Pods der Steuerungsebene aus: API-Server, Controller-Manager, Scheduler, etcd. Der kubelet dieses Knotens bleibt vorerst alt — das ist erlaubt und beabsichtigt.|The actual step. Replaces the control plane's static pods: API server, controller manager, scheduler, etcd. This node's kubelet stays old for now — that is allowed and intended."},
+      {c:"kubectl drain " + "k8s-cp1" + " --ignore-daemonsets\n" +
+         inst("kubelet", o.nach) + "\n" + inst("kubectl", o.nach) +
+         "\nsudo systemctl daemon-reload && sudo systemctl restart kubelet\nkubectl uncordon k8s-cp1",
+       d:"Jetzt erst der kubelet. Das drain davor verschiebt die Pods, das uncordon danach lässt wieder welche zu. Zwischen beiden liegt der Neustart — ohne daemon-reload läuft der alte Dienst mit der alten Datei weiter.|Only now the kubelet. The drain before moves the pods away, the uncordon after lets new ones in. Between them lies the restart — without daemon-reload the old service keeps running with the old unit file."},
+      {c:"kubectl get nodes\nkubectl get pods -n kube-system",
+       d:"Der Knoten muss auf v" + o.nach + " stehen und Ready sein, alle Pods in kube-system laufen. Erst dann der nächste Hauptserver.|The node has to show v" + o.nach + " and be Ready, every pod in kube-system running. Only then the next control-plane node."}
+    ],
+    r:[{lvl:"err", m:t("kubeadm upgrade apply nur auf dem ersten Hauptserver. Auf allen weiteren heißt der Befehl kubeadm upgrade node — apply ein zweites Mal auszuführen ist der Fehler, der beim Upgrade mit mehreren Hauptservern am häufigsten passiert.|Run kubeadm upgrade apply on the first control-plane node only. On every further one the command is kubeadm upgrade node — running apply a second time is the mistake made most often when upgrading with several control-plane nodes.")}]
+      .concat(o.cps === 1 ? [{lvl:"warn", m:t("Mit einem einzelnen Hauptserver ist die API während des Austauschs der statischen Pods für ein bis zwei Minuten weg. Laufende Pods stört das nicht, aber kubectl antwortet in dieser Zeit nicht.|With a single control-plane node the API is gone for a minute or two while the static pods are replaced. Running pods are unaffected, but kubectl does not answer during that time.")}] : [])
+  });
+
+  /* --- 4. weitere Hauptserver --- */
+  if (o.cps > 1){
+    sec("Weitere Hauptserver|Further control-plane nodes", "cp", {
+      hosts:"k8s_control_plane[1:]",
+      serial:1,
+      p:["Auf jedem weiteren Hauptserver, einzeln nacheinander. Nie zwei gleichzeitig — etcd braucht durchgehend seine Mehrheit.|On every further control-plane node, one after another. Never two at once — etcd needs its majority throughout."],
+      items:[
+        {c:quelle + "\n" + inst("kubeadm", o.nach),
+         d:"Dieselbe Paketquelle, dasselbe kubeadm wie auf dem ersten.|The same repository, the same kubeadm as on the first one."},
+        {c:"sudo kubeadm upgrade node",
+         d:"Ohne Versionsangabe und ohne plan. Der Knoten holt sich, was der Cluster inzwischen ist.|Without a version and without plan. The node picks up what the cluster has become in the meantime."},
+        {c:"kubectl drain KNOTEN --ignore-daemonsets\n" +
+           inst("kubelet", o.nach) + "\n" + inst("kubectl", o.nach) +
+           "\nsudo systemctl daemon-reload && sudo systemctl restart kubelet\nkubectl uncordon KNOTEN",
+         d:"Wie beim ersten. Danach kubectl get nodes und erst weiter, wenn dieser Knoten Ready ist.|As on the first one. Then kubectl get nodes, and continue only once this node is Ready."}
+      ],
+      r:[{lvl:"err", m:t("Bei drei Hauptservern darf immer nur einer außer Betrieb sein. Nimmt man zwei gleichzeitig herunter, verliert etcd die Mehrheit — die API ist dann weg, bis genug Knoten zurück sind, und im schlimmsten Fall bleibt der Cluster in diesem Zustand stehen.|With three control-plane nodes only one may ever be out of service. Taking two down at once costs etcd its majority — the API is then gone until enough nodes return, and in the worst case the cluster stays that way.")}]
+    });
+  }
+
+  /* --- 5. Worker --- */
+  sec("Die Worker|The workers", "worker", {
+    serial:1,
+    p:[(o.workers ? "Auf allen " + o.workers + " Workern" : "Auf jedem Worker") + " — einzeln, nicht alle auf einmal. Zwischen zwei Knoten sollte die Arbeitslast wieder stehen.|" +
+       (o.workers ? "On all " + o.workers + " workers" : "On every worker") + " — one at a time, not all at once. Between two nodes the workload should be back up."],
+    items:[
+      {c:"kubectl drain KNOTEN --ignore-daemonsets --delete-emptydir-data",
+       d:"Von der Verwalter-Maschine aus, nicht auf dem Worker. Hängt der Befehl, blockiert meist ein PodDisruptionBudget oder ein Pod mit ReadWriteOnce-Volume, das nirgendwo anders hinkann.|From the admin machine, not on the worker. If the command hangs, usually a PodDisruptionBudget or a pod with a ReadWriteOnce volume that cannot go anywhere else is blocking it."},
+      {c:quelle + "\n" + inst("kubeadm", o.nach) + "\nsudo kubeadm upgrade node",
+       d:"Auf dem Worker. upgrade node schreibt hier nur die kubelet-Konfiguration neu — Steuerungsebene ist keine da.|On the worker. Here upgrade node only rewrites the kubelet configuration — there is no control plane on it."},
+      {c:inst("kubelet", o.nach) + "\nsudo systemctl daemon-reload && sudo systemctl restart kubelet",
+       d:"kubectl gehört nicht auf den Worker und wird deshalb hier auch nicht mit aktualisiert.|kubectl does not belong on the worker and is therefore not updated here."},
+      {c:"kubectl uncordon KNOTEN\nkubectl get nodes -o wide",
+       d:"Erst wenn dieser Knoten wieder Ready ist und Pods annimmt, kommt der nächste dran.|Only once this node is Ready again and accepting pods does the next one follow."}
+    ],
+    r:[{lvl:"warn", m:t("Ohne --delete-emptydir-data weigert sich drain, sobald ein Pod ein emptyDir benutzt — und das tun mehr Pods, als man denkt. Die Zwischendaten darin gehen verloren, was der Sinn von emptyDir ist.|Without --delete-emptydir-data the drain refuses as soon as a pod uses an emptyDir — and more pods do than you think. The scratch data in it is lost, which is what emptyDir is for.")},
+       {lvl:"warn", m:t("Genug Luft im Cluster einplanen: Während ein Knoten leer ist, müssen seine Pods woanders Platz finden. Bei drei Knoten am Anschlag bleibt beim Leeren des ersten schon die Hälfte in Pending.|Plan for enough headroom: while one node is empty its pods have to find room elsewhere. With three nodes at their limit, draining the first already leaves half of them Pending.")}]
+  });
+
+  /* --- 6. Zusätze --- */
+  if (o.cni){
+    sec("CNI und Zusätze|CNI and add-ons", "admin", {
+      p:["Kubernetes aktualisiert nur sich selbst. Alles, was per Manifest oder Helm dazugekommen ist, bleibt auf seinem Stand — und hat eine eigene Liste, mit welchen Kubernetes-Versionen es zusammenarbeitet.|Kubernetes updates only itself. Everything added by manifest or Helm stays where it was — and has its own list of which Kubernetes versions it works with."],
+      table:[["Zusatz|Add-on","Woran man den Stand sieht|Where to see its state","Was schiefgeht|What goes wrong"],
+        ["CNI (Calico, Cilium)","kubectl -n kube-system get ds -o wide","Knoten bleiben NotReady, CoreDNS hängt in Pending|Nodes stay NotReady, CoreDNS sits in Pending"],
+        ["metrics-server","kubectl -n kube-system get deploy metrics-server","kubectl top schweigt, HPA skaliert nie|kubectl top says nothing, the HPA never scales"],
+        ["ingress-nginx","kubectl -n ingress-nginx get deploy","Ingress-Objekte werden angenommen und nicht bedient|Ingress objects are accepted and never served"],
+        ["MetalLB","kubectl -n metallb-system get pods","EXTERNAL-IP bleibt pending|EXTERNAL-IP stays pending"]],
+      items:[
+        {c:"kubectl get ds,deploy -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image \\\n  | grep -Ev '^kube-system\\s+(kube-proxy|coredns)'",
+         d:"Was im Cluster läuft und nicht von kubeadm stammt. Diese Liste gegen die Verträglichkeitshinweise der jeweiligen Projekte halten.|What runs in the cluster and does not come from kubeadm. Hold this list against each project's compatibility notes."},
+        {c:"kubectl get --raw /metrics | head -1\nkubectl top nodes\nkubectl -n kube-system logs -l k8s-app=kube-dns --tail=20",
+         d:"Drei schnelle Proben nach dem Upgrade: API antwortet, Kennzahlen kommen an, DNS arbeitet.|Three quick probes after the upgrade: the API answers, metrics arrive, DNS works."}
+      ],
+      r:[{lvl:"warn", m:t("kube-proxy und CoreDNS aktualisiert kubeadm mit — alles andere nicht. Wer das übersieht, sucht die Ursache später bei Kubernetes statt beim Zusatz.|kubeadm updates kube-proxy and CoreDNS along the way — nothing else. Overlooking that means later searching for the cause in Kubernetes instead of in the add-on.")}]
+    });
+  }
+
+  /* --- 7. Abnahme --- */
+  sec("Abnahme|Acceptance", "admin", {
+    p:["Nach dem letzten Knoten, nicht zwischendurch.|After the last node, not in between."],
+    items:[
+      {c:"kubectl get nodes -o wide\nkubectl get pods -A | grep -v Running | grep -v Completed",
+       d:"Alle Knoten auf v" + o.nach + " und Ready, keine Pods außerhalb von Running oder Completed.|Every node on v" + o.nach + " and Ready, no pods outside Running or Completed."},
+      {c:"kubectl run dnstest --image=busybox:1.36 --restart=Never --rm -it -- \\\n  nslookup kubernetes.default.svc.cluster.local",
+       d:"Der vollständige Name mit Absicht: BusyBox wertet die search-Liste nicht zuverlässig aus. Erwartung: Address 10.96.0.1.|The full name deliberately: BusyBox does not apply the search list reliably. Expected: Address 10.96.0.1."},
+      {c:"kubeadm certs check-expiration",
+       d:"Auf einem Hauptserver. kubeadm erneuert die Zertifikate beim Upgrade — hier steht schwarz auf weiß, ob es geklappt hat und wie lange sie noch gelten.|On a control-plane node. kubeadm renews the certificates during the upgrade — here you see in black and white whether it worked and how long they are valid."},
+      {c:"kubectl get events -A --sort-by=.lastTimestamp | tail -30",
+       d:"Was der Cluster in der letzten Stunde zu meckern hatte. Nach einem Upgrade lohnt der Blick, auch wenn oben alles grün aussieht.|What the cluster had to complain about in the last hour. After an upgrade this is worth a look even when everything above looks green."}
+    ],
+    r:[{lvl:"warn", m:t("Die Paketverwaltung steht danach wieder auf hold. Das ist Absicht: Ohne die Sperre zieht das nächste beiläufige Systemupdate den kubelet auf eine Version, die die Steuerungsebene nicht mitmacht.|The package manager is on hold again afterwards. That is deliberate: without the lock, the next casual system update pulls the kubelet to a version the control plane will not go along with.")}]
+  });
+
+  /* --- 8. Wenn es schiefgeht --- */
+  sec("Wenn es schiefgeht|When it goes wrong", "cp", {
+    back:true,
+    hosts:"k8s_control_plane[0]",
+    p:["Zurück geht nur die Steuerungsebene, und auch die nur über den etcd-Schnappschuss. Ein `kubeadm upgrade apply` auf eine ältere Version lehnt kubeadm ab.|Only the control plane can go back, and even that only through the etcd snapshot. kubeadm refuses an upgrade apply onto an older version."],
+    items:[
+      {c:"sudo systemctl stop kubelet\nsudo mv /var/lib/etcd /var/lib/etcd.alt\nsudo ETCDCTL_API=3 etcdutl snapshot restore /root/etcd-DATUM.db \\\n  --data-dir /var/lib/etcd\nsudo systemctl start kubelet",
+       d:"Auf dem Hauptserver, mit dem Schnappschuss von vorhin. Bei mehreren Hauptservern muss das auf allen geschehen und die Cluster-Mitglieder müssen dabei zusammenpassen — das ist der Teil, der ohne Übung selten beim ersten Mal gelingt.|On the control-plane node, with the snapshot from before. With several control-plane nodes this has to happen on all of them and the cluster members have to match — that is the part that rarely succeeds first time without practice."},
+      {c:"sudo crictl ps -a --name kube-apiserver\nsudo crictl logs $(sudo crictl ps -a --name kube-apiserver -q | head -1) 2>&1 | tail -40\nsudo journalctl -u kubelet -n 80 --no-pager",
+       d:"Vorher aber das hier: Meistens ist es kein Fall für die Sicherung, sondern ein Abbild, das nicht geladen werden kann, oder eine Datei unter /etc/kubernetes/manifests mit einem Tippfehler.|But this first: usually it is not a case for the backup but an image that cannot be pulled, or a file under /etc/kubernetes/manifests with a typo."}
+    ],
+    r:[{lvl:"err", m:t("Ein Downgrade des kubelet auf eine ältere Minor-Version ist nicht vorgesehen und beschädigt den Knoten häufiger, als dass es hilft. Der übliche Weg zurück ist: Knoten aus dem Cluster nehmen, neu aufsetzen, neu beitreten.|Downgrading the kubelet to an older minor version is not supported and damages the node more often than it helps. The usual way back is: take the node out of the cluster, reinstall it, rejoin.")}]
+  });
+
+  return out;
+}
+
 let CLUSTER = {};
 let TENANT = {};
 let METALLB = {autoAssign:true};
+let UPGRADE = {};
 let CLUSTER_MODE = "install";
 let YML_DATEIEN = [];
 
@@ -5742,7 +6001,10 @@ const CLUSTER_MODES = {
             tar:"benutzer-namespace-ansible.tar"},
   metallb: {fields:() => METALLB_FIELDS, state:() => METALLB, guide:() => metallbGuide(METALLB),
             file:"metallb.md", yml:"metallb.yml",
-            tar:"metallb-ansible.tar"}
+            tar:"metallb-ansible.tar"},
+  upgrade: {fields:() => UPGRADE_FIELDS, state:() => UPGRADE, guide:() => upgradeGuide(UPGRADE),
+            file:"cluster-upgrade.md", yml:"cluster-upgrade.yml",
+            tar:"cluster-upgrade-ansible.tar"}
 };
 function clusterModeOf(){ return CLUSTER_MODES[CLUSTER_MODE] || CLUSTER_MODES.install; }
 function clusterFieldsOf(){ return clusterModeOf().fields(); }
@@ -5906,22 +6168,26 @@ const ROLE_SLUG = {
 function ansiblePlays(){
   const de = LANG === "de";
   const teile = [];
-  let letzteRolle = null, letzterBack = null, akt = null;
+  let letzteRolle = null, letzterBack = null, letzterHost = null, akt = null;
   /* Abschnitte ohne Befehle sind reine Erläuterung und haben im Playbook nichts verloren. */
   clusterGuideOf().filter(s => (s.items || []).length).forEach((s, i) => {
     const back = !!s.back;
+    /* hosts schlägt die Rolle: Beim Upgrade sind "erster Hauptserver" und
+       "weitere Hauptserver" dieselbe Rolle, aber verschiedene Maschinen. */
+    const wunsch = s.hosts || ROLE_HOSTS[s.role] || "localhost";
     /* Der Rückbau bekommt ein eigenes Play — sonst legt site.yml alles an
        und löscht es in derselben Runde wieder. */
-    if (s.role !== letzteRolle || back !== letzterBack){
-      const host = ROLE_HOSTS[s.role] || "localhost";
+    if (s.role !== letzteRolle || back !== letzterBack || wunsch !== letzterHost){
+      const host = wunsch;
       akt = {rolle:s.role, host:host, back:back,
              slug:back ? "teardown" : (ROLE_SLUG[s.role] || "tasks"),
              nr:teile.length + 1, titel:t(CLUSTER_ROLE[s.role]), abschnitte:[], text:""};
       teile.push(akt);
-      letzteRolle = s.role; letzterBack = back;
+      letzteRolle = s.role; letzterBack = back; letzterHost = wunsch;
       akt.text = "- name: " + ynString((de ? "Teil " : "Part ") + akt.nr + " · " +
                    (back ? (de ? "Rückbau — " : "Teardown — ") : "") + akt.titel) + "\n" +
                  "  hosts: " + host + "\n" +
+                 (s.serial ? "  serial: " + s.serial + "\n" : "") +
                  (host === "localhost" ? "  connection: local\n  gather_facts: false\n" : "  gather_facts: true\n") +
                  "  tasks:\n";
     }
@@ -6454,16 +6720,18 @@ function guideMarkdown(guide){
   return m;
 }
 
-const CLUSTER_TABS = {install:"tabInstall", tenant:"tabTenant", metallb:"tabMetallb"};
+const CLUSTER_TABS = {install:"tabInstall", tenant:"tabTenant", metallb:"tabMetallb", upgrade:"tabUpgrade"};
 const CLUSTER_TAB_LABEL = {
   install:"Installation|Installation",
   tenant: "Benutzer & Namespace|Users & namespaces",
-  metallb:"MetalLB|MetalLB"
+  metallb:"MetalLB|MetalLB",
+  upgrade:"Upgrade|Upgrade"
 };
 const CLUSTER_DESC = {
   install:"Erzeugt eine Anleitung mit kubeadm — für einen neuen Cluster oder für einen Knoten, der zu einem laufenden dazukommt. Jeder Abschnitt sagt, auf welcher Maschine er auszuführen ist. Klick kopiert den Befehl.|Builds a kubeadm guide — for a new cluster or for a node joining a running one. Every section says which machine it runs on. Click copies the command.",
   tenant: "Richtet einen abgegrenzten Arbeitsbereich ein: eigener Namespace, eigene Anmeldung, begrenzte Rechte — und den passenden Linux-Benutzer auf dem Hauptserver. Klick kopiert den Befehl.|Sets up a bounded workspace: its own namespace, its own sign-in, limited rights — and the matching Linux user on the control plane. Click copies the command.",
-  metallb:"Gibt Services vom Typ LoadBalancer eine echte Adresse aus dem eigenen Netz — die Rolle, die in der Cloud der Anbieter übernimmt. Klick kopiert den Befehl.|Gives services of type LoadBalancer a real address from your own network — the role the provider plays in the cloud. Click copies the command."
+  metallb:"Gibt Services vom Typ LoadBalancer eine echte Adresse aus dem eigenen Netz — die Rolle, die in der Cloud der Anbieter übernimmt. Klick kopiert den Befehl.|Gives services of type LoadBalancer a real address from your own network — the role the provider plays in the cloud. Click copies the command.",
+  upgrade:"Hebt den Cluster um eine Minor-Version — Steuerungsebene zuerst, Worker danach, immer nur einer auf einmal. Klick kopiert den Befehl.|Lifts the cluster by one minor version — control plane first, workers after, one at a time. Click copies the command."
 };
 function clusterTexts(){
   Object.keys(CLUSTER_TABS).forEach(m => {
