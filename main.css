@@ -605,7 +605,7 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
     display:grid;grid-template-columns:360px minmax(0,1fr);
     column-gap:30px;align-items:start;
   }
-  #clusterPanel .wikihead,#clusterPanel > .stepdesc{grid-column:1/-1}
+  #clusterPanel .wikihead,#clusterPanel > .stepdesc,#clusterPanel > .ymlnav{grid-column:1/-1}
   #clusterFields{
     position:sticky;top:0;align-self:start;
     max-height:calc(86vh - 130px);overflow:auto;padding-right:8px;
@@ -632,6 +632,23 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
 .crole--worker{background:var(--ok-bg);color:var(--ok)}
 .crole--admin{background:var(--accent-soft);color:var(--accent)}
 .crole--neu{background:var(--warn-bg);color:var(--warn)}
+
+/* ---------- Playbooks einzeln holen ---------- */
+.ymlnav{
+  display:flex;flex-wrap:wrap;gap:6px;align-items:center;
+  margin:0 0 18px;padding:13px 15px;border:1px solid var(--brd);
+  border-radius:var(--r);background:var(--surface);
+}
+.ymlnav p{flex:1 1 100%;margin:0;font-size:12px;line-height:1.55;color:var(--muted)}
+.ymlnav p + .ychip{margin-top:2px}
+.ychip{
+  border:1px solid var(--brd);background:var(--bg);color:var(--ink-2);
+  padding:5px 11px;border-radius:999px;cursor:pointer;
+  font-family:var(--mono);font-size:11.5px;
+  transition:background .12s,color .12s,border-color .12s;
+}
+.ychip:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.ychip--all{border-color:var(--accent);color:var(--accent);font-weight:640;font-family:inherit}
 .crole--user{background:var(--ok-bg);color:var(--ok)}
 /* white-space:pre ohne eigenes Scrollen zieht sonst das ganze Panel in die Breite. */
 .clusterout .cmd--big{white-space:pre;font-size:12px;line-height:1.6;max-width:100%;overflow-x:auto}

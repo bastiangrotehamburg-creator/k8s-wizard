@@ -4404,6 +4404,24 @@ function runSelfTests(){
     const b = ansibleBundle(); CLUSTER_MODE = keep; return b;
   })();
   const bNamen = bundleTest.map(f => f.name);
+  ok("Einzelbezug: die Liste kennt jede Datei des Bündels",
+    (function(){
+      const keep = {m:CLUSTER_MODE, o:YML_OFFEN};
+      CLUSTER_MODE = "install"; YML_OFFEN = true;
+      renderYmlNav();
+      const chips = $("clusterYmlNav").querySelectorAll("button[data-yml]");
+      const b = ansibleBundle();
+      YML_OFFEN = keep.o; CLUSTER_MODE = keep.m; renderYmlNav();
+      return chips.length === b.length + 1;
+    })(), "");
+  ok("Einzelbezug: geschlossen bleibt die Liste leer und verborgen",
+    (function(){
+      const keep = YML_OFFEN;
+      YML_OFFEN = false; renderYmlNav();
+      const leer = $("clusterYmlNav").hidden && !$("clusterYmlNav").innerHTML;
+      YML_OFFEN = keep; renderYmlNav();
+      return leer;
+    })(), "");
   const serie = (function(){
     const keep = {m:CLUSTER_MODE, t:TENANT};
     CLUSTER_MODE = "tenant";
@@ -5702,6 +5720,7 @@ let CLUSTER = {};
 let TENANT = {};
 let METALLB = {autoAssign:true};
 let CLUSTER_MODE = "install";
+let YML_DATEIEN = [];
 
 const CLUSTER_ROLE = {
   all:  "auf allen Knoten|on every node",
@@ -6461,7 +6480,7 @@ function setClusterMode(mode){
   renderCluster();
 }
 
-function renderCluster(){ clusterTexts(); renderClusterFields(); renderClusterOut(); }
+function renderCluster(){ clusterTexts(); renderClusterFields(); renderClusterOut(); renderYmlNav(); }
 
 Object.keys(CLUSTER_TABS).forEach(m => {
   $(CLUSTER_TABS[m]).addEventListener("click", () => setClusterMode(m));
@@ -6474,13 +6493,13 @@ $("clusterClose").addEventListener("click", () => { $("clusterPanel").hidden = t
 $("clusterFields").addEventListener("input", e => {
   if (!e.target.dataset.cl) return;
   clusterStateOf()[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
-  renderClusterOut();
+  renderClusterOut(); renderYmlNav();
 });
 $("clusterFields").addEventListener("change", e => {
   if (!e.target.dataset.cl) return;
   clusterStateOf()[e.target.dataset.cl] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
   if (e.target.dataset.clstruct) renderClusterFields();
-  renderClusterOut();
+  renderClusterOut(); renderYmlNav();
 });
 $("clusterOut").addEventListener("click", e => {
   const b = e.target.closest("button[data-cmd]");
@@ -6493,8 +6512,53 @@ $("clusterOut").addEventListener("click", e => {
 $("clusterMd").addEventListener("click", () => {
   download(clusterMarkdown(), clusterModeOf().file, "text/markdown");
 });
+/* Der Knopf packt nicht mehr sofort — er zeigt, was es gibt. */
+let YML_OFFEN = false;
+
+function renderYmlNav(){
+  const nav = $("clusterYmlNav");
+  nav.hidden = !YML_OFFEN;
+  if (!YML_OFFEN){ nav.innerHTML = ""; return; }
+  const de = LANG === "de";
+  const dateien = ansibleBundle();
+  YML_DATEIEN = dateien;
+  const mitPfad = dateien.filter(f => f.name.indexOf("/") !== -1);
+  let h = "<p>" + esc(de
+    ? "Einzeln herunterladen, oder alles zusammen. Die Reihenfolge ist die aus site.yml."
+    : "Download one at a time, or all together. The order is the one from site.yml.") + "</p>";
+  h += '<button class="ychip ychip--all" data-yml="alle">' +
+       esc(de ? "alles als tar" : "everything as tar") + "</button>";
+  dateien.forEach((f, i) => {
+    h += '<button class="ychip" data-yml="' + i + '">' + esc(f.name) + "</button>";
+  });
+  if (mitPfad.length)
+    h += "<p>" + esc(de
+      ? "Zwei davon gehören in ein Unterverzeichnis — beim Einzelbezug kommt nur der Dateiname an: "
+      : "Two of them belong in a subdirectory — a single download carries only the file name: ") +
+      mitPfad.map(f => f.name).join(", ") + "</p>";
+  nav.innerHTML = h;
+}
+
 $("clusterYml").addEventListener("click", () => {
-  download(tarBytes(ansibleBundle()), clusterModeOf().tar, "application/x-tar");
+  YML_OFFEN = !YML_OFFEN;
+  renderYmlNav();
+});
+
+$("clusterYmlNav").addEventListener("click", e => {
+  const b = e.target.closest("button[data-yml]");
+  if (!b) return;
+  if (b.dataset.yml === "alle"){
+    download(tarBytes(YML_DATEIEN), clusterModeOf().tar, "application/x-tar");
+    return;
+  }
+  const f = YML_DATEIEN[+b.dataset.yml];
+  if (!f) return;
+  /* Der Pfad geht beim Einzelbezug verloren — der Hinweis darüber sagt es. */
+  const name = f.name.split("/").pop();
+  download(f.text, name, name.slice(-3) === ".md" ? "text/markdown" : "text/yaml");
+  const alt = b.textContent;
+  b.textContent = t(UI.copied);
+  setTimeout(() => { b.textContent = alt; }, 900);
 });
 
 function searchIndex(){
