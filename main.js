@@ -4378,6 +4378,33 @@ function runSelfTests(){
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
   const oidcGuide = tenantGuide({user:"bge", ns:"team-admin", identity:"oidc", api:"k8s-cp1.highq.org:6443"});
   const oidcTxt = oidcGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
+  const ymlTest = (function(){
+    const keep = {m:CLUSTER_MODE, t:TENANT};
+    CLUSTER_MODE = "tenant";
+    TENANT = {user:"bge", ns:"team-admin", api:"k8s-cp1.highq.org:6443", linux:true, quota:true, netpol:true};
+    const y = ansibleExport();
+    CLUSTER_MODE = keep.m; TENANT = keep.t;
+    return y;
+  })();
+  ok("Ansible-Export: je Rolle ein Play mit passenden hosts",
+    ymlTest.indexOf("  hosts: localhost") !== -1 && ymlTest.indexOf("  hosts: k8s_control_plane") !== -1, "");
+  ok("Ansible-Export: Manifeste laufen über kubernetes.core.k8s",
+    ymlTest.indexOf("kubernetes.core.k8s:") !== -1 && ymlTest.indexOf("        definition:") !== -1 &&
+    ymlTest.indexOf("kind: Namespace") !== -1, "");
+  ok("Ansible-Export: kein Manifest bleibt als cat-Heredoc stehen",
+    ymlTest.indexOf("cat <<'EOF' | kubectl apply -f -") === -1, "");
+  ok("Ansible-Export: lesende Befehle melden keine Änderung",
+    ymlTest.indexOf("changed_when: false") !== -1, "");
+  ok("Ansible-Export: Shell-Aufgaben bekommen bash",
+    ymlTest.indexOf("executable: /bin/bash") !== -1, "");
+  ok("Ansible-Export: die Risiken stehen als Kommentar dabei",
+    ymlTest.indexOf("    # ACHTUNG") !== -1 || ymlTest.indexOf("    # Hinweis") !== -1, "");
+  ok("Ansible-Export: alle drei Modi liefern etwas",
+    Object.keys(CLUSTER_MODES).every(m => {
+      const keep = CLUSTER_MODE; CLUSTER_MODE = m;
+      const y = ansibleExport(); CLUSTER_MODE = keep;
+      return y.indexOf("  tasks:") !== -1 && y.indexOf("    - name: ") !== -1 && CLUSTER_MODES[m].yml;
+    }), "");
   ok("Mengenangaben: gueltige Werte gehen durch",
     [["4","8Gi"],["500m","512Mi"],["2.5","2G"]].every(f =>
       mengenRisiken(tenantOpts({cpu:f[0], mem:f[1]})).length === 0), "");
@@ -5575,11 +5602,11 @@ const CLUSTER_ROLE = {
    Beide liefern dieselbe Abschnittsform, also teilen sie Darstellung und Export. */
 const CLUSTER_MODES = {
   install: {fields:() => CLUSTER_FIELDS, state:() => CLUSTER, guide:() => clusterGuide(CLUSTER),
-            file:"cluster-installation.md"},
+            file:"cluster-installation.md", yml:"cluster-installation.yml"},
   tenant:  {fields:() => TENANT_FIELDS,  state:() => TENANT,  guide:() => tenantGuide(TENANT),
-            file:"benutzer-namespace.md"},
+            file:"benutzer-namespace.md", yml:"benutzer-namespace.yml"},
   metallb: {fields:() => METALLB_FIELDS, state:() => METALLB, guide:() => metallbGuide(METALLB),
-            file:"metallb.md"}
+            file:"metallb.md", yml:"metallb.yml"}
 };
 function clusterModeOf(){ return CLUSTER_MODES[CLUSTER_MODE] || CLUSTER_MODES.install; }
 function clusterFieldsOf(){ return clusterModeOf().fields(); }
@@ -5641,6 +5668,126 @@ function renderClusterOut(){
       esc(it.c) + "</span></button><p>" + mdInline(t(it.d)) + "</p></div>").join("") + "</div></div>";
   });
   $("clusterOut").innerHTML = h;
+}
+
+/* ---------- Ansible-Export ----------
+   Die Rollenmarke jedes Abschnitts sagt schon, auf welchen Maschinen er laufen
+   muss — daraus wird je Rolle ein eigenes Play. */
+const ROLE_HOSTS = {
+  all:   "k8s_all",
+  cp:    "k8s_control_plane",
+  worker:"k8s_workers",
+  neu:   "k8s_new_node",
+  admin: "localhost",
+  user:  "localhost"
+};
+
+/* Befehle, die nur lesen, duerfen Ansible nicht als Aenderung melden. */
+const NUR_LESEN = /^(kubectl (get|describe|logs|auth|top|api-resources|config (view|get-contexts|current-context))|openssl (x509|req) |curl |ip -4 |ip -o |getent |ls -l|zpool (status|list)|zfs list|showmount |systemctl status|cat \/proc|grep |awk |helm (list|repo list)|velero backup describe|kubeadm token list|kubeadm version|kubelet --version|exportfs -v|arping|ping |echo )/;
+
+function nurLesend(cmd){
+  const zeilen = cmd.split("\n").map(z => z.trim()).filter(z => z && z.charAt(0) !== "#");
+  return zeilen.length > 0 && zeilen.every(z => NUR_LESEN.test(z));
+}
+
+function ynString(s){
+  return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+}
+
+function einruecken(text, n){
+  const pad = new Array(n + 1).join(" ");
+  return text.split("\n").map(z => z.length ? pad + z : "").join("\n");
+}
+
+/* Ein Befehl der Form  cat <<'EOF' | kubectl apply -f -  …  EOF  wird zu einer
+   oder mehreren k8s-Aufgaben — damit ist der Schritt wiederholbar statt blind. */
+function manifesteAus(cmd){
+  const zeilen = cmd.split("\n");
+  if (!/^cat <<'?EOF'? \| kubectl apply -f -\s*$/.test(zeilen[0])) return null;
+  const ende = zeilen.lastIndexOf("EOF");
+  if (ende < 1) return null;
+  /* Steht hinter dem Heredoc noch etwas, ist es kein reines Manifest. */
+  if (zeilen.slice(ende + 1).some(z => z.trim())) return null;
+  const roh = zeilen.slice(1, ende).join("\n");
+  if (roh.indexOf("$") !== -1) return null;      /* Shell-Ersetzung: muss Shell bleiben */
+  return roh.split(/\n---\n/).map(x => x.trim()).filter(Boolean);
+}
+
+function ansibleAufgabe(name, cmd){
+  const docs = manifesteAus(cmd);
+  if (docs){
+    return docs.map((doc, i) => {
+      const titel = docs.length > 1 ? name + " (" + (i + 1) + "/" + docs.length + ")" : name;
+      return "    - name: " + ynString(titel) + "\n" +
+             "      kubernetes.core.k8s:\n" +
+             "        state: present\n" +
+             "        definition:\n" + einruecken(doc, 10);
+    }).join("\n\n");
+  }
+  return "    - name: " + ynString(name) + "\n" +
+         "      ansible.builtin.shell: |\n" + einruecken(cmd, 8) + "\n" +
+         "      args:\n        executable: /bin/bash\n" +
+         (nurLesend(cmd) ? "      changed_when: false" : "").replace(/\n$/, "");
+}
+
+function ansibleKopf(){
+  const de = LANG === "de";
+  const titel = t(CLUSTER_TAB_LABEL[CLUSTER_MODE] || CLUSTER_TAB_LABEL.install);
+  let h = "# " + (de ? "Erzeugt mit dem k8s-wizard" : "Generated with the k8s wizard") + " — " + titel + "\n#\n";
+  h += de
+    ? "# YAML-Manifeste laufen über kubernetes.core.k8s und sind damit wiederholbar.\n" +
+      "# Alles andere steht als shell-Aufgabe genau so da, wie es im Terminal stünde —\n" +
+      "# samt sudo, damit die Zeilen auch ohne become stimmen. Lesende Befehle sind\n" +
+      "# mit changed_when: false versehen.\n#\n" +
+      "# Vor dem ersten Lauf:\n" +
+      "#   ansible-galaxy collection install kubernetes.core\n" +
+      "#   pip install kubernetes\n#\n" +
+      "# Platzhalter in Großbuchstaben — <TOKEN>, NODE-1, HIER-DAS-KENNWORT — sind\n" +
+      "# vor dem Lauf zu ersetzen. Erst mit --check und --diff probieren.\n"
+    : "# YAML manifests run through kubernetes.core.k8s and are therefore repeatable.\n" +
+      "# Everything else appears as a shell task exactly as it would in the terminal —\n" +
+      "# sudo included, so the lines are right without become. Read-only commands carry\n" +
+      "# changed_when: false.\n#\n" +
+      "# Before the first run:\n" +
+      "#   ansible-galaxy collection install kubernetes.core\n" +
+      "#   pip install kubernetes\n#\n" +
+      "# Placeholders in capitals — <TOKEN>, NODE-1, HIER-DAS-KENNWORT — have to be\n" +
+      "# replaced before running. Try it with --check and --diff first.\n";
+  h += "#\n# " + (de ? "Inventar, Beispiel" : "Inventory, example") + ":\n" +
+       "#   [k8s_control_plane]\n#   k8s-cp1\n#\n#   [k8s_workers]\n#   k8s-w1\n#   k8s-w2\n#\n" +
+       "#   [k8s_all:children]\n#   k8s_control_plane\n#   k8s_workers\n";
+  return h + "\n";
+}
+
+function ansibleExport(){
+  const de = LANG === "de";
+  let out = ansibleKopf() + "---\n";
+  const guide = clusterGuideOf();
+  let letzteRolle = null, teil = 0;
+  guide.forEach((s, i) => {
+    const rolle = s.role;
+    if (rolle !== letzteRolle){
+      if (letzteRolle !== null) out += "\n";
+      const host = ROLE_HOSTS[rolle] || "localhost";
+      teil++;
+      out += "- name: " + ynString((de ? "Teil " : "Part ") + teil + " · " + t(CLUSTER_ROLE[rolle])) + "\n" +
+             "  hosts: " + host + "\n" +
+             (host === "localhost" ? "  connection: local\n  gather_facts: false\n" : "  gather_facts: true\n") +
+             "  tasks:\n";
+      letzteRolle = rolle;
+    }
+    /* Die Hinweise des Assistenten gehen als Kommentar mit — sie sind der Grund,
+       warum ein Schritt so aussieht, wie er aussieht. */
+    out += "\n    # " + String(i + 1).padStart(2, "0") + " · " + t(s.h) + "\n";
+    (s.r || []).forEach(x => {
+      out += "    # " + (x.lvl === "err" ? (de ? "ACHTUNG" : "WARNING") : (de ? "Hinweis" : "Note")) +
+             ": " + x.m.replace(/\*\*/g, "").replace(/\n/g, " ") + "\n";
+    });
+    (s.items || []).forEach((it, n) => {
+      out += ansibleAufgabe(t(s.h) + " · " + (n + 1), it.c) + "\n";
+    });
+  });
+  return out;
 }
 
 function clusterMarkdown(){
@@ -5731,7 +5878,8 @@ function clusterTexts(){
     $(CLUSTER_TABS[m]).textContent = t(CLUSTER_TAB_LABEL[m]);
     $(CLUSTER_TABS[m]).setAttribute("aria-pressed", CLUSTER_MODE === m);
   });
-  $("clusterMd").textContent = LANG === "de" ? "Anleitung herunterladen" : "Download the guide";
+  $("clusterMd").textContent = LANG === "de" ? "Anleitung" : "Guide";
+  $("clusterYml").textContent = "Ansible";
   $("clusterDesc").textContent = t(CLUSTER_DESC[CLUSTER_MODE] || CLUSTER_DESC.install);
 }
 
@@ -5771,6 +5919,9 @@ $("clusterOut").addEventListener("click", e => {
 });
 $("clusterMd").addEventListener("click", () => {
   download(clusterMarkdown(), clusterModeOf().file, "text/markdown");
+});
+$("clusterYml").addEventListener("click", () => {
+  download(ansibleExport(), clusterModeOf().yml, "text/yaml");
 });
 
 function searchIndex(){
