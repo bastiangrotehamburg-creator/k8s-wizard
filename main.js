@@ -4404,6 +4404,43 @@ function runSelfTests(){
     const b = ansibleBundle(); CLUSTER_MODE = keep; return b;
   })();
   const bNamen = bundleTest.map(f => f.name);
+  const serie = (function(){
+    const keep = {m:CLUSTER_MODE, t:TENANT};
+    CLUSTER_MODE = "tenant";
+    TENANT = {user:"bge", ns:"team-admin", api:"k8s-cp1.highq.org:6443",
+              linux:true, quota:true, netpol:true, batch:true};
+    const b = ansibleBundle();
+    CLUSTER_MODE = keep.m; TENANT = keep.t;
+    return b;
+  })();
+  const sNamen = serie.map(f => f.name);
+  ok("Serie: Werteliste, Vorlage und Playbooks sind dabei",
+    sNamen.indexOf("group_vars/all.yml") !== -1 && sNamen.indexOf("templates/kubeconfig.j2") !== -1 &&
+    sNamen.indexOf("site.yml") === 0, sNamen.join(" "));
+  ok("Serie: jede Aufgabe mit item läuft in einer Schleife",
+    serie.filter(f => /\.yml$/.test(f.name) && f.name !== "site.yml" && f.name.indexOf("group_vars") !== 0)
+      .every(f => f.text.indexOf("{{ item.") === -1 || f.text.indexOf('loop: "{{ teams }}"') !== -1), "");
+  ok("Serie: die Werte stehen in der Liste, nicht im Befehlstext",
+    serie.filter(f => /^\d\d-/.test(f.name)).every(f => f.text.indexOf("team-admin") === -1) &&
+    serie.filter(f => f.name === "group_vars/all.yml")[0].text.indexOf("ns: team-admin") !== -1, "");
+  ok("Serie: die Abnahme lässt den Lauf scheitern",
+    serie.some(f => f.text.indexOf("failed_when: darf.stdout is not search('yes')") !== -1 &&
+                    f.text.indexOf("failed_when: darf_nicht.stdout is not search('no')") !== -1), "");
+  ok("Serie: der Rückbau ist in site.yml auskommentiert",
+    (function(){
+      const site = serie[0].text;
+      const r = sNamen.filter(n => n.indexOf("-teardown.yml") !== -1);
+      return r.length === 1 && site.indexOf("# - import_playbook: " + r[0]) !== -1 &&
+             site.indexOf("\n- import_playbook: " + r[0]) === -1;
+    })(), "");
+  ok("Serie: ohne Haken bleibt der gewöhnliche Export",
+    (function(){
+      const keep = {m:CLUSTER_MODE, t:TENANT};
+      CLUSTER_MODE = "tenant"; TENANT = {user:"bge", ns:"team-admin"};
+      const b = ansibleBundle();
+      CLUSTER_MODE = keep.m; TENANT = keep.t;
+      return b.every(f => f.name !== "group_vars/all.yml");
+    })(), "");
   const tenantBundle = (function(){
     const keep = {m:CLUSTER_MODE, t:TENANT};
     CLUSTER_MODE = "tenant";
@@ -5085,6 +5122,8 @@ const TENANT_FIELDS = [
   {k:"mem", t:"text", l:"Speicher insgesamt|Memory in total", ph:"8Gi", half:true, when:o => !!o.quota},
   {k:"pods", t:"number", l:"Pods höchstens|Pods at most", ph:"20", half:true, when:o => !!o.quota},
   {k:"netpol", t:"bool", l:"Namespace nach außen abschotten (NetworkPolicy)|Seal the namespace off (NetworkPolicy)"},
+  {k:"batch", t:"bool", structural:true, l:"Mehrere Benutzer auf einmal|Several users at once",
+   hint:"Ändert nur den Ansible-Export: statt fester Werte laufen die Playbooks über eine Liste in group_vars. Die Anleitung daneben bleibt der Weg für einen einzelnen.|Changes the Ansible export only: instead of fixed values the playbooks loop over a list in group_vars. The guide beside it stays the route for a single one."},
   {k:"pin", t:"bool", structural:true, l:"Nur auf bestimmten Nodes laufen lassen|Run only on certain nodes",
    hint:"Alle Pods dieses Namespace landen dann ausschließlich auf Nodes mit dem Label unten.|Every pod of this namespace then lands only on nodes carrying the label below."},
   {k:"pool", t:"text", l:"Node-Label|Node label", ph:"pool=team-admin", half:true, when:o => !!o.pin,
@@ -5123,6 +5162,7 @@ function tenantOpts(o){
     mem: (o.mem || "").trim() || "8Gi",
     pods: num(o.pods) === undefined ? 20 : num(o.pods),
     netpol: !!o.netpol,
+    batch: !!o.batch,
     pin: !!o.pin,
     /* pool=wert wird an zwei Stellen gebraucht: als Label und als Taint. */
     pool: ((o.pool || "").trim() || "pool=" + ns).replace(/\s+/g, ""),
@@ -5411,6 +5451,16 @@ function tenantGuide(raw){
       r:[{lvl:"err", m:t("Die Annotation allein bewirkt nichts. Sie ist eine Anweisung an ein Admission-Plugin, das erst eingeschaltet werden muss — und der Cluster meldet nirgends, dass es fehlt. Nach dem Einschalten mit dem Testpod oben nachweisen, dass der Selector wirklich gesetzt wird.|The annotation alone does nothing. It is an instruction to an admission plugin that has to be switched on first — and the cluster reports nowhere that it is missing. After switching it on, use the test pod above to prove the selector is really being set.")},
          {lvl:"warn", m:t("Sind alle markierten Nodes voll oder nicht bereit, bleiben die Pods in Pending stehen. Sie weichen nicht aus — das ist der Sinn der Sache, überrascht aber beim ersten Ausfall. Zwei Nodes sind das Minimum, wenn es weiterlaufen soll.|If all marked nodes are full or not ready, the pods stay Pending. They do not fall back — that is the whole point, but it surprises you at the first outage. Two nodes are the minimum if things should keep running.")}]
         .concat(o.taint ? [{lvl:"warn", m:t("DaemonSets aus kube-system — CNI, kube-proxy, Speicher-Treiber — bringen meist eine allgemeine toleration mit und laufen weiter. Selbst gebaute DaemonSets tun das nicht und verschwinden von diesen Nodes, sobald der Taint steht.|Daemon sets from kube-system — CNI, kube-proxy, storage drivers — usually carry a blanket toleration and keep running. Home-grown daemon sets do not, and disappear from those nodes the moment the taint is set.")}] : [])
+    });
+  }
+
+  /* --- 7c. Serie --- */
+  if (o.batch){
+    sec("Mehrere auf einmal|Several at once", "admin", {
+      p:["Für zwei oder drei Personen ist der Weg oben der richtige: nachlesen, verstehen, tippen. Ab dem vierten Mal ist es Fleißarbeit mit Tippfehlern — und genau dafür ist der Ansible-Export da.|For two or three people the route above is the right one: read, understand, type. From the fourth time on it is busywork with typos — and that is exactly what the Ansible export is for.",
+         "Der Knopf **Ansible** liefert dann keine Abbildung dieser Anleitung mehr, sondern Playbooks, die über eine Liste laufen. Die Werte stehen an einer Stelle — `group_vars/all.yml` — und nicht im Befehlstext. Ein weiterer Benutzer ist ein Eintrag mehr, kein weiterer Durchlauf.|The **Ansible** button then no longer delivers a copy of this guide but playbooks that loop over a list. The values sit in one place — `group_vars/all.yml` — instead of inside the command text. Another user is one more entry, not another pass.",
+         "Was dabei anders ist: Die Manifeste laufen über `kubernetes.core.k8s` und sind wiederholbar, die Schlüssel entstehen über `community.crypto` statt über `openssl` von Hand, und die Abnahme lässt den Lauf **scheitern**, wenn ein Benutzer an `kube-system` herankommt.|What differs: the manifests run through `kubernetes.core.k8s` and are repeatable, the keys come from `community.crypto` instead of `openssl` by hand, and the acceptance play **fails** the run if a user can reach `kube-system`."],
+      r:[{lvl:"warn", m:t("Die erzeugten Schlüssel und kubeconfigs landen im Verzeichnis out/. Das ist vollständiger Zugang zu jedem dieser Namespaces — nach der Übergabe löschen und niemals ins Repository legen.|The generated keys and kubeconfigs land in the out/ directory. That is complete access to every one of those namespaces — delete it after handover and never put it in the repository.")}]
     });
   }
 
@@ -5876,7 +5926,337 @@ function ansibleExport(){
   return ansibleKopf() + "---\n" + ansiblePlays().map(x => x.text).join("\n");
 }
 
+/* ---------- Mehrere Benutzer auf einmal ----------
+   Der gewöhnliche Export bildet die Anleitung eins zu eins ab: ein Benutzer,
+   feste Werte. Für mehrere gibt es stattdessen Playbooks, die über eine Liste
+   laufen — die Werte stehen dann an einer Stelle und nicht im Befehlstext. */
+function tenantBatchBundle(){
+  const o = tenantOpts(TENANT);
+  const de = LANG === "de";
+  const cert = o.identity === "cert";
+  const oidc = o.identity === "oidc";
+  const dateien = [];
+  const teile = [];
+
+  /* Der Name, unter dem der API-Server den Benutzer kennt — je Anmeldeart anders. */
+  const subjekt = oidc
+    ? '          - kind: User\n            name: "oidc:{{ item.email }}"\n            apiGroup: rbac.authorization.k8s.io'
+    : cert
+    ? '          - kind: User\n            name: "{{ item.user }}"\n            apiGroup: rbac.authorization.k8s.io'
+    : '          - kind: ServiceAccount\n            name: "{{ item.user }}"\n            namespace: "{{ item.ns }}"';
+  const alsWer = oidc ? '"oidc:{{ item.email }}"'
+               : cert ? '"{{ item.user }}"'
+               : '"system:serviceaccount:{{ item.ns }}:{{ item.user }}"';
+
+  const kopf = (nr, titel, host, datei) =>
+    "# " + (de ? "Teil " : "Part ") + nr + ": " + titel + "\n" +
+    "# " + (de ? "einzeln" : "on its own") + ": ansible-playbook -i inventory.ini " + datei + "\n---\n" +
+    "- name: " + ynString((de ? "Teil " : "Part ") + nr + " · " + titel) + "\n" +
+    "  hosts: " + host + "\n" +
+    (host === "localhost" ? "  connection: local\n  gather_facts: false\n" : "  gather_facts: true\n") +
+    "  tasks:\n";
+
+  const nimm = (titel, host, text, slug, back) => {
+    const nr = teile.length + 1;
+    const datei = String(nr).padStart(2, "0") + "-" + slug + ".yml";
+    teile.push({datei:datei, host:host, titel:titel, back:!!back});
+    dateien.push({name:datei, text:kopf(nr, titel, host, datei) + text});
+  };
+
+  const schleife = (label) =>
+    '      loop: "{{ teams }}"\n      loop_control:\n        label: "{{ item.' + (label || "ns") + ' }}"\n';
+
+  /* ---- Werteliste ---- */
+  const eintrag = (u, ns, lvl, pss, cpu, mem, pods, mail) =>
+    "  - user: " + u + "\n    ns: " + ns + "\n    level: " + lvl + "\n    pss: " + pss + "\n" +
+    (oidc ? "    email: " + mail + "\n" : "") +
+    "    cpu: \"" + cpu + "\"\n    mem: \"" + mem + "\"\n    pods: " + pods + "\n" +
+    (o.linux ? "    ssh_key: \"ssh-ed25519 AAAA...ERSETZEN " + u + "\"\n" : "");
+
+  dateien.push({name:"group_vars/all.yml", text:
+    "# " + (de ? "Die einzige Datei, die du je Benutzer anfasst." : "The only file you touch per user.") + "\n" +
+    "# " + (de ? "Alle Playbooks lesen ausschließlich diese Liste." : "Every playbook reads only this list.") + "\n" +
+    "---\n" +
+    "k8s_api: \"" + o.api + "\"\n" +
+    "cert_expiration_seconds: " + (o.days * 86400) + "\n" +
+    "arbeitsverzeichnis: out\n\n" +
+    "teams:\n" +
+    eintrag(o.user, o.ns, TENANT_ROLE[o.level], o.pss, o.cpu, o.mem, o.pods, o.email) + "\n" +
+    "# " + (de ? "weitere nach demselben Muster:" : "further ones follow the same shape:") + "\n" +
+    eintrag("mkl", "team-mkl", "view", o.pss, "2", "4Gi", 10, "mkl@" + domainOf(o.api))
+      .split("\n").map(z => z ? "# " + z : "").join("\n")});
+
+  /* ---- 1. Namespaces und Grenzen ---- */
+  let ns = '    - name: "Namespace mit Sicherheitsstufe"\n' +
+    "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+    "          apiVersion: v1\n          kind: Namespace\n          metadata:\n" +
+    '            name: "{{ item.ns }}"\n            labels:\n' +
+    '              kubernetes.io/metadata.name: "{{ item.ns }}"\n' +
+    '              pod-security.kubernetes.io/enforce: "{{ item.pss }}"\n' +
+    '              pod-security.kubernetes.io/warn: "{{ item.pss }}"\n' +
+    '              pod-security.kubernetes.io/audit: "{{ item.pss }}"\n' + schleife();
+  if (o.quota){
+    ns += '\n    - name: "ResourceQuota"\n' +
+      "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+      "          apiVersion: v1\n          kind: ResourceQuota\n          metadata:\n" +
+      '            name: quota\n            namespace: "{{ item.ns }}"\n          spec:\n            hard:\n' +
+      '              requests.cpu: "{{ item.cpu }}"\n              requests.memory: "{{ item.mem }}"\n' +
+      '              limits.cpu: "{{ item.cpu }}"\n              limits.memory: "{{ item.mem }}"\n' +
+      '              pods: "{{ item.pods }}"\n              persistentvolumeclaims: "10"\n' +
+      '              services.loadbalancers: "1"\n' + schleife();
+    ns += '\n    # ' + (de ? "Ohne Vorgabewerte lehnt die Quota jeden Pod ohne requests ab."
+                           : "Without defaults the quota rejects every pod that has no requests.") + "\n" +
+      '    - name: "LimitRange"\n' +
+      "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+      "          apiVersion: v1\n          kind: LimitRange\n          metadata:\n" +
+      '            name: vorgaben\n            namespace: "{{ item.ns }}"\n          spec:\n            limits:\n' +
+      "              - type: Container\n                default:\n                  cpu: 200m\n                  memory: 256Mi\n" +
+      "                defaultRequest:\n                  cpu: 50m\n                  memory: 64Mi\n" +
+      '                max:\n                  cpu: "2"\n                  memory: 2Gi\n' + schleife();
+  }
+  if (o.netpol){
+    ns += '\n    - name: "NetworkPolicy: alles verbieten"\n' +
+      "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+      "          apiVersion: networking.k8s.io/v1\n          kind: NetworkPolicy\n          metadata:\n" +
+      '            name: default-deny\n            namespace: "{{ item.ns }}"\n          spec:\n' +
+      "            podSelector: {}\n            policyTypes:\n              - Ingress\n              - Egress\n" + schleife();
+    ns += '\n    - name: "NetworkPolicy: intern und DNS erlauben"\n' +
+      "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+      "          apiVersion: networking.k8s.io/v1\n          kind: NetworkPolicy\n          metadata:\n" +
+      '            name: erlaubt-intern-und-dns\n            namespace: "{{ item.ns }}"\n          spec:\n' +
+      "            podSelector: {}\n            policyTypes:\n              - Ingress\n              - Egress\n" +
+      "            ingress:\n              - from:\n                  - podSelector: {}\n" +
+      "            egress:\n              - to:\n                  - podSelector: {}\n" +
+      "              - to:\n                  - namespaceSelector:\n                      matchLabels:\n" +
+      "                        kubernetes.io/metadata.name: kube-system\n" +
+      "                ports:\n                  - protocol: UDP\n                    port: 53\n" +
+      "                  - protocol: TCP\n                    port: 53\n" + schleife();
+  }
+  if (o.pin){
+    ns += '\n    # ' + (de ? "Wirkt nur mit dem Admission-Plugin PodNodeSelector im API-Server."
+                           : "Only takes effect with the PodNodeSelector admission plugin in the API server.") + "\n" +
+      '    - name: "Namespace an Nodes binden"\n' +
+      "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+      "          apiVersion: v1\n          kind: Namespace\n          metadata:\n" +
+      '            name: "{{ item.ns }}"\n            annotations:\n' +
+      '              scheduler.alpha.kubernetes.io/node-selector: "' + o.pool + '"\n' + schleife();
+  }
+  nimm(de ? "Namespaces" : "Namespaces", "localhost", ns, "namespaces");
+
+  /* ---- 2. Rechte ---- */
+  nimm(de ? "Rechte" : "Rights", "localhost",
+    '    # ' + (de ? "RoleBinding auf eine ClusterRole: die Regeln gelten nur in diesem Namespace."
+                   : "A RoleBinding onto a ClusterRole: the rules apply only in this namespace.") + "\n" +
+    '    - name: "RoleBinding je Team"\n' +
+    "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+    "          apiVersion: rbac.authorization.k8s.io/v1\n          kind: RoleBinding\n          metadata:\n" +
+    '            name: "{{ item.user }}-{{ item.level }}"\n            namespace: "{{ item.ns }}"\n' +
+    "          roleRef:\n            kind: ClusterRole\n" +
+    '            name: "{{ item.level }}"\n            apiGroup: rbac.authorization.k8s.io\n' +
+    "          subjects:\n" + subjekt + "\n" + schleife("user"),
+    "rbac");
+
+  /* ---- 3. Identität ---- */
+  if (cert){
+    nimm(de ? "Zertifikate" : "Certificates", "localhost",
+      '    - name: "Arbeitsverzeichnis"\n' +
+      "      ansible.builtin.file:\n" +
+      '        path: "{{ arbeitsverzeichnis }}"\n        state: directory\n        mode: "0700"\n\n' +
+      '    - name: "Privater Schlüssel je Benutzer"\n' +
+      "      community.crypto.openssl_privatekey:\n" +
+      '        path: "{{ arbeitsverzeichnis }}/{{ item.user }}.key"\n        size: 4096\n        mode: "0600"\n' + schleife("user") +
+      '\n    # ' + (de ? "CN wird zum Benutzernamen, O zur Gruppe." : "CN becomes the user name, O the group.") + "\n" +
+      '    - name: "Zertifikatsanfrage je Benutzer"\n' +
+      "      community.crypto.openssl_csr:\n" +
+      '        path: "{{ arbeitsverzeichnis }}/{{ item.user }}.csr"\n' +
+      '        privatekey_path: "{{ arbeitsverzeichnis }}/{{ item.user }}.key"\n' +
+      '        common_name: "{{ item.user }}"\n        organization_name: "{{ item.ns }}"\n' +
+      '        mode: "0644"\n' + schleife("user") +
+      '\n    - name: "Anfrage im Cluster einreichen"\n' +
+      "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+      "          apiVersion: certificates.k8s.io/v1\n          kind: CertificateSigningRequest\n" +
+      '          metadata:\n            name: "{{ item.user }}"\n          spec:\n' +
+      "            request: \"{{ lookup('file', arbeitsverzeichnis + '/' + item.user + '.csr') | b64encode }}\"\n" +
+      "            signerName: kubernetes.io/kube-apiserver-client\n" +
+      "            expirationSeconds: " + (o.days * 86400) + "\n" +
+      "            usages:\n              - client auth\n" + schleife("user") +
+      '\n    - name: "Anfrage freigeben"\n' +
+      '      ansible.builtin.command: "kubectl certificate approve {{ item.user }}"\n' +
+      "      changed_when: true\n" + schleife("user") +
+      '\n    - name: "Auf die Unterschrift warten"\n' +
+      "      kubernetes.core.k8s_info:\n" +
+      "        api_version: certificates.k8s.io/v1\n        kind: CertificateSigningRequest\n" +
+      '        name: "{{ item.user }}"\n' +
+      "      register: csr_stand\n" +
+      "      until: csr_stand.resources[0].status.certificate is defined\n" +
+      "      retries: 10\n      delay: 2\n" + schleife("user") +
+      '\n    - name: "Zertifikat ablegen"\n' +
+      "      ansible.builtin.copy:\n" +
+      '        content: "{{ item.resources[0].status.certificate | b64decode }}"\n' +
+      '        dest: "{{ arbeitsverzeichnis }}/{{ item.item.user }}.crt"\n        mode: "0644"\n' +
+      '      loop: "{{ csr_stand.results }}"\n' +
+      '      loop_control:\n        label: "{{ item.item.user }}"\n',
+      "certificates");
+  } else if (!oidc){
+    nimm(de ? "ServiceAccounts" : "Service accounts", "localhost",
+      '    - name: "ServiceAccount je Team"\n' +
+      "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+      "          apiVersion: v1\n          kind: ServiceAccount\n          metadata:\n" +
+      '            name: "{{ item.user }}"\n            namespace: "{{ item.ns }}"\n' + schleife("user") +
+      '\n    - name: "Token erzeugen"\n' +
+      '      ansible.builtin.command: >-\n        kubectl create token {{ item.user }} -n {{ item.ns }}\n' +
+      "        --duration=" + (o.days * 24) + "h\n" +
+      "      register: sa_token\n      changed_when: true\n" + schleife("user"),
+      "serviceaccounts");
+  }
+
+  /* ---- 4. kubeconfig ---- */
+  if (!oidc){
+    dateien.push({name:"templates/kubeconfig.j2", text:
+      "apiVersion: v1\nkind: Config\nclusters:\n  - name: cluster\n    cluster:\n" +
+      "      server: https://{{ k8s_api }}\n      certificate-authority-data: {{ cluster_ca.stdout }}\n" +
+      "users:\n  - name: {{ item.user }}\n    user:\n" +
+      (cert
+        ? "      client-certificate-data: {{ lookup('file', arbeitsverzeichnis + '/' + item.user + '.crt') | b64encode }}\n" +
+          "      client-key-data: {{ lookup('file', arbeitsverzeichnis + '/' + item.user + '.key') | b64encode }}\n"
+        : "      token: {{ (sa_token.results | selectattr('item.user', 'equalto', item.user) | first).stdout }}\n") +
+      "contexts:\n  - name: {{ item.user }}\n    context:\n      cluster: cluster\n" +
+      "      user: {{ item.user }}\n      namespace: {{ item.ns }}\n" +
+      "current-context: {{ item.user }}\n"});
+
+    nimm(de ? "kubeconfigs" : "kubeconfigs", "localhost",
+      '    # ' + (de ? "Die CA aus der eigenen kubeconfig — funktioniert bei kubeadm, k3s und verwaltet."
+                     : "The CA from your own kubeconfig — works with kubeadm, k3s and managed.") + "\n" +
+      '    - name: "CA des Clusters lesen"\n' +
+      "      ansible.builtin.command: >-\n" +
+      "        kubectl config view --raw --minify\n" +
+      "        -o jsonpath={.clusters[0].cluster.certificate-authority-data}\n" +
+      "      register: cluster_ca\n      changed_when: false\n" +
+      '\n    - name: "kubeconfig je Benutzer schreiben"\n' +
+      "      ansible.builtin.template:\n        src: templates/kubeconfig.j2\n" +
+      '        dest: "{{ arbeitsverzeichnis }}/{{ item.user }}.kubeconfig"\n        mode: "0600"\n' + schleife("user"),
+      "kubeconfigs");
+  }
+
+  /* ---- 5. Linux-Konten ---- */
+  if (o.linux && !oidc){
+    nimm(de ? "Linux-Konten" : "Linux accounts", "k8s_control_plane",
+      '    - name: "Konto ohne Kennwort"\n' +
+      "      ansible.builtin.user:\n" +
+      '        name: "{{ item.user }}"\n        shell: /bin/bash\n        password: "!"\n        create_home: true\n' +
+      "      become: true\n" + schleife("user") +
+      '\n    - name: "SSH-Schlüssel hinterlegen"\n' +
+      "      ansible.posix.authorized_key:\n" +
+      '        user: "{{ item.user }}"\n        key: "{{ item.ssh_key }}"\n        exclusive: true\n' +
+      "      become: true\n" +
+      "      when: item.ssh_key is defined and 'ERSETZEN' not in item.ssh_key\n" + schleife("user") +
+      '\n    - name: "Verzeichnis .kube"\n' +
+      "      ansible.builtin.file:\n" +
+      '        path: "/home/{{ item.user }}/.kube"\n        state: directory\n' +
+      '        owner: "{{ item.user }}"\n        group: "{{ item.user }}"\n        mode: "0700"\n' +
+      "      become: true\n" + schleife("user") +
+      '\n    - name: "kubeconfig ins Heimatverzeichnis"\n' +
+      "      ansible.builtin.copy:\n" +
+      '        src: "{{ arbeitsverzeichnis }}/{{ item.user }}.kubeconfig"\n' +
+      '        dest: "/home/{{ item.user }}/.kube/config"\n' +
+      '        owner: "{{ item.user }}"\n        group: "{{ item.user }}"\n        mode: "0600"\n' +
+      "      become: true\n" + schleife("user"),
+      "linux-users");
+  }
+
+  /* ---- 6. Abnahme ---- */
+  nimm(de ? "Abnahme" : "Acceptance", "localhost",
+    '    # ' + (de ? "Beide Prüfungen lassen das Playbook scheitern, wenn die Grenze nicht hält."
+                   : "Both checks fail the playbook if the boundary does not hold.") + "\n" +
+    '    - name: "Darf im eigenen Namespace arbeiten"\n' +
+    "      ansible.builtin.command: >-\n" +
+    "        kubectl auth can-i list pods -n {{ item.ns }} --as=" + alsWer.replace(/"/g, "") + "\n" +
+    "      register: darf\n      changed_when: false\n" +
+    "      failed_when: darf.stdout is not search('yes')\n" + schleife() +
+    '\n    - name: "Darf nicht an kube-system"\n' +
+    "      ansible.builtin.command: >-\n" +
+    "        kubectl auth can-i get secrets -n kube-system --as=" + alsWer.replace(/"/g, "") + "\n" +
+    "      register: darf_nicht\n      changed_when: false\n" +
+    "      failed_when: darf_nicht.stdout is not search('no')\n" + schleife() +
+    '\n    - name: "Übersicht"\n' +
+    "      ansible.builtin.command: \"kubectl get rolebindings -A -o wide\"\n" +
+    "      register: uebersicht\n      changed_when: false\n" +
+    '\n    - name: "Übersicht ausgeben"\n' +
+    "      ansible.builtin.debug:\n        var: uebersicht.stdout_lines\n",
+    "verify");
+
+  /* ---- 7. Rückbau ---- */
+  nimm(de ? "Rückbau" : "Teardown", "localhost",
+    '    # ' + (de ? "Löscht alles, was die Playbooks oben anlegen."
+                   : "Deletes everything the playbooks above create.") + "\n" +
+    '    - name: "RoleBinding entfernen"\n' +
+    "      kubernetes.core.k8s:\n        state: absent\n" +
+    "        api_version: rbac.authorization.k8s.io/v1\n        kind: RoleBinding\n" +
+    '        name: "{{ item.user }}-{{ item.level }}"\n        namespace: "{{ item.ns }}"\n' + schleife("user") +
+    (cert
+      ? '\n    - name: "Zertifikatsanfrage entfernen"\n' +
+        "      kubernetes.core.k8s:\n        state: absent\n" +
+        "        api_version: certificates.k8s.io/v1\n        kind: CertificateSigningRequest\n" +
+        '        name: "{{ item.user }}"\n' + schleife("user")
+      : "") +
+    '\n    # ' + (de ? "ACHTUNG: löscht alles im Namespace, PVCs eingeschlossen."
+                     : "WARNING: deletes everything in the namespace, PVCs included.") + "\n" +
+    '    - name: "Namespace entfernen"\n' +
+    "      kubernetes.core.k8s:\n        state: absent\n        api_version: v1\n        kind: Namespace\n" +
+    '        name: "{{ item.ns }}"\n' + schleife(),
+    "teardown", true);
+
+  /* ---- site.yml, Inventar, README ---- */
+  const aktiv = teile.filter(x => !x.back), rueck = teile.filter(x => x.back);
+  dateien.unshift({name:"site.yml", text:
+    "# " + (de ? "Benutzer und Namespaces aus group_vars/all.yml anlegen"
+               : "Create users and namespaces from group_vars/all.yml") + "\n" +
+    "#   ansible-playbook -i inventory.ini site.yml\n" +
+    "# " + (de ? "Nur einen Benutzer" : "A single user") + ":\n" +
+    "#   ansible-playbook -i inventory.ini site.yml -e 'teams=[{\"user\":\"bge\",\"ns\":\"team-admin\"," +
+    "\"level\":\"edit\",\"pss\":\"restricted\",\"cpu\":\"4\",\"mem\":\"8Gi\",\"pods\":20}]'\n" +
+    "#\n# " + (de ? "Der Rückbau steht am Ende und ist bewusst auskommentiert."
+                 : "The teardown sits at the end and is deliberately commented out.") + "\n---\n" +
+    aktiv.map(x => "- import_playbook: " + x.datei + "\n").join("") +
+    rueck.map(x => "\n# " + (de ? "Rückbau, löscht was oben entsteht" : "Teardown, deletes what is created above") +
+                   ":\n# - import_playbook: " + x.datei + "\n").join("")});
+
+  dateien.push({name:"inventory.ini", text:
+    "; " + (de ? "Nur nötig, wenn Linux-Konten angelegt werden." : "Only needed when Linux accounts are created.") + "\n" +
+    "[k8s_control_plane]\nk8s-cp1\n\n[k8s_workers]\nk8s-w1\nk8s-w2\n\n[k8s_all:children]\nk8s_control_plane\nk8s_workers\n"});
+
+  dateien.push({name:"README.md", text:
+    "# " + (de ? "Benutzer und Namespaces in Serie" : "Users and namespaces in bulk") + "\n\n" +
+    (de ? "Alle Playbooks laufen über die Liste `teams` in `group_vars/all.yml`. Um einen weiteren\nBenutzer anzulegen, kommt dort ein Eintrag dazu — an den Playbooks ändert sich nichts.\n"
+        : "Every playbook loops over the `teams` list in `group_vars/all.yml`. To add another user you\nadd an entry there — the playbooks stay untouched.\n") + "\n" +
+    "```sh\nansible-galaxy collection install kubernetes.core community.crypto ansible.posix\npip install kubernetes\nansible-playbook -i inventory.ini site.yml --check --diff\n```\n\n" +
+    "| " + (de ? "Datei" : "File") + " | hosts | " + (de ? "Inhalt" : "Contents") + " |\n|---|---|---|\n" +
+    teile.map(x => "| `" + x.datei + "` | `" + x.host + "` | " +
+      (x.back ? (de ? "**Rückbau** — " : "**Teardown** — ") : "") + x.titel + " |\n").join("") + "\n" +
+    (de
+      ? "## Was zu beachten ist\n\n" +
+        "- Die Schlüssel und kubeconfigs landen unter `out/`. Das Verzeichnis enthält vollständige\n" +
+        "  Zugänge — nach der Übergabe löschen und nicht ins Repository legen.\n" +
+        "- `ssh_key` je Eintrag ersetzen. Solange dort ERSETZEN steht, überspringt das Playbook den Schritt.\n" +
+        "- Die Abnahme lässt den Lauf **scheitern**, wenn ein Benutzer an `kube-system` kommt.\n" +
+        "- Ein zweiter Lauf ändert nichts: Namespaces, Rollen und Schlüssel entstehen nur einmal.\n" +
+        (oidc ? "- Bei der Anmeldung per Kennwort fehlt hier die Benutzerliste des Anmeldedienstes.\n" +
+                "  Die Einträge in Dex müssen weiterhin von Hand gepflegt werden.\n" : "")
+      : "## Things to know\n\n" +
+        "- Keys and kubeconfigs land under `out/`. That directory holds complete access — delete it\n" +
+        "  after handover and keep it out of the repository.\n" +
+        "- Replace `ssh_key` per entry. While it still says ERSETZEN the playbook skips that step.\n" +
+        "- The acceptance play **fails** the run if a user can reach `kube-system`.\n" +
+        "- A second run changes nothing: namespaces, roles and keys are created once.\n" +
+        (oidc ? "- With password sign-in the sign-in service's user list is missing here.\n" +
+                "  The Dex entries still have to be maintained by hand.\n" : ""))});
+
+  return dateien;
+}
+
 function ansibleBundle(){
+  /* Serienbetrieb hat eine eigene Form — Schleife statt fester Werte. */
+  if (CLUSTER_MODE === "tenant" && tenantOpts(TENANT).batch) return tenantBatchBundle();
   const de = LANG === "de";
   const modus = t(CLUSTER_TAB_LABEL[CLUSTER_MODE] || CLUSTER_TAB_LABEL.install);
   const teile = ansiblePlays();
