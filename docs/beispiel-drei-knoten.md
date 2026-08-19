@@ -189,6 +189,58 @@ Zertifikatsschlüssel. Der Ablauf ist derselbe, mit drei Unterschieden:
 Reihenfolge: cp1 fertig aufsetzen, dann cp2 und cp3 mit
 `k8s-controlplane.conf`, zuletzt die Worker.
 
+## Variante: mit Ansible statt von Hand
+
+Derselbe Aufbau, aber von einem Rechner aus. Auf cp1 — oder auf dem eigenen
+Laptop, von dem aus alle drei Maschinen per SSH erreichbar sind:
+
+```sh
+./cluster-setup.sh \
+  --set cni=cilium --set podCidr=10.244.0.0/16 \
+  --set endpoint=k8s.lan --set workers=2 \
+  --ansible k8s-cluster.yml
+```
+
+Das schreibt zwei Dateien. Im Inventar die Adressen anpassen:
+
+```ini
+[k8s_control_plane]
+cp1 ansible_host=192.168.178.10
+
+[k8s_workers]
+w1 ansible_host=192.168.178.21
+w2 ansible_host=192.168.178.22
+
+[k8s_cluster:children]
+k8s_control_plane
+k8s_workers
+
+[all:vars]
+ansible_user=root
+```
+
+Vorher einmal prüfen, ob Ansible die Datei versteht und die richtigen Hosts
+trifft:
+
+```sh
+ansible-playbook --syntax-check -i k8s-cluster-inventory.ini k8s-cluster.yml
+ansible-playbook --list-hosts  -i k8s-cluster-inventory.ini k8s-cluster.yml
+```
+
+Die zweite Ausgabe muss zeigen: Vorbereitung auf allen drei, `kubeadm init` nur
+auf cp1, der Beitritt nur auf w1 und w2. Dann:
+
+```sh
+ansible-playbook -i k8s-cluster-inventory.ini k8s-cluster.yml
+```
+
+Beim zweiten Lauf `--skip-tags cni` mitgeben — `cilium install` läuft nur
+einmal. Alles andere ist auf Wiederholung ausgelegt: `kubeadm init` und
+`kubeadm join` überspringen sich über `creates:` selbst.
+
+Was der Export **nicht** tut: die API-Adresse in `/etc/hosts` eintragen. Das
+gehört vorher erledigt, sonst scheitert der Beitritt an der Namensauflösung.
+
 ## Trockenübung ohne Cluster
 
 Den ganzen Weg kann man auf einem einzigen Rechner durchspielen, ohne

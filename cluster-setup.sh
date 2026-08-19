@@ -932,12 +932,17 @@ $warn" \
 # Rolle -> Vorauswahl. Gibt die Auswahl in SELECTED zurueck.
 choose_sections(){
   local role
+  # Fuer Ansible gibt es keine Rollenfrage: ein Playbook deckt alle Knoten ab.
+  if [ "${1:-}" = ansible ]; then
+    role=ansible
+  else
   role=$(ui_menu "$(t 'Welche Rolle hat dieser Rechner?|What is this machine?')" \
     "$(t 'Die Vorauswahl richtet sich danach; einzelne Abschnitte lassen sich danach noch an- und abwaehlen.|The preselection follows from this; individual sections can still be toggled afterwards.')" \
     cp     "$(t 'Hauptserver|Control-plane node')" \
     worker "Worker" \
     all    "$(t 'alles anzeigen|show everything')") || return 1
   [ -z "$role" ] && return 1
+  fi
 
   local args=() n h r cnt pre
   while IFS=$'\t' read -r n h r cnt; do
@@ -946,6 +951,14 @@ choose_sections(){
       all) pre=on;;
       cp)     { [ "$r" = all ] || [ "$r" = cp ]; }     && pre=on;;
       worker) { [ "$r" = all ] || [ "$r" = worker ]; } && pre=on;;
+      ansible)
+        # Was ein Playbook aufbaut — pruefen und testen gehoert nicht dazu.
+        case $h in
+          "Vorbereitung"|"Preparation"|"Firewall"|\
+          "Erster Hauptserver"|"First control-plane node"|\
+          "Weitere Hauptserver"|"Further control-plane nodes"|\
+          "Auf jedem Worker"|"On every worker") pre=on;;
+        esac;;
     esac
     # "Neu aufsetzen" ist ein Notausgang, nie Teil einer normalen Installation.
     case $h in "Neu aufsetzen"|"Starting over"|"Wenn der Endpoint fehlt"|"If the endpoint is missing") pre=off;; esac
@@ -1290,6 +1303,242 @@ $(t 'Das Beitrittspaket enthaelt ein gueltiges Token — jetzt loeschen.|The joi
   fi
 }
 
+
+# ------------------------------------------------------- Ansible-Export -----
+# Die Anleitung kennt Befehle, Ansible kennt Aufgaben. Uebersetzt wird eins zu
+# eins ueber ansible.builtin.shell — mit vier Ausnahmen, weil Ansible Dinge
+# kann, die eine Textanleitung nicht kann:
+#   - kubeadm init und kubeadm join bekommen ein creates:, damit ein zweiter
+#     Durchlauf nichts kaputtmacht,
+#   - Token und CA-Hash holt ein eigener Play zur Laufzeit vom ersten
+#     Hauptserver. In die Datei geschrieben waeren sie nach 24 Stunden wertlos
+#     und bis dahin ein Geheimnis im Klartext,
+#   - lesende Befehle bekommen changed_when: false,
+#   - sudo faellt weg, dafuer steht become: true ueber dem Play.
+
+yqs(){ printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
+
+# Der erste Satz der Erklaerung wird der Name der Aufgabe — am Wort gekuerzt,
+# nicht mitten im Wort. Die vollstaendige Erklaerung steht als Kommentar
+# darueber, damit die Begruendung aus der Anleitung im Playbook bleibt.
+task_name(){
+  local d; d=$(plain "$(t "$1")")
+  d=${d%%. *}
+  d=$(printf '%s' "$d" | tr '\n' ' ')
+  if [ "${#d}" -gt 80 ]; then
+    d=$(printf '%s' "$d" | cut -c1-80)
+    d="${d% *}…"
+  fi
+  printf '%s' "$d"
+}
+
+# Kommentarblock, an der Wortgrenze umbrochen.
+an_comment(){
+  local line
+  while IFS= read -r line; do an_line '    # %s' "$line"; done <<EOF
+$(printf '%s' "$1" | fold -s -w 74 | sed 's/[[:space:]]*$//')
+EOF
+}
+
+nosudo(){ printf '%s' "$1" | sed -e 's/^sudo //' -e 's/&& sudo /\&\& /g' -e 's/| sudo /| /g'; }
+
+# Liest der Befehl nur, aendert er nichts — dann soll Ansible auch nicht
+# "changed" melden. Weissliste, nicht Schwarzliste: Wer sich vertut, meldet
+# lieber eine Aenderung zu viel als eine zu wenig.
+READONLY_RE='^(kubectl (get|describe|explain|api-resources|version)|kubeadm version|kubeadm token list|kubelet --version|ip -4 addr|ip neigh|getent|openssl|grep|true|echo)\b'
+readonly_cmd(){
+  local line seen=0
+  while IFS= read -r line; do
+    line=${line#"${line%%[! ]*}"}
+    [ -z "$line" ] && continue
+    case $line in \#*) continue;; esac
+    printf '%s' "$line" | grep -qE "$READONLY_RE" || return 1
+    seen=1
+  done <<EOF
+$1
+EOF
+  [ "$seen" = 1 ]
+}
+
+AN_BUF=""; AN_N=0; AN_CUR=0; AN_H=""; AN_FETCH=0; AN_WANT_CP2=0
+# printf -v mit -- , sonst haelt es "- name: ..." fuer eine Option.
+an_line(){ local s=""; printf -v s -- "$@"; AN_BUF="$AN_BUF$s
+"; }
+# Ein Play ohne Aufgaben ist ein Fehler — also erst ausgeben, wenn eine drin ist.
+an_flush(){ [ "$AN_N" -gt 0 ] && printf '%s' "$AN_BUF"; AN_BUF=""; AN_N=0; return 0; }
+
+is_cp2_sec(){ case $1 in "Weitere Hauptserver"|"Further control-plane nodes") return 0;; esac; return 1; }
+is_worker_sec(){ case $1 in "Auf jedem Worker"|"On every worker") return 0;; esac; return 1; }
+
+an_fetch_play(){
+  [ "$AN_FETCH" = 1 ] && return 0
+  AN_FETCH=1
+  printf '\n- name: %s\n' "$(yqs "$(t 'Beitrittsdaten auf dem ersten Hauptserver holen|Fetch the join values on the first control-plane node')")"
+  printf '  hosts: k8s_control_plane[0]\n  become: true\n  tasks:\n'
+  printf '    - name: %s\n' "$(yqs "$(t 'Frisches Token und CA-Hash erzeugen|Create a fresh token and CA hash')")"
+  printf '      ansible.builtin.command: kubeadm token create --print-join-command\n'
+  printf '      register: k8s_join\n'
+  printf '      changed_when: false\n'
+  if [ "$AN_WANT_CP2" = 1 ]; then
+    printf '    - name: %s\n' "$(yqs "$(t 'Zertifikate erneut hochladen, Schluessel merken (gilt zwei Stunden)|Upload the certificates again and keep the key (valid two hours)')")"
+    printf '      ansible.builtin.shell: kubeadm init phase upload-certs --upload-certs | tail -1\n'
+    printf '      register: k8s_certkey\n'
+    printf '      changed_when: false\n'
+  fi
+}
+
+an_sec(){
+  an_flush
+  SECN=$((SECN+1)); AN_CUR=$SECN; AN_H=$(t "$1")
+  sel_has "$SECN" || return 0
+  if is_cp2_sec "$AN_H" || is_worker_sec "$AN_H"; then an_fetch_play; fi
+  local hosts
+  case $2 in
+    all)    hosts="k8s_cluster";;
+    worker) hosts="k8s_workers";;
+    *)      if is_cp2_sec "$AN_H"; then hosts="k8s_control_plane[1:]"; else hosts="k8s_control_plane[0]"; fi;;
+  esac
+  AN_BUF=""; AN_N=0
+  an_line ''
+  an_line '- name: %s' "$(yqs "$(printf '%02d · %s' "$SECN" "$AN_H")")"
+  an_line '  hosts: %s' "$hosts"
+  an_line '  become: true'
+  an_line '  tasks:'
+}
+an_para(){ :; }; an_thead(){ :; }; an_trow(){ :; }
+an_risk(){ sel_has "$AN_CUR" || return 0
+  an_comment "$([ "$1" = err ] && echo '!' || echo '?') $(plain "$(t "$2")")"; }
+
+# Der Beitritt selbst: nicht der Befehl aus der Anleitung, sondern der, den der
+# erste Hauptserver eben ausgegeben hat.
+an_join_task(){
+  AN_N=$((AN_N+1))
+  an_line '    - name: %s' "$(yqs "$(t 'Dem Cluster beitreten|Join the cluster')")"
+  if is_cp2_sec "$AN_H"; then
+    an_line '      ansible.builtin.shell: >-'
+    an_line "        {{ hostvars[groups['k8s_control_plane'][0]].k8s_join.stdout }}"
+    an_line '        --control-plane'
+    an_line "        --certificate-key {{ hostvars[groups['k8s_control_plane'][0]].k8s_certkey.stdout }}"
+  else
+    an_line '      ansible.builtin.shell: "{{ hostvars[groups['"'"'k8s_control_plane'"'"'][0]].k8s_join.stdout }}"'
+  fi
+  an_line '      args:'
+  an_line '        creates: /etc/kubernetes/kubelet.conf'
+}
+
+an_cmd(){
+  sel_has "$AN_CUR" || return 0
+  local c=$1 d=$2 where=${3:-} skip="" line
+  case $c in *"kubeadm join"*) an_join_task; return 0;; esac
+  [ "$where" = other ] && skip="laeuft auf einem anderen Rechner|runs on a different machine"
+  [ -z "$skip" ] && has_placeholder "$c" && skip="enthaelt Platzhalter|contains placeholders"
+  [ -z "$skip" ] && case $c in *" -it "*) skip="braucht ein Terminal|needs a terminal";; esac
+  if [ -n "$skip" ]; then
+    an_comment "$(task_name "$d") — $(t "$skip"):"
+    while IFS= read -r line; do an_line '    #   %s' "$line"; done <<EOF
+$c
+EOF
+    return 0
+  fi
+  AN_N=$((AN_N+1))
+  case $c in *"cilium install"*)
+    an_comment "$(t 'Achtung: cilium install ist nicht idempotent — ein zweiter Durchlauf meldet, dass Cilium schon da ist, und laesst den Play scheitern. Danach mit --skip-tags cni laufen lassen.|Careful: cilium install is not idempotent — a second run reports that Cilium is already there and fails the play. Use --skip-tags cni from then on.')";;
+  esac
+  an_comment "$(plain "$(t "$d")")"
+  an_line '    - name: %s' "$(yqs "$(task_name "$d")")"
+  an_line '      ansible.builtin.shell: |'
+  while IFS= read -r line; do an_line '        %s' "$line"; done <<EOF
+$(nosudo "$c")
+EOF
+  # creates: dort, wo ein zweiter Durchlauf schaden oder haengen wuerde.
+  case $c in
+    *"kubeadm init"*)
+      an_line '      args:'
+      an_line '        creates: /etc/kubernetes/admin.conf';;
+    *'$HOME/.kube/config'*)
+      # cp -i wuerde ohne Terminal still nichts tun; unter become ist $HOME /root.
+      an_line '      args:'
+      an_line '        creates: /root/.kube/config';;
+  esac
+  # Das CNI bekommt einen Tag: es gehoert genau einmal ins Cluster und laesst
+  # sich so beim naechsten Lauf ueberspringen.
+  case $c in
+    *"cilium install"*|*calico.yaml*|*kube-flannel.yml*)
+      an_line '      tags: [cni]';;
+  esac
+  readonly_cmd "$c" && an_line '      changed_when: false'
+  return 0
+}
+
+export_ansible(){
+  normalize
+  # Steht der Abschnitt fuer weitere Hauptserver in der Auswahl? Dann braucht
+  # der Play oben auch den Zertifikatsschluessel.
+  AN_WANT_CP2=0
+  local n h r c
+  while IFS=$'\t' read -r n h r c; do
+    sel_has "$n" && is_cp2_sec "$h" && AN_WANT_CP2=1
+  done < <(sections)
+
+  printf -- '---\n'
+  printf '# Kubernetes-Cluster mit kubeadm\n'
+  printf '# %s\n' "$(t 'erzeugt von cluster-setup.sh|generated by cluster-setup.sh')"
+  printf '# %s\n#\n' "$(config_line)"
+  printf '# %s\n' "$(t 'Aufruf:|Run:')"
+  printf '#   ansible-playbook -i inventory.ini playbook.yml\n#\n'
+  printf '# %s\n' "$(t 'Der Beitrittsbefehl steht absichtlich nicht in dieser Datei: Ein eigener|The join command is deliberately not in this file: a separate play')"
+  printf '# %s\n' "$(t 'Play holt Token und CA-Hash zur Laufzeit vom ersten Hauptserver. Token|fetches the token and CA hash from the first control-plane node at run time.')"
+  printf '# %s\n' "$(t 'laufen nach 24 Stunden ab, in einer Datei waeren sie bald wertlos.|Tokens expire after 24 hours; in a file they would soon be worthless.')"
+  printf '#\n# %s\n' "$(t 'become: true heisst root — $HOME in den Befehlen ist /root.|become: true means root — $HOME in the commands is /root.')"
+  if [ -n "$O_endpoint" ]; then
+    printf '#\n# %s %s %s\n' "$(t 'Vorher:|Beforehand:')" "$O_endpoint" \
+      "$(t 'muss auf allen Knoten aufloesen (DNS oder /etc/hosts).|has to resolve on every node (DNS or /etc/hosts).')"
+  fi
+  AN_BUF=""; AN_N=0; AN_FETCH=0; SECN=0
+  R=an guide
+  an_flush
+}
+
+write_inventory(){
+  local f=$1 i=1
+  {
+    printf '# %s\n' "$(t 'erzeugt von cluster-setup.sh — Adressen anpassen|generated by cluster-setup.sh — adjust the addresses')"
+    printf '[k8s_control_plane]\n'
+    printf 'cp1 ansible_host=192.168.178.10\n'
+    if [ "$O_ha" = 1 ]; then
+      printf 'cp2 ansible_host=192.168.178.11\n'
+      printf 'cp3 ansible_host=192.168.178.12\n'
+    fi
+    printf '\n[k8s_workers]\n'
+    if [ "$O_workers" -gt 0 ] 2>/dev/null; then
+      while [ "$i" -le "$O_workers" ]; do
+        printf 'w%d ansible_host=192.168.178.%d\n' "$i" $((20 + i)); i=$((i + 1))
+      done
+    else
+      printf '# w1 ansible_host=192.168.178.21\n'
+    fi
+    printf '\n[k8s_cluster:children]\nk8s_control_plane\nk8s_workers\n'
+    printf '\n[all:vars]\nansible_user=root\n'
+  } > "$f"
+}
+
+save_ansible(){
+  choose_sections ansible || return 0
+  local f; f=$(ui_file "Ansible" "$(t 'Wohin speichern?|Where to save?')" "$PWD/k8s-cluster.yml") || return 0
+  [ -z "$f" ] && return 0
+  export_ansible > "$f"
+  local inv="${f%.*}-inventory.ini"
+  write_inventory "$inv"
+  ui_msg "Ansible" "$(t 'Geschrieben:|Written:')
+
+$f
+$inv
+
+ansible-playbook -i $(basename "$inv") $(basename "$f")
+
+$(t 'Token und Hash stehen nicht in der Datei — die holt ein eigener Play zur Laufzeit vom ersten Hauptserver.|The token and hash are not in the file — a separate play fetches them from the first control-plane node at run time.')"
+}
+
 # ------------------------------------------------------------- Hauptmenue ----
 SETTING_KEYS="version os runtime cni endpoint ha workers podCidr svcCidr singleNode firewall lbRange"
 
@@ -1357,6 +1606,7 @@ main_menu(){
       show   "$(t 'Anleitung anzeigen|Show the guide')" \
       md     "$(t 'Als Markdown speichern|Save as Markdown')" \
       script "$(t 'Als Shell-Script exportieren|Export as a shell script')" \
+      ansible "$(t 'Als Ansible-Playbook exportieren|Export as an Ansible playbook')" \
       run    "$(t 'Schritte auf diesem Rechner ausfuehren|Run the steps on this machine')" \
       save   "$(t 'Einstellungen sichern|Save settings')" \
       lang   "$(t 'Sprache: Deutsch|Language: English')" \
@@ -1368,6 +1618,7 @@ main_menu(){
       show)   show_guide;;
       md)     save_markdown;;
       script) save_script;;
+      ansible) save_ansible;;
       run)    run_mode;;
       save)   save_config; ui_msg "$(t 'Gesichert|Saved')" "$CONFIG";;
       lang)   [ "$UILANG" = de ] && UILANG=en || UILANG=de;;
@@ -1511,6 +1762,66 @@ selftest(){
   J_api=""; J_token=""; J_hash=""; J_certKey=""; J_role=""
   O_ha=0 O_endpoint=""; normalize
 
+  # --- Ansible-Export ---
+  O_ha=0 O_endpoint="" O_cni=cilium O_os=apt O_runtime=containerd O_firewall=0 O_workers=2; normalize
+  SELECTED=$(sections | awk -F'\t' '$2 ~ /^(Vorbereitung|Firewall|Erster Hauptserver|Weitere Hauptserver|Auf jedem Worker)$/ {print $1}' | tr '\n' ' ')
+  out=$(export_ansible)
+  ok "Play fuer alle Knoten"           "$(has "$out" 'hosts: k8s_cluster')"
+  ok "Play fuer den ersten Hauptserver" "$(has "$out" 'hosts: k8s_control_plane[0]')"
+  ok "Play fuer die Worker"            "$(has "$out" 'hosts: k8s_workers')"
+  ok "kubeadm init laeuft nur einmal" \
+     "$(printf '%s' "$out" | grep -A4 '^        kubeadm init' | grep -q 'creates: /etc/kubernetes/admin.conf' && echo 1 || echo 0)"
+  ok "Beitritt holt den Befehl zur Laufzeit" "$(has "$out" 'k8s_join.stdout')"
+  ok "Beitritt laeuft nur einmal"      "$(has "$out" 'creates: /etc/kubernetes/kubelet.conf')"
+  ok "sudo faellt weg, become steht oben" \
+     "$([ "$(printf '%s' "$out" | grep -c '^        sudo ')" = 0 ] && has "$out" 'become: true')"
+  ok "das CNI ist zum Ueberspringen markiert" "$(has "$out" 'tags: [cni]')"
+  ok "kein Play ohne Aufgaben" \
+     "$(printf '%s' "$out" | awk '/^  tasks:$/{t=1;next} t==1{ if ($0 ~ /^- name:/ || $0 == "") {bad=1}; t=0 } END{print bad?0:1}')"
+  ok "lesende Befehle sind als solche erkannt" \
+     "$(readonly_cmd 'kubectl get nodes -o wide' && echo 1 || echo 0)"
+  ok "schreibende nicht" \
+     "$(readonly_cmd "$(printf 'mkdir -p /x\ncp -i a b')" && echo 0 || echo 1)"
+  ok "ohne HA kein Zertifikatsschluessel" "$([ "$(has "$out" 'k8s_certkey')" = 0 ] && echo 1 || echo 0)"
+
+  # Das Token gehoert nicht in die Datei, auch nicht mit geladenem Paket.
+  J_api=192.168.0.10:6443 J_token=ab12cd.34ef56gh78ij90kl J_hash=sha256:deadbeef J_role=worker
+  out=$(export_ansible)
+  ok "kein Token im Playbook"          "$([ "$(has "$out" 'ab12cd.34ef56gh78ij90kl')" = 0 ] && echo 1 || echo 0)"
+  J_api=""; J_token=""; J_hash=""; J_role=""
+
+  O_ha=1 O_endpoint=k8s.lan; normalize
+  SELECTED=$(sections | awk -F'\t' '$2 ~ /^(Vorbereitung|Erster Hauptserver|Weitere Hauptserver|Auf jedem Worker)$/ {print $1}' | tr '\n' ' ')
+  out=$(export_ansible)
+  ok "mit HA gibt es den Zertifikatsschluessel" "$(has "$out" 'register: k8s_certkey')"
+  ok "weitere Hauptserver bekommen ihre eigene Gruppe" "$(has "$out" 'hosts: k8s_control_plane[1:]')"
+  ok "und treten mit --control-plane bei" "$(has "$out" -- '--control-plane')"
+
+  invf=$(mktemp); O_workers=2; write_inventory "$invf"
+  ok "Inventar zaehlt die Worker mit"  "$([ "$(grep -c '^w[0-9]' "$invf")" = 2 ] && echo 1 || echo 0)"
+  ok "Inventar kennt drei Hauptserver bei HA" "$([ "$(grep -c '^cp[0-9]' "$invf")" = 3 ] && echo 1 || echo 0)"
+  rm -f "$invf"
+
+  if python3 -c 'import yaml' >/dev/null 2>&1; then
+    pbf=$(mktemp); export_ansible > "$pbf"
+    ok "Playbook ist gueltiges YAML" \
+       "$(python3 -c 'import yaml,sys; d=yaml.safe_load(open(sys.argv[1])); sys.exit(0 if isinstance(d,list) and all(p.get("tasks") for p in d) else 1)' "$pbf" && echo 1 || echo 0)"
+    rm -f "$pbf"
+  else
+    ok "YAML-Pruefung uebersprungen, kein PyYAML" 1
+  fi
+  # Die schaerfste Pruefung, wenn Ansible zur Hand ist.
+  if command -v ansible-playbook >/dev/null 2>&1; then
+    pbf=$(mktemp --suffix=.yml); invf=$(mktemp --suffix=.ini)
+    export_ansible > "$pbf"; write_inventory "$invf"
+    ok "ansible-playbook nimmt das Playbook an" \
+       "$(ansible-playbook --syntax-check -i "$invf" "$pbf" >/dev/null 2>&1 && echo 1 || echo 0)"
+    rm -f "$pbf" "$invf"
+  else
+    ok "Syntaxpruefung uebersprungen, kein ansible-playbook" 1
+  fi
+  O_ha=0 O_endpoint="" O_workers=3; normalize
+
   UILANG=en; out=$(markdown); UILANG=de
   ok "Englisch uebersetzt die Ueberschrift" "$(has "$out" 'First control-plane node')"
   ok "Englisch laesst Befehle unveraendert" "$(has "$out" 'sudo swapoff -a')"
@@ -1533,6 +1844,7 @@ Wizard-Panels "Cluster".
   $SELF --md [DATEI]           Anleitung als Markdown ausgeben
   $SELF --text                 Anleitung als Text ausgeben
   $SELF --script [DATEI]       ausfuehrbares Script erzeugen (alle Abschnitte)
+  $SELF --ansible [DATEI]      Ansible-Playbook und Inventar erzeugen
   $SELF --sections             Abschnitte auflisten
   $SELF --selftest             Selbsttests
 
@@ -1560,6 +1872,7 @@ while [ $# -gt 0 ]; do
     --md|--markdown) ACTION=md;   [ $# -gt 1 ] && case ${2-} in -*|"") :;; *) ARG=$2; shift;; esac;;
     --text)          ACTION=text;;
     --script)        ACTION=script; [ $# -gt 1 ] && case ${2-} in -*|"") :;; *) ARG=$2; shift;; esac;;
+    --ansible)       ACTION=ansible; [ $# -gt 1 ] && case ${2-} in -*|"") :;; *) ARG=$2; shift;; esac;;
     --sections)      ACTION=sections;;
     --selftest)      ACTION=selftest;;
     --only)          ONLY=$2; shift;;
@@ -1584,6 +1897,11 @@ case $ACTION in
   md)       if [ -n "$ARG" ]; then markdown > "$ARG"; printf 'geschrieben: %s\n' "$ARG"; else markdown; fi;;
   text)     text_guide;;
   sections) sections | while IFS=$'\t' read -r n h r c; do printf '%2s  %-34s %-22s %s\n' "$n" "$h" "$(t "$(role_lbl "$r")")" "$c"; done;;
+  ansible)  if [ -n "$ONLY" ]; then SELECTED=$ONLY
+            else SELECTED=$(sections | awk -F'\t' '$2 ~ /^(Vorbereitung|Preparation|Firewall|Erster Hauptserver|First control-plane node|Weitere Hauptserver|Further control-plane nodes|Auf jedem Worker|On every worker)$/ {print $1}' | tr '\n' ' '); fi
+            if [ -n "$ARG" ]; then export_ansible > "$ARG"; write_inventory "${ARG%.*}-inventory.ini"
+              printf 'geschrieben: %s\n' "$ARG"; printf 'geschrieben: %s\n' "${ARG%.*}-inventory.ini"
+            else export_ansible; fi;;
   script)   SELECTED=${ONLY:-$(sections | cut -f1 | tr '\n' ' ')}
             if [ -n "$ARG" ]; then export_script > "$ARG"; chmod +x "$ARG"; printf 'geschrieben: %s\n' "$ARG"
             else export_script; fi;;

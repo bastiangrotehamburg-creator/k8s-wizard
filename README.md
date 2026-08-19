@@ -46,6 +46,41 @@ angezeigt, nie ausgeführt.
 
 ![Abschnitte](docs/tui-abschnitte.png)
 
+### Als Ansible-Playbook
+
+Für mehr als eine Handvoll Knoten gibt es denselben Ablauf als Playbook, dazu
+ein passendes Inventar:
+
+```sh
+./cluster-setup.sh --ansible k8s-cluster.yml
+ansible-playbook -i k8s-cluster-inventory.ini k8s-cluster.yml
+```
+
+![Ansible-Export](docs/tui-ansible.png)
+
+Jeder Abschnitt der Anleitung wird ein Play, die Rolle bestimmt die Hostgruppe:
+`k8s_cluster` für die Vorbereitung, `k8s_control_plane[0]` für `kubeadm init`,
+`k8s_control_plane[1:]` für weitere Hauptserver, `k8s_workers` für den Beitritt.
+Jeder Befehl wird eine Aufgabe, die Begründung aus der Anleitung steht als
+Kommentar darüber.
+
+Vier Dinge macht der Export bewusst anders als die Textanleitung, weil Ansible
+sie besser kann:
+
+- **Der Beitrittsbefehl steht nicht in der Datei.** Ein eigener Play holt Token
+  und CA-Hash zur Laufzeit vom ersten Hauptserver und reicht sie über
+  `hostvars` weiter. Ein Token in der Datei wäre nach 24 Stunden wertlos und
+  bis dahin ein Geheimnis im Klartext.
+- **`kubeadm init` und `kubeadm join` bekommen ein `creates:`**, damit ein
+  zweiter Durchlauf sie überspringt statt Schaden anzurichten.
+- **`sudo` fällt weg**, dafür steht `become: true` über dem Play.
+- **Lesende Befehle bekommen `changed_when: false`** — geprüft über eine
+  Weißliste, damit im Zweifel eine Änderung zu viel gemeldet wird statt einer
+  zu wenig.
+
+Die CNI-Installation trägt `tags: [cni]`. Sie gehört genau einmal ins Cluster;
+beim zweiten Lauf `--skip-tags cni` mitgeben.
+
 ### Beitrittspakete: vom Hauptserver zu den anderen Knoten
 
 ![Wer macht was](docs/beitrittspakete.png)
