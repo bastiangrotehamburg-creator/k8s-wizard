@@ -4512,6 +4512,65 @@ function runSelfTests(){
       CLUSTER_MODE = keep.m; TENANT = keep.t;
       return b.every(f => f.name !== "group_vars/all.yml");
     })(), "");
+  const weiteText = (w) => {
+    const keep = TENANT;
+    TENANT = {user:"bge", ns:"team-admin", api:"k8s-cp1.highq.org:6443", weite:w};
+    const g = tenantGuide(TENANT);
+    TENANT = keep;
+    return JSON.stringify(g);
+  };
+  const weiteSerie = (w) => {
+    const keep = {m:CLUSTER_MODE, t:TENANT};
+    CLUSTER_MODE = "tenant";
+    TENANT = {user:"bge", ns:"team-admin", api:"k8s-cp1.highq.org:6443", weite:w, batch:true};
+    const b = ansibleBundle();
+    CLUSTER_MODE = keep.m; TENANT = keep.t;
+    return b;
+  };
+  ok("Reichweite: die Vorgabe bindet nur im eigenen Namespace",
+    weiteText("ns").indexOf("kind: ClusterRoleBinding") === -1 &&
+    weiteText("ns").indexOf("kind: RoleBinding") !== -1, "");
+  ok("Reichweite: sehen bindet eine eigene winzige Rolle, nicht view",
+    (function(){
+      const g = weiteText("sehen");
+      return g.indexOf("name: namespaces-sehen") !== -1 &&
+             g.indexOf("kind: RoleBinding") !== -1 &&
+             g.indexOf("name: view\\n  apiGroup") === -1;
+    })(), "");
+  ok("Reichweite: alle bindet clusterweit und nennt den Preis",
+    (function(){
+      const g = weiteText("alle");
+      return g.indexOf("kind: ClusterRoleBinding") !== -1 &&
+             g.indexOf("kind: RoleBinding") === -1 &&
+             g.indexOf("kube-system") !== -1 && g.indexOf("cluster-admin") !== -1;
+    })(), "");
+  ok("Reichweite: die Rücknahme räumt weg, was die Reichweite anlegt",
+    (function(){
+      const alle = weiteText("alle"), sehen = weiteText("sehen"), ns = weiteText("ns");
+      return alle.indexOf("delete clusterrolebinding bge-edit-clusterweit") !== -1 &&
+             sehen.indexOf("delete clusterrolebinding bge-namespaces-sehen") !== -1 &&
+             ns.indexOf("delete clusterrolebinding") === -1;
+    })(), "");
+  ok("Reichweite: die Abnahme erwartet je Reichweite etwas anderes",
+    weiteText("ns").indexOf("can-i list namespaces") === -1 &&
+    weiteText("sehen").indexOf("can-i list namespaces") !== -1 &&
+    weiteText("alle").indexOf("can-i create deployments -n kube-system") !== -1, "");
+  ok("Reichweite: die Serie zieht mit",
+    (function(){
+      const f = (b, n) => b.filter(x => x.name.indexOf(n) !== -1)[0].text;
+      const a = weiteSerie("alle"), s = weiteSerie("sehen"), n = weiteSerie("ns");
+      return f(a, "rbac").indexOf("kind: ClusterRoleBinding") !== -1 &&
+             f(n, "rbac").indexOf("ClusterRoleBinding") === -1 &&
+             f(s, "rbac").indexOf("name: namespaces-sehen") !== -1 &&
+             f(a, "teardown").indexOf("kind: ClusterRoleBinding") !== -1;
+    })(), "");
+  ok("Reichweite: die Serie prüft bei alle nicht mehr auf die Grenze zu kube-system",
+    (function(){
+      const f = (b) => b.filter(x => x.name.indexOf("verify") !== -1)[0].text;
+      return f(weiteSerie("alle")).indexOf("darf_nicht") === -1 &&
+             f(weiteSerie("alle")).indexOf("darf_ueberall") !== -1 &&
+             f(weiteSerie("ns")).indexOf("darf_nicht") !== -1;
+    })(), "");
   const tenantBundle = (function(){
     const keep = {m:CLUSTER_MODE, t:TENANT};
     CLUSTER_MODE = "tenant";
@@ -5207,6 +5266,11 @@ const TENANT_FIELDS = [
    opts:[["edit","Arbeiten — Pods, Deployments, Services anlegen und ändern|Work — create and change pods, deployments, services"],
          ["view","Nur zusehen — alles lesen, nichts ändern|Watch only — read everything, change nothing"],
          ["admin","Verwalten — zusätzlich Rechte im eigenen Namespace vergeben|Administer — additionally grant rights inside the own namespace"]]},
+  {k:"weite", t:"select", l:"Wo das gilt|Where it applies", structural:true,
+   opts:[["ns","Nur im eigenen Namespace|Only in the own namespace"],
+         ["sehen","Alle Namespaces sehen, im eigenen arbeiten|See all namespaces, work in the own one"],
+         ["alle","In allen Namespaces arbeiten|Work in all namespaces"]],
+   hint:"Die Vorgabe grenzt ab. Die beiden anderen heben die Grenze ganz oder halb auf — was das kostet, steht beim Rollen-Abschnitt.|The default draws a boundary. The other two lift it, wholly or halfway — what that costs is written at the role section."},
   {k:"identity", t:"select", l:"Womit er sich anmeldet|How the user signs in", structural:true,
    opts:[["cert","Client-Zertifikat — ein echter Benutzer im Cluster|Client certificate — a real user in the cluster"],
          ["oidc","Benutzername und Kennwort — über einen Anmeldedienst|User name and password — through a sign-in service"],
@@ -5265,6 +5329,7 @@ function tenantOpts(o){
     issuer: (o.issuer || "").trim().replace(/\/+$/, "") || ("https://dex." + dom + ":32000"),
     ns: ns,
     level: o.level || "edit",
+    weite: o.weite || "ns",
     identity: o.identity || "cert",
     api: api,
     apiOhnePort: !/:\d+$/.test(apiRoh) && apiRoh.indexOf("API-ADRESSE") === -1,
@@ -5355,20 +5420,38 @@ function tenantGuide(raw){
 
   /* --- 3. Rolle --- */
   sec("Die Rolle: was er darf und wo|The role: what and where", "admin", {
-    p:["Kubernetes bringt die Rollen fertig mit. Du baust keine eigene — du bindest eine vorhandene **in einem Namespace**. Genau darin liegt der Trick: Eine ClusterRole ist nur eine Sammlung von Regeln. Ob sie clusterweit oder in einem einzigen Namespace gilt, entscheidet die Bindung.|Kubernetes ships the roles ready-made. You do not build your own — you bind an existing one **inside a namespace**. That is exactly the trick: a ClusterRole is merely a set of rules. Whether it applies cluster-wide or in a single namespace is decided by the binding.",
-       "Ein RoleBinding auf eine ClusterRole bedeutet: diese Regeln, aber nur hier. Ein ClusterRoleBinding auf dieselbe ClusterRole bedeutet: überall. Der Unterschied ist ein Wort und der ganze Sicherheitsgewinn.|A RoleBinding onto a ClusterRole means: these rules, but only here. A ClusterRoleBinding onto the same ClusterRole means: everywhere. The difference is one word and the entire security benefit."],
+    p:["Kubernetes bringt die Rollen fertig mit. Du baust keine eigene — du bindest eine vorhandene. Genau darin liegt der Trick: Eine ClusterRole ist nur eine Sammlung von Regeln. Ob sie clusterweit oder in einem einzigen Namespace gilt, entscheidet die Bindung.|Kubernetes ships the roles ready-made. You do not build your own — you bind an existing one. That is exactly the trick: a ClusterRole is merely a set of rules. Whether it applies cluster-wide or in a single namespace is decided by the binding.",
+       "Ein RoleBinding auf eine ClusterRole bedeutet: diese Regeln, aber nur hier. Ein ClusterRoleBinding auf dieselbe ClusterRole bedeutet: überall. Der Unterschied ist ein Wort — und genau den entscheidet das Feld *Wo das gilt*.|A RoleBinding onto a ClusterRole means: these rules, but only here. A ClusterRoleBinding onto the same ClusterRole means: everywhere. The difference is one word — and the *Where it applies* field is what decides it.",
+       o.weite === "alle"
+         ? "Hier steht die Reichweite auf **überall**. Der Namespace unten wird trotzdem angelegt — als Arbeitsort, für die Quota und für den Fall, dass die Reichweite später wieder eingezogen wird.|The scope here is set to **everywhere**. The namespace below is still created — as a place to work, for the quota, and for the case where the scope gets pulled back in later."
+         : o.weite === "sehen"
+         ? "Hier steht die Reichweite auf **sehen, aber nicht anfassen**. Dafür kommt zur Bindung im Namespace eine zweite, absichtlich winzige Rolle dazu, die nur Namen auflisten darf.|The scope here is set to **see, but do not touch**. For that, a second and deliberately tiny role joins the namespaced binding, one that may only list names."
+         : "Hier steht die Reichweite auf **nur der eigene Namespace** — die Vorgabe, und in den allermeisten Fällen die richtige.|The scope here is set to **the own namespace only** — the default, and in the vast majority of cases the right one."],
     table:[["Stufe|Level","Darf|May","Darf nicht|May not"],
       ["view","Alles lesen außer Secrets|Read everything except secrets","Nichts ändern|Change nothing"],
       ["edit","Pods, Deployments, Services, ConfigMaps und Secrets anlegen und ändern|Create and change pods, deployments, services, config maps and secrets","Rollen vergeben, den Namespace löschen|Grant roles, delete the namespace"],
       ["admin","Zusätzlich Rollen und Bindungen im eigenen Namespace vergeben|Additionally grant roles and bindings inside the own namespace","Mehr Rechte vergeben, als er selbst hat|Grant more rights than they hold themselves"]],
-    items:[
-      {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: " + o.user + "-" + TENANT_ROLE[o.level] + "\n  namespace: " + o.ns + "\nroleRef:\n  kind: ClusterRole\n  name: " + TENANT_ROLE[o.level] + "\n  apiGroup: rbac.authorization.k8s.io\nsubjects:\n" + subject + "\nEOF",
-       d:"kind ist RoleBinding, roleRef.kind ist ClusterRole — diese Mischung ist beabsichtigt und der übliche Weg. Der Namespace in metadata bestimmt, wo die Regeln greifen.|kind is RoleBinding, roleRef.kind is ClusterRole — that mixture is deliberate and the usual way. The namespace in metadata decides where the rules apply."},
-      {c:"kubectl get rolebindings -n " + o.ns + " -o wide",
-       d:"Zeigt, wer in diesem Namespace welche Rolle hat. Sollte kurz und überschaubar bleiben.|Shows who holds which role in this namespace. Should stay short and surveyable."}
-    ],
-    r:[{lvl:"warn", m:t("edit und admin dürfen die Secrets im eigenen Namespace lesen — auch die, die du dort später anlegst. Ein Namespace ist genau so vertraulich wie sein am wenigsten vertrauenswürdiger Benutzer.|edit and admin may read the secrets in their own namespace — including the ones you create there later. A namespace is exactly as confidential as its least trustworthy user.")}]
-      .concat(o.level === "admin" ? [{lvl:"warn", m:t("admin darf im eigenen Namespace weitere Bindungen anlegen. Mehr als die eigenen Rechte kann er dabei nicht vergeben — der API-Server verhindert das. Ein zweiter Benutzer im selben Namespace kann so aber ohne dein Zutun entstehen.|admin may create further bindings inside their own namespace. They cannot grant more than they hold — the API server prevents that. But a second user in the same namespace can appear without your involvement.")}] : [])
+    items:(o.weite === "alle"
+      ? [{c:"cat <<'EOF' | kubectl apply -f -\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: " + o.user + "-" + TENANT_ROLE[o.level] + "-clusterweit\nroleRef:\n  kind: ClusterRole\n  name: " + TENANT_ROLE[o.level] + "\n  apiGroup: rbac.authorization.k8s.io\nsubjects:\n" + subject + "\nEOF",
+          d:"**ClusterRoleBinding statt RoleBinding** — dieselbe Rolle, aber ohne Namespace darin, also überall. Ein eigener Namespace ist damit nicht mehr nötig; er bleibt nur als Arbeitsort und für die Quota sinnvoll.|**ClusterRoleBinding instead of RoleBinding** — the same role, but without a namespace in it, so everywhere. A namespace of one's own is no longer needed for this; it stays useful only as a place to work and for the quota."},
+         {c:"kubectl get clusterrolebindings -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECTS:.subjects[*].name \\\n  | grep -v '^system:'",
+          d:"Die Liste, in der der Name jetzt steht. Alles darin gilt clusterweit und sollte man erklären können.|The list the name now appears in. Everything in it applies cluster-wide and should be explicable."}]
+      : [{c:"cat <<'EOF' | kubectl apply -f -\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: " + o.user + "-" + TENANT_ROLE[o.level] + "\n  namespace: " + o.ns + "\nroleRef:\n  kind: ClusterRole\n  name: " + TENANT_ROLE[o.level] + "\n  apiGroup: rbac.authorization.k8s.io\nsubjects:\n" + subject + "\nEOF",
+          d:"kind ist RoleBinding, roleRef.kind ist ClusterRole — diese Mischung ist beabsichtigt und der übliche Weg. Der Namespace in metadata bestimmt, wo die Regeln greifen.|kind is RoleBinding, roleRef.kind is ClusterRole — that mixture is deliberate and the usual way. The namespace in metadata decides where the rules apply."},
+         {c:"kubectl get rolebindings -n " + o.ns + " -o wide",
+          d:"Zeigt, wer in diesem Namespace welche Rolle hat. Sollte kurz und überschaubar bleiben.|Shows who holds which role in this namespace. Should stay short and surveyable."}])
+      .concat(o.weite === "sehen"
+        ? [{c:"cat <<'EOF' | kubectl apply -f -\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: namespaces-sehen\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"namespaces\"]\n    verbs: [\"get\", \"list\", \"watch\"]\n  - apiGroups: [\"\"]\n    resources: [\"nodes\"]\n    verbs: [\"list\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: " + o.user + "-namespaces-sehen\nroleRef:\n  kind: ClusterRole\n  name: namespaces-sehen\n  apiGroup: rbac.authorization.k8s.io\nsubjects:\n" + subject + "\nEOF",
+            d:"Eine eigene, absichtlich winzige ClusterRole: Namespaces und Nodes auflisten, sonst nichts. Damit funktioniert `kubectl get ns`, ohne dass irgendwo Inhalte sichtbar werden — die eingebaute Rolle view wäre dafür viel zu weit, weil sie in jedem Namespace jede ConfigMap lesen darf.|A deliberately tiny ClusterRole of its own: list namespaces and nodes, nothing else. That makes `kubectl get ns` work without any content becoming visible — the built-in view role would be far too wide for this, because it may read every config map in every namespace."}]
+        : []),
+    r:(o.weite === "alle"
+      ? [{lvl:"err", m:t("Mit " + TENANT_ROLE[o.level] + " clusterweit gilt die Rolle auch in kube-system. Wer dort Secrets lesen darf, liest die Token der ServiceAccounts — darunter die von Controllern, die alles dürfen. In der Praxis ist das gleichbedeutend mit Cluster-Administrator, nur ohne dass es so heißt. Wenn das gewollt ist, ist cluster-admin ehrlicher: kubectl create clusterrolebinding " + o.user + "-admin --clusterrole=cluster-admin --user=" + o.user + "|With " + TENANT_ROLE[o.level] + " cluster-wide the role also applies in kube-system. Whoever may read secrets there reads the service account tokens — among them those of controllers that may do anything. In practice that is equivalent to cluster administrator, only without the name. If that is what you want, cluster-admin is the honest form: kubectl create clusterrolebinding " + o.user + "-admin --clusterrole=cluster-admin --user=" + o.user)},
+         {lvl:"warn", m:t("Quota und LimitRange gelten weiterhin je Namespace — sie hängen am Namespace, nicht am Benutzer. In fremden Namespaces gilt deren Quota, nicht die eigene. Die NetworkPolicy bleibt ebenfalls wirksam, sie kennt keine Benutzer.|Quota and LimitRange still apply per namespace — they hang off the namespace, not the user. In other namespaces their quota applies, not this one's. The network policy also stays in force; it knows nothing about users.")}]
+      : o.weite === "sehen"
+        ? [{lvl:"warn", m:t("Namespaces aufzählen zu dürfen heißt, die Namen aller Teams zu kennen. Inhalte bleiben verborgen, aber die Struktur des Clusters ist damit offen — in den meisten Häusern kein Problem, in manchen schon.|Being allowed to list namespaces means knowing the names of all teams. Contents stay hidden, but the structure of the cluster is open — in most places no problem, in some it is.")}]
+        : [])
+      .concat([{lvl:"warn", m:t("edit und admin dürfen die Secrets im eigenen Namespace lesen — auch die, die du dort später anlegst. Ein Namespace ist genau so vertraulich wie sein am wenigsten vertrauenswürdiger Benutzer.|edit and admin may read the secrets in their own namespace — including the ones you create there later. A namespace is exactly as confidential as its least trustworthy user.")}]
+      .concat(o.level === "admin" ? [{lvl:"warn", m:t("admin darf im eigenen Namespace weitere Bindungen anlegen. Mehr als die eigenen Rechte kann er dabei nicht vergeben — der API-Server verhindert das. Ein zweiter Benutzer im selben Namespace kann so aber ohne dein Zutun entstehen.|admin may create further bindings inside their own namespace. They cannot grant more than they hold — the API server prevents that. But a second user in the same namespace can appear without your involvement.")}] : []))
   });
 
   /* --- 3b. Anmeldedienst, nur beim Kennwort-Weg --- */
@@ -5596,8 +5679,16 @@ function tenantGuide(raw){
     items:[
       {c:"kubectl auth can-i --list --as=" + asUser + " -n " + o.ns,
        d:"Die vollständige Liste dessen, was im eigenen Namespace erlaubt ist. Kurz durchlesen lohnt sich — hier fällt auf, wenn die Stufe zu hoch gewählt war.|The complete list of what is allowed in the own namespace. Worth a quick read — this is where an overly high level shows itself."},
-      {c:"kubectl auth can-i get secrets -n kube-system --as=" + asUser + "\nkubectl auth can-i delete namespace " + o.ns + " --as=" + asUser + "\nkubectl auth can-i create clusterrolebinding --as=" + asUser + "\nkubectl auth can-i get nodes --as=" + asUser,
-       d:"Vier Fragen, auf die viermal no kommen muss. Kommt irgendwo yes, ist eine Bindung clusterweit statt auf den Namespace begrenzt — dann ist ein ClusterRoleBinding im Spiel, wo ein RoleBinding hingehört.|Four questions that have to be answered no four times. A yes anywhere means a binding is cluster-wide instead of scoped — then a ClusterRoleBinding is in play where a RoleBinding belongs."},
+      {c:o.weite === "ns"
+         ? "kubectl auth can-i get secrets -n kube-system --as=" + asUser + "\nkubectl auth can-i delete namespace " + o.ns + " --as=" + asUser + "\nkubectl auth can-i create clusterrolebinding --as=" + asUser + "\nkubectl auth can-i get nodes --as=" + asUser
+         : o.weite === "sehen"
+         ? "kubectl auth can-i list namespaces --as=" + asUser + "        # yes\nkubectl auth can-i get secrets -n kube-system --as=" + asUser + "   # no\nkubectl auth can-i list pods -n kube-system --as=" + asUser + "     # no\nkubectl auth can-i create clusterrolebinding --as=" + asUser + "    # no"
+         : "kubectl auth can-i list namespaces --as=" + asUser + "        # yes\nkubectl auth can-i create deployments -n kube-system --as=" + asUser + " # yes" + (LANG === "de" ? ", das ist der Zweck" : ", that is the point") + "\nkubectl auth can-i get secrets -n kube-system --as=" + asUser + "   # yes" + (LANG === "de" ? " — siehe Warnung oben" : " — see the warning above") + "\nkubectl auth can-i create clusterrolebinding --as=" + asUser + "    # no",
+       d:o.weite === "ns"
+         ? "Vier Fragen, auf die viermal no kommen muss. Kommt irgendwo yes, ist eine Bindung clusterweit statt auf den Namespace begrenzt — dann ist ein ClusterRoleBinding im Spiel, wo ein RoleBinding hingehört.|Four questions that have to be answered no four times. A yes anywhere means a binding is cluster-wide instead of scoped — then a ClusterRoleBinding is in play where a RoleBinding belongs."
+         : o.weite === "sehen"
+         ? "Die Namen der Namespaces ja, ihre Inhalte nein. Kommt bei der dritten Zeile yes, ist versehentlich die eingebaute Rolle view clusterweit gebunden statt der kleinen eigenen.|The names of the namespaces yes, their contents no. A yes on the third line means the built-in view role got bound cluster-wide by accident instead of the small custom one."
+         : "Die dritte Zeile ist die wichtige: Wer in kube-system Secrets liest, kommt an die Token der Controller und ist damit faktisch Cluster-Administrator. Das ist die Folge der Reichweite, kein Fehler in der Einrichtung.|The third line is the important one: whoever reads secrets in kube-system gets at the controllers' tokens and is thereby effectively cluster administrator. That is the consequence of the scope, not a fault in the setup."},
       {c:"kubectl get clusterrolebindings -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECTS:.subjects[*].name \\\n  | grep -v '^system:'",
        d:"Der Blick aufs Ganze: Alles, was clusterweit gebunden ist und nicht von Kubernetes selbst stammt. Diese Liste sollte man kennen und erklären können.|The wider view: everything bound cluster-wide that does not come from Kubernetes itself. You should know this list and be able to explain it."},
       {c:cert ? "shred -u " + o.user + ".key " + o.user + ".csr " + o.user + ".crt " + kc + " ca.crt"
@@ -5612,7 +5703,10 @@ function tenantGuide(raw){
     back:true,
     p:["Der Weg hinaus ist kürzer als der hinein, hat aber eine scharfe Kante: `kubectl delete namespace` löscht **alles** darin — Deployments, Secrets, PVCs. Ob die Daten hinter den PVCs mitgehen, entscheidet die reclaimPolicy der StorageClass.|The way out is shorter than the way in but has a sharp edge: `kubectl delete namespace` deletes **everything** inside — deployments, secrets, PVCs. Whether the data behind the PVCs goes with them is decided by the storage class's reclaim policy."],
     items:[
-      {c:"kubectl delete rolebinding " + o.user + "-" + TENANT_ROLE[o.level] + " -n " + o.ns,
+      {c:(o.weite === "alle"
+          ? "kubectl delete clusterrolebinding " + o.user + "-" + TENANT_ROLE[o.level] + "-clusterweit"
+          : "kubectl delete rolebinding " + o.user + "-" + TENANT_ROLE[o.level] + " -n " + o.ns) +
+         (o.weite === "sehen" ? "\nkubectl delete clusterrolebinding " + o.user + "-namespaces-sehen" : ""),
        d:"Der schonende Weg: Die Rechte sind weg, alles andere bleibt stehen. Bei einem Zertifikat ist das der einzige wirksame Widerruf.|The gentle way: the rights are gone, everything else stays. With a certificate this is the only effective revocation."},
       {c:cert ? "kubectl delete csr " + o.user
          : oidc ? "# den Eintrag aus staticPasswords in der ConfigMap entfernen, dann:\nkubectl -n dex rollout restart deployment dex"
@@ -6383,16 +6477,38 @@ function tenantBatchBundle(){
   nimm(de ? "Namespaces" : "Namespaces", "localhost", ns, "namespaces");
 
   /* ---- 2. Rechte ---- */
+  const clusterweit = o.weite === "alle";
   nimm(de ? "Rechte" : "Rights", "localhost",
-    '    # ' + (de ? "RoleBinding auf eine ClusterRole: die Regeln gelten nur in diesem Namespace."
-                   : "A RoleBinding onto a ClusterRole: the rules apply only in this namespace.") + "\n" +
-    '    - name: "RoleBinding je Team"\n' +
+    '    # ' + (clusterweit
+      ? (de ? "ClusterRoleBinding: die Regeln gelten in jedem Namespace."
+            : "ClusterRoleBinding: the rules apply in every namespace.")
+      : (de ? "RoleBinding auf eine ClusterRole: die Regeln gelten nur in diesem Namespace."
+            : "A RoleBinding onto a ClusterRole: the rules apply only in this namespace.")) + "\n" +
+    '    - name: "' + (clusterweit ? "ClusterRoleBinding je Team" : "RoleBinding je Team") + '"\n' +
     "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
-    "          apiVersion: rbac.authorization.k8s.io/v1\n          kind: RoleBinding\n          metadata:\n" +
-    '            name: "{{ item.user }}-{{ item.level }}"\n            namespace: "{{ item.ns }}"\n' +
+    "          apiVersion: rbac.authorization.k8s.io/v1\n          kind: " +
+    (clusterweit ? "ClusterRoleBinding" : "RoleBinding") + "\n          metadata:\n" +
+    '            name: "{{ item.user }}-{{ item.level }}' + (clusterweit ? "-clusterweit" : "") + '"\n' +
+    (clusterweit ? "" : '            namespace: "{{ item.ns }}"\n') +
     "          roleRef:\n            kind: ClusterRole\n" +
     '            name: "{{ item.level }}"\n            apiGroup: rbac.authorization.k8s.io\n' +
-    "          subjects:\n" + subjekt + "\n" + schleife("user"),
+    "          subjects:\n" + subjekt + "\n" + schleife("user") +
+    (o.weite === "sehen"
+      ? '\n    # ' + (de ? "Die kleine eigene Rolle gibt es einmal im Cluster, nicht je Team."
+                          : "The small custom role exists once in the cluster, not per team.") + "\n" +
+        '    - name: "ClusterRole namespaces-sehen"\n' +
+        "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+        "          apiVersion: rbac.authorization.k8s.io/v1\n          kind: ClusterRole\n          metadata:\n" +
+        "            name: namespaces-sehen\n          rules:\n" +
+        '            - apiGroups: [""]\n              resources: ["namespaces"]\n              verbs: ["get", "list", "watch"]\n' +
+        '            - apiGroups: [""]\n              resources: ["nodes"]\n              verbs: ["list"]\n' +
+        '\n    - name: "Namespaces sehen dürfen"\n' +
+        "      kubernetes.core.k8s:\n        state: present\n        definition:\n" +
+        "          apiVersion: rbac.authorization.k8s.io/v1\n          kind: ClusterRoleBinding\n          metadata:\n" +
+        '            name: "{{ item.user }}-namespaces-sehen"\n' +
+        "          roleRef:\n            kind: ClusterRole\n            name: namespaces-sehen\n" +
+        "            apiGroup: rbac.authorization.k8s.io\n          subjects:\n" + subjekt + "\n" + schleife("user")
+      : ""),
     "rbac");
 
   /* ---- 3. Identität ---- */
@@ -6512,11 +6628,19 @@ function tenantBatchBundle(){
     "        kubectl auth can-i list pods -n {{ item.ns }} --as=" + alsWer.replace(/"/g, "") + "\n" +
     "      register: darf\n      changed_when: false\n" +
     "      failed_when: darf.stdout is not search('yes')\n" + schleife() +
-    '\n    - name: "Darf nicht an kube-system"\n' +
-    "      ansible.builtin.command: >-\n" +
-    "        kubectl auth can-i get secrets -n kube-system --as=" + alsWer.replace(/"/g, "") + "\n" +
-    "      register: darf_nicht\n      changed_when: false\n" +
-    "      failed_when: darf_nicht.stdout is not search('no')\n" + schleife() +
+    (clusterweit
+      ? '\n    # ' + (de ? "Clusterweite Reichweite: die Grenze zu kube-system gibt es nicht mehr, also wird hier nichts geprüft."
+                          : "Cluster-wide scope: the boundary to kube-system no longer exists, so nothing is checked here.") + "\n" +
+        '    - name: "Reichweite ist clusterweit"\n' +
+        "      ansible.builtin.command: >-\n" +
+        "        kubectl auth can-i list pods -A --as=" + alsWer.replace(/"/g, "") + "\n" +
+        "      register: darf_ueberall\n      changed_when: false\n" +
+        "      failed_when: darf_ueberall.stdout is not search('yes')\n" + schleife()
+      : '\n    - name: "Darf nicht an kube-system"\n' +
+        "      ansible.builtin.command: >-\n" +
+        "        kubectl auth can-i get secrets -n kube-system --as=" + alsWer.replace(/"/g, "") + "\n" +
+        "      register: darf_nicht\n      changed_when: false\n" +
+        "      failed_when: darf_nicht.stdout is not search('no')\n" + schleife()) +
     '\n    - name: "Übersicht"\n' +
     "      ansible.builtin.command: \"kubectl get rolebindings -A -o wide\"\n" +
     "      register: uebersicht\n      changed_when: false\n" +
@@ -6528,10 +6652,21 @@ function tenantBatchBundle(){
   nimm(de ? "Rückbau" : "Teardown", "localhost",
     '    # ' + (de ? "Löscht alles, was die Playbooks oben anlegen."
                    : "Deletes everything the playbooks above create.") + "\n" +
-    '    - name: "RoleBinding entfernen"\n' +
-    "      kubernetes.core.k8s:\n        state: absent\n" +
-    "        api_version: rbac.authorization.k8s.io/v1\n        kind: RoleBinding\n" +
-    '        name: "{{ item.user }}-{{ item.level }}"\n        namespace: "{{ item.ns }}"\n' + schleife("user") +
+    (clusterweit
+      ? '    - name: "ClusterRoleBinding entfernen"\n' +
+        "      kubernetes.core.k8s:\n        state: absent\n" +
+        "        api_version: rbac.authorization.k8s.io/v1\n        kind: ClusterRoleBinding\n" +
+        '        name: "{{ item.user }}-{{ item.level }}-clusterweit"\n' + schleife("user")
+      : '    - name: "RoleBinding entfernen"\n' +
+        "      kubernetes.core.k8s:\n        state: absent\n" +
+        "        api_version: rbac.authorization.k8s.io/v1\n        kind: RoleBinding\n" +
+        '        name: "{{ item.user }}-{{ item.level }}"\n        namespace: "{{ item.ns }}"\n' + schleife("user")) +
+    (o.weite === "sehen"
+      ? '\n    - name: "Bindung an namespaces-sehen entfernen"\n' +
+        "      kubernetes.core.k8s:\n        state: absent\n" +
+        "        api_version: rbac.authorization.k8s.io/v1\n        kind: ClusterRoleBinding\n" +
+        '        name: "{{ item.user }}-namespaces-sehen"\n' + schleife("user")
+      : "") +
     (cert
       ? '\n    - name: "Zertifikatsanfrage entfernen"\n' +
         "      kubernetes.core.k8s:\n        state: absent\n" +
