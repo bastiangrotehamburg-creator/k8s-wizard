@@ -4379,43 +4379,50 @@ function runSelfTests(){
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
   const ingHeads = x => guideOf(x).map(s => t(s.h)).join(" | ");
   ok("Ingress: jede Wahl bekommt ihren eigenen Abschnitt",
-    ["nginx","traefik","haproxy"].every(c =>
+    ["nginx","traefik","haproxy","caddy"].every(c =>
       ingHeads({ingress:c}).indexOf("Ingress-Controller: " + INGRESS_CTRL[c].n) !== -1),
     ingHeads({ingress:"traefik"}));
   ok("Ingress: keiner heißt kein Abschnitt",
     ingHeads({ingress:"none"}).indexOf("Ingress-Controller") === -1 &&
     guideOf({ingress:"none"}).length === guideOf({ingress:"nginx"}).length - 1, "");
   ok("Ingress: Namespace, Klasse und Service passen zur Wahl",
-    ["nginx","traefik","haproxy"].every(function(c){
+    ["nginx","traefik","haproxy","caddy"].every(function(c){
       const ic = INGRESS_CTRL[c], cmds = allCmds({ingress:c});
-      const fremd = ["nginx","traefik","haproxy"].filter(x => x !== c)
+      const fremd = ["nginx","traefik","haproxy","caddy"].filter(x => x !== c)
         .map(x => INGRESS_CTRL[x].ns);
       return cmds.indexOf("-n " + ic.ns + " get pods") !== -1 &&
              cmds.indexOf("--class=" + ic.cls) !== -1 &&
              cmds.indexOf("get svc " + ic.svc) !== -1 &&
              fremd.every(n => cmds.indexOf("-n " + n + " ") === -1);
     }), "");
-  ok("Ingress: nginx per Manifest, die beiden anderen per Helm",
+  ok("Ingress: Caddy sagt, dass automatisches HTTPS im LAN nicht greift",
+    (function(){
+      const g = guideOf({ingress:"caddy"}).filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0];
+      return g.items.some(i => i.d.indexOf("Im LAN wird es nicht klappen") !== -1) &&
+             g.r.some(x => x.m.indexOf("Port 80") !== -1) &&
+             guideOf({ingress:"nginx"}).every(s => s.items.every(i => i.d.indexOf("Im LAN wird es nicht klappen") === -1));
+    })(), "");
+  ok("Ingress: nginx per Manifest, die anderen per Helm",
     allCmds({ingress:"nginx"}).indexOf("kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx") !== -1 &&
     allCmds({ingress:"nginx"}).indexOf("helm install") === -1 &&
     allCmds({ingress:"traefik"}).indexOf("helm install traefik traefik/traefik") !== -1 &&
-    allCmds({ingress:"haproxy"}).indexOf("helm install haproxy haproxytech/kubernetes-ingress") !== -1, "");
+    allCmds({ingress:"haproxy"}).indexOf("helm install haproxy haproxytech/kubernetes-ingress") !== -1 &&
+    allCmds({ingress:"caddy"}).indexOf("helm install caddy-ingress-controller caddy-ingress/caddy-ingress-controller") !== -1, "");
   ok("Ingress: der Typ LoadBalancer wird überall ausdrücklich gesetzt",
-    ["nginx","traefik","haproxy"].every(c =>
+    ["nginx","traefik","haproxy","caddy"].every(c =>
       allCmds({ingress:c}).indexOf("LoadBalancer") !== -1), "");
   ok("Ingress: die Tabelle nennt alle drei Annotations-Präfixe",
     (function(){
       const s = guideOf({ingress:"nginx"}).filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0];
       const flach = JSON.stringify(s.table);
-      return ["nginx","traefik","haproxy"].every(c => flach.indexOf(INGRESS_CTRL[c].ann) !== -1);
+      return ["nginx","traefik","haproxy","caddy"].every(c => flach.indexOf(INGRESS_CTRL[c].ann) !== -1);
     })(), "");
   ok("Ingress: ingress-nginx wird mit dem Ende der Pflege ausgeliefert",
     (function(){
       const risk = c => guideOf({ingress:c})
         .filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0].r;
       return risk("nginx").some(x => x.lvl === "err" && x.m.indexOf("Ende der Pflege") !== -1) &&
-             risk("traefik").every(x => x.lvl !== "err") &&
-             risk("haproxy").every(x => x.lvl !== "err");
+             ["traefik","haproxy","caddy"].every(c => risk(c).every(x => x.lvl !== "err"));
     })(), "");
   ok("Ingress: beim Hinzufügen eines Knotens wird nichts neu installiert",
     (function(){
@@ -4431,7 +4438,7 @@ function runSelfTests(){
                                 i.c.indexOf("create ingress") === -1);
     })(), "");
   ok("Ingress: MetalLB zeigt auf den gewählten Controller",
-    ["nginx","traefik","haproxy"].every(function(c){
+    ["nginx","traefik","haproxy","caddy"].every(function(c){
       const ic = INGRESS_CTRL[c];
       const cmds = metallbGuide({ingress:true, ingclass:c})
         .map(s => s.items.map(i => i.c).join("\n")).join("\n");
@@ -4927,7 +4934,7 @@ $("testClose").addEventListener("click", () => { $("testPanel").hidden = true; }
 /* ---------- Cluster aufsetzen ---------- */
 
 /* ---------- Ingress-Controller ----------
-   Drei Programme für dieselbe Aufgabe: HTTP von außen annehmen und anhand
+   Vier Programme für dieselbe Aufgabe: HTTP von außen annehmen und anhand
    von Hostname und Pfad an einen Service weitergeben. Die Ingress-Ressource
    selbst ist bei allen dieselbe — was sich unterscheidet, sind Namespace,
    Klassenname und vor allem das Annotations-Präfix. Genau daran scheitert
@@ -4942,7 +4949,7 @@ const INGRESS_CTRL = {
     repo:["ingress-nginx", "https://kubernetes.github.io/ingress-nginx"],
     chart:"ingress-nginx/ingress-nginx", rel:"ingress-nginx",
     manifest:"https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml",
-    svcArg:"controller.service.type"
+    svcArg:"controller.service.type", kopf:"server: nginx"
   },
   haproxy: {
     n:"HAProxy", ns:"haproxy-controller", cls:"haproxy",
@@ -4953,6 +4960,16 @@ const INGRESS_CTRL = {
     chart:"haproxytech/kubernetes-ingress", rel:"haproxy",
     manifest:"",
     svcArg:"controller.service.type"
+  },
+  caddy: {
+    n:"Caddy", ns:"caddy-system", cls:"caddy",
+    svc:"caddy-ingress-controller", dep:"caddy-ingress-controller",
+    sel:"app.kubernetes.io/name=caddy-ingress-controller",
+    ann:"caddy.ingress.kubernetes.io/",
+    repo:["caddy-ingress", "https://caddyserver.github.io/ingress/"],
+    chart:"caddy-ingress/caddy-ingress-controller", rel:"caddy-ingress-controller",
+    manifest:"",
+    svcArg:"ingressController.service.type", kopf:"Server: Caddy"
   },
   traefik: {
     n:"Traefik", ns:"traefik", cls:"traefik",
@@ -4966,8 +4983,17 @@ const INGRESS_CTRL = {
   }
 };
 
+/* Ein Absatz je Controller — warum man ausgerechnet diesen nimmt und was
+   er einen kostet. */
+const INGRESS_TEXT = {
+  nginx: "**ingress-nginx** ist die verbreitetste Wahl und die, auf die sich fast jede Anleitung im Netz bezieht. Es steckt eine nginx-Konfiguration hinter der Ingress-Ressource; alles, was über das Standardfeld hinausgeht, läuft über Annotations.|**ingress-nginx** is the most widespread choice and the one nearly every guide on the net refers to. It puts an nginx configuration behind the Ingress resource; anything beyond the standard fields runs through annotations.",
+  traefik: "**Traefik** bringt am meisten mit: ein eigenes Dashboard, eingebautes Let's Encrypt und mit IngressRoute und Middleware eigene Ressourcen, die deutlich mehr können als eine Ingress-Regel. Der Preis dafür ist, dass die interessanten Fähigkeiten nicht mehr portabel sind — eine IngressRoute lässt sich nicht auf einen anderen Controller umziehen.|**Traefik** brings the most with it: a dashboard of its own, built-in Let's Encrypt, and with IngressRoute and Middleware its own resources that can do considerably more than an ingress rule. The price is that the interesting capabilities stop being portable — an IngressRoute cannot be moved to another controller.",
+  haproxy: "**HAProxy** ist der schlankeste der vier und der mit dem geringsten Beiwerk. Es bringt keine eigenen Routing-CRDs mit — was es kann, steht in der Ingress-Ressource und in Annotations. Wer HAProxy schon vor Kubernetes eingesetzt hat, findet dieselbe Konfigurationssprache wieder.|**HAProxy** is the leanest of the four and the one with the least around it. It brings no routing CRDs of its own — what it can do lives in the Ingress resource and in annotations. Anyone who used HAProxy before Kubernetes finds the same configuration language again.",
+  caddy: "**Caddy** hat einen einzigen großen Trumpf: Es besorgt und erneuert HTTPS-Zertifikate von allein, ohne cert-manager, ohne Annotation, ohne Secret, das jemand anlegen müsste. Ein Ingress mit einem Hostnamen genügt. Dafür ist es das kleinste der vier Projekte — weniger Mitwirkende, weniger Ausgaben, und für seltenere Anforderungen findet man im Netz kaum etwas.|**Caddy** has one big trump card: it obtains and renews HTTPS certificates on its own — no cert-manager, no annotation, no secret anybody has to create. An ingress with a host name is enough. In exchange it is the smallest of the four projects — fewer contributors, fewer releases, and for rarer requirements there is barely anything to find on the net."
+};
+
 /* Die Installation, je Controller sein dokumentierter Weg: ingress-nginx hat
-   ein fertiges Manifest für eigene Hardware, die beiden anderen werden per
+   ein fertiges Manifest für eigene Hardware, die drei anderen werden per
    Helm ausgeliefert. */
 function ingressInstall(ing){
   if (ing.manifest) return [
@@ -5005,8 +5031,9 @@ const CLUSTER_FIELDS = [
    opts:[["nginx","ingress-nginx — am weitesten verbreitet|ingress-nginx — the most widespread"],
          ["traefik","Traefik — eigene CRDs, Dashboard, ACME eingebaut|Traefik — own CRDs, dashboard, built-in ACME"],
          ["haproxy","HAProxy — schlank, sehr schnell, wenig Beiwerk|HAProxy — lean, very fast, little around it"],
+         ["caddy","Caddy — holt HTTPS-Zertifikate von allein|Caddy — obtains HTTPS certificates on its own"],
          ["none","Keiner — später oder gar nicht|None — later or not at all"]],
-   hint:"Nimmt HTTP von außen an und verteilt es nach Hostname und Pfad. Die Ingress-Ressource ist bei allen dreien dieselbe; unterschiedlich sind Namespace, Klassenname und das Annotations-Präfix.|Takes HTTP from outside and distributes it by host name and path. The Ingress resource is the same for all three; what differs is the namespace, the class name and the annotation prefix."},
+   hint:"Nimmt HTTP von außen an und verteilt es nach Hostname und Pfad. Die Ingress-Ressource ist bei allen dieselbe; unterschiedlich sind Namespace, Klassenname und das Annotations-Präfix.|Takes HTTP from outside and distributes it by host name and path. The Ingress resource is the same for all of them; what differs is the namespace, the class name and the annotation prefix."},
   {k:"endpoint", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de",
    hint:"Name oder VIP, unter dem der API-Server erreichbar ist. Leer lassen heißt: die IP des ersten Hauptservers — die lässt sich später nicht mehr ändern. Für mehrere Hauptserver ist die Angabe zwingend.|Name or VIP the API server answers on. Empty means the first control-plane node's IP — which cannot be changed later. With several control-plane nodes it is mandatory."},
   {k:"ha", t:"bool", structural:true, when:o => o.have !== "node",
@@ -5320,20 +5347,17 @@ function clusterGuide(raw){
   if (ing) sec("Ingress-Controller: " + ing.n + "|Ingress controller: " + ing.n, "cp", {
     p:["Ein Service vom Typ LoadBalancer verbraucht **eine** Adresse pro Anwendung. Das geht bei drei Diensten und hört bei dreißig auf. Der Ingress-Controller dreht das um: Er nimmt eine einzige Adresse und verteilt darauf nach Hostname und Pfad — alles andere braucht dann nur noch eine Regel.|A LoadBalancer service consumes **one** address per application. That works for three services and stops working at thirty. The ingress controller turns it around: it takes a single address and distributes on it by host name and path — everything else then needs only a rule.",
        "Ohne Controller ist eine Ingress-Ressource ein Stück Papier. Sie lässt sich anlegen, sie steht in kubectl get ingress, und es passiert nichts. Kubernetes selbst kann kein HTTP — es verwaltet nur die Regel, umsetzen muss sie jemand anders.|Without a controller an Ingress resource is a piece of paper. It can be created, it shows up in kubectl get ingress, and nothing happens. Kubernetes itself speaks no HTTP — it only manages the rule; somebody else has to carry it out.",
-       o.ingress === "nginx"
-         ? "**ingress-nginx** ist die verbreitetste Wahl und die, auf die sich fast jede Anleitung im Netz bezieht. Es steckt eine nginx-Konfiguration hinter der Ingress-Ressource; alles, was über das Standardfeld hinausgeht, läuft über Annotations.|**ingress-nginx** is the most widespread choice and the one nearly every guide on the net refers to. It puts an nginx configuration behind the Ingress resource; anything beyond the standard fields runs through annotations."
-         : o.ingress === "traefik"
-         ? "**Traefik** bringt am meisten mit: ein eigenes Dashboard, eingebautes Let's Encrypt und mit IngressRoute und Middleware eigene Ressourcen, die deutlich mehr können als eine Ingress-Regel. Der Preis dafür ist, dass die interessanten Fähigkeiten nicht mehr portabel sind — eine IngressRoute lässt sich nicht auf einen anderen Controller umziehen.|**Traefik** brings the most with it: a dashboard of its own, built-in Let's Encrypt, and with IngressRoute and Middleware its own resources that can do considerably more than an ingress rule. The price is that the interesting capabilities stop being portable — an IngressRoute cannot be moved to another controller."
-         : "**HAProxy** ist der schlankeste der drei und der mit dem geringsten Beiwerk. Es bringt keine eigenen Routing-CRDs mit — was es kann, steht in der Ingress-Ressource und in Annotations. Wer HAProxy schon vor Kubernetes eingesetzt hat, findet dieselbe Konfigurationssprache wieder.|**HAProxy** is the leanest of the three and the one with the least around it. It brings no routing CRDs of its own — what it can do lives in the Ingress resource and in annotations. Anyone who used HAProxy before Kubernetes finds the same configuration language again."],
+       INGRESS_TEXT[o.ingress]],
     table:[
-      ["", "ingress-nginx", "Traefik", "HAProxy"],
-      ["Namespace|Namespace", "ingress-nginx", "traefik", "haproxy-controller"],
-      ["ingressClassName", "nginx", "traefik", "haproxy"],
-      ["Annotations", "nginx.ingress.kubernetes.io/", "traefik.ingress.kubernetes.io/", "haproxy.org/"],
-      ["Installation", "Manifest oder Helm|manifest or Helm", "Helm", "Helm"],
-      ["Eigene Routing-Ressourcen|Routing resources of its own", "keine|none", "IngressRoute, Middleware, TLSOption", "keine|none"],
-      ["Oberfläche|Web interface", "keine|none", "Dashboard auf Port 9000|dashboard on port 9000", "Stats auf Port 1024|stats on port 1024"],
-      ["Zertifikate|Certificates", "cert-manager", "cert-manager oder eingebautes ACME|cert-manager or built-in ACME", "cert-manager"]
+      ["", "ingress-nginx", "Traefik", "HAProxy", "Caddy"],
+      ["Namespace|Namespace", "ingress-nginx", "traefik", "haproxy-controller", "caddy-system"],
+      ["ingressClassName", "nginx", "traefik", "haproxy", "caddy"],
+      ["Annotations", "nginx.ingress.kubernetes.io/", "traefik.ingress.kubernetes.io/", "haproxy.org/", "caddy.ingress.kubernetes.io/"],
+      ["Installation", "Manifest oder Helm|manifest or Helm", "Helm", "Helm", "Helm"],
+      ["Eigene Routing-Ressourcen|Routing resources of its own", "keine|none", "IngressRoute, Middleware, TLSOption", "keine|none", "keine|none"],
+      ["Oberfläche|Web interface", "keine|none", "Dashboard auf Port 9000|dashboard on port 9000", "Stats auf Port 1024|stats on port 1024", "keine|none"],
+      ["Zertifikate|Certificates", "cert-manager", "cert-manager oder eingebautes ACME|cert-manager or built-in ACME", "cert-manager", "von allein, ohne Zutun|on its own, unprompted"],
+      ["Verbreitung|How widespread", "am größten|the largest", "groß|large", "mittel|medium", "klein|small"]
     ],
     p2:["Die Zeile **Annotations** ist die wichtigste der Tabelle. Ein `nginx.ingress.kubernetes.io/rewrite-target` an einem Ingress, den Traefik bedient, wird nicht etwa abgelehnt — es wird wortlos ignoriert. Der Ingress funktioniert, nur eben ohne das Umschreiben, und niemand sagt etwas. Wer den Controller wechselt, muss jede Annotation einzeln übersetzen.|The **annotations** row is the most important one in the table. An `nginx.ingress.kubernetes.io/rewrite-target` on an Ingress served by Traefik is not rejected — it is silently ignored. The Ingress works, just without the rewriting, and nobody says a word. Anyone switching controllers has to translate every annotation one by one.",
       "Mehrere Controller nebeneinander sind erlaubt, solange jeder seine eigene Klasse und seine eigene Adresse hat. Üblich ist das etwa für eine getrennte Behandlung von innen und außen. Was **nicht** geht: zwei Controller, die sich auf demselben Knoten die Ports 80 und 443 teilen wollen.|Several controllers side by side are allowed as long as each has its own class and its own address. That is common for handling inside and outside traffic separately. What does **not** work: two controllers wanting to share ports 80 and 443 on the same node."],
@@ -5350,13 +5374,13 @@ function clusterGuide(raw){
        d:"Unter EXTERNAL-IP muss eine Adresse aus dem MetalLB-Bereich stehen. Bleibt dort dauerhaft pending, hat MetalLB keinen freien Platz oder läuft gar nicht.|EXTERNAL-IP has to show an address from the MetalLB range. If it stays pending forever, MetalLB has no free slot or is not running at all."},
       {c:"curl -I http://ADRESSE-DES-INGRESS",
        d:"Der aussagekräftigste Einzeltest, noch **ohne** jede Regel. Erwartung: **404 Not Found**. Das klingt nach Fehler und ist der Beweis, dass der Controller lebt und erreichbar ist — er hat nur noch keine passende Regel." +
-         (o.ingress === "nginx"
-           ? " ingress-nginx traegt sich dabei mit einer Zeile server: nginx ein."
+         (ing.kopf
+           ? " " + ing.n + " trägt sich dabei mit einer Zeile " + ing.kopf + " ein."
            : " " + ing.n + " nennt sich im Kopf nicht beim Namen, anders als ingress-nginx — entscheidend ist deshalb nur: eine Antwort, statt connection refused oder Timeout.") +
          " Kommt connection refused oder ein Timeout, ist es kein Ingress-Problem, sondern eines der Adresse." +
          "|The single most telling test, still **without** any rule. Expected: **404 Not Found**. That looks like a failure and proves the controller is alive and reachable — it simply has no matching rule yet." +
-         (o.ingress === "nginx"
-           ? " ingress-nginx adds a server: nginx line while it is at it."
+         (ing.kopf
+           ? " " + ing.n + " adds a " + ing.kopf + " line while it is at it."
            : " " + ing.n + " does not name itself in the headers the way ingress-nginx does — so all that counts is: an answer at all, rather than connection refused or a timeout.") +
          " If you get connection refused or a timeout, this is not an ingress problem but an address problem."},
       {c:"kubectl create deployment web --image=nginx:1.27-alpine --replicas=2\nkubectl expose deployment web --port=80\nkubectl create ingress web --class=" + ing.cls + " \\\n  --rule=\"web.example.lan/*=web:80\"\nkubectl get ingress",
@@ -5366,18 +5390,24 @@ function clusterGuide(raw){
       .concat(o.ingress === "traefik" ? [
       {c:"kubectl -n traefik port-forward deploy/traefik 9000:9000\n# dann im Browser: http://localhost:9000/dashboard/",
        d:"Traefiks Dashboard zeigt alle erkannten Router, Services und Middlewares — und vor allem, **warum** eine Regel nicht greift. Der abschließende Schrägstrich in /dashboard/ ist Pflicht, ohne ihn kommt eine leere Seite. Nicht dauerhaft nach außen öffnen: Das Dashboard ist ohne weitere Einstellungen ungeschützt.|Traefik's dashboard shows every router, service and middleware it recognised — and above all **why** a rule does not match. The trailing slash in /dashboard/ is mandatory; without it you get a blank page. Do not expose it permanently: the dashboard is unprotected unless you configure otherwise."}] : [])
+      .concat(o.ingress === "caddy" ? [
+      {c:"kubectl -n caddy-system logs -l app.kubernetes.io/name=caddy-ingress-controller \\\n  --tail=60 | grep -iE 'certificate|acme|obtain'",
+       d:"Sobald ein Ingress einen Hostnamen trägt, versucht Caddy von allein, dafür ein Zertifikat zu holen. Im Log steht, ob es geklappt hat. **Im LAN wird es nicht klappen**: Let's Encrypt muss den Namen öffentlich auflösen und Port 80 von außen erreichen können. Für interne Namen wie web.example.lan bleibt nur die DNS-01-Prüfung mit einem passenden Anbieter — oder ein eigenes Zertifikat wie bei den anderen drei.|As soon as an ingress carries a host name, Caddy tries to fetch a certificate for it on its own. The log says whether it worked. **On a LAN it will not**: Let's Encrypt has to resolve the name publicly and reach port 80 from outside. For internal names such as web.example.lan only the DNS-01 challenge with a supporting provider is left — or a certificate of your own, as with the other three."}] : [])
       .concat(o.ingress === "haproxy" ? [
       {c:"kubectl -n haproxy-controller port-forward svc/haproxy-kubernetes-ingress 1024:1024\n# dann im Browser: http://localhost:1024/",
-       d:"Die Stats-Seite von HAProxy: je Backend die Zahl der Sitzungen, der Zustand der Health-Checks und die Fehlerzaehler. Kein Dashboard zum Konfigurieren, sondern eine Betriebsanzeige — und genau dafür die beste der drei.|HAProxy's stats page: per backend the session counts, the health-check state and the error counters. Not a dashboard for configuring but an operations display — and the best of the three for exactly that."}] : [])
+       d:"Die Stats-Seite von HAProxy: je Backend die Zahl der Sitzungen, der Zustand der Health-Checks und die Fehlerzaehler. Kein Dashboard zum Konfigurieren, sondern eine Betriebsanzeige — und genau dafür die beste der vier.|HAProxy's stats page: per backend the session counts, the health-check state and the error counters. Not a dashboard for configuring but an operations display — and the best of the four for exactly that."}] : [])
       .concat([
       {c:"kubectl -n " + ing.ns + " logs -l " + ing.sel + " --tail=20 -f",
        d:"Die letzte Instanz bei jedem Ingress-Problem: Der Controller schreibt jede Anfrage mit, samt Statuscode. Taucht dein curl hier auf, ist die Anfrage angekommen und die Ursache liegt in Regel oder Backend. Taucht sie nicht auf, hat sie den Controller nie erreicht — dann ist es das Netz oder die Adresse.|The last resort for any ingress problem: the controller logs every request with its status code. If your curl shows up here, the request arrived and the cause lies in the rule or the backend. If it does not, it never reached the controller — then it is the network or the address."},
       {c:"kubectl delete ingress web\nkubectl delete svc web\nkubectl delete deployment web",
        d:"Aufräumen. Der Controller bleibt stehen, den brauchst du weiter.|Clean up. The controller stays, you will keep needing it."}]))),
-    r:[{lvl:"warn", m:t("Der Controller braucht die Ports 80 und 443, entweder über einen Service vom Typ LoadBalancer mit MetalLB oder über hostPort auf den Knoten. Laeuft auf denselben Knoten schon ein Webserver oder ein anderer Controller, bleibt der Pod hängen — im describe steht dann address already in use.|The controller needs ports 80 and 443, either through a LoadBalancer service with MetalLB or through hostPort on the nodes. If a web server or another controller already runs on those nodes, the pod gets stuck — describe then says address already in use.")}]
+    r:[{lvl:"warn", m:t("Der Controller braucht die Ports 80 und 443, entweder über einen Service vom Typ LoadBalancer mit MetalLB oder über hostPort auf den Knoten. Läuft auf denselben Knoten schon ein Webserver oder ein anderer Controller, bleibt der Pod hängen — im describe steht dann address already in use.|The controller needs ports 80 and 443, either through a LoadBalancer service with MetalLB or through hostPort on the nodes. If a web server or another controller already runs on those nodes, the pod gets stuck — describe then says address already in use.")}]
       .concat(o.ingress === "nginx" ? [{lvl:"err", m:t("Für ingress-nginx hat das Kubernetes-Projekt das Ende der Pflege angekündigt — die Ankündigung stammt aus Ende 2025, als Termin war März 2026 genannt, und danach sollen auch keine Sicherheitslücken mehr geschlossen werden. Prüfe den aktuellen Stand, bevor du es für etwas Neues wählst. Genau das ist der Grund, warum hier überhaupt Alternativen stehen.|For ingress-nginx the Kubernetes project has announced the end of maintenance — the announcement dates from late 2025, the date named was March 2026, and after that security holes are to go unfixed as well. Check the current state before choosing it for something new. That is precisely why alternatives are offered here at all.")},
         {lvl:"warn", m:t("Der Admission-Webhook von ingress-nginx war 2025 aus dem Pod-Netz heraus angreifbar und führte bis zur vollständigen Übernahme des Clusters (CVE-2025-1974). Wenn es ingress-nginx sein soll: eine gepflegte Version nehmen und den Webhook nicht aus beliebigen Pods erreichbar lassen.|The admission webhook of ingress-nginx was attackable from the pod network in 2025 and led all the way to full cluster takeover (CVE-2025-1974). If it is to be ingress-nginx: take a maintained version and do not leave the webhook reachable from arbitrary pods.")}] : [])
       .concat(o.ingress === "traefik" ? [{lvl:"warn", m:t("Das Dashboard ist im Helm-Chart nicht nach außen veröffentlicht, und das soll so bleiben. Wer es über einen Ingress erreichbar macht, gibt ungeschützt Einblick in jede Route des Clusters — dann gehört mindestens eine BasicAuth-Middleware davor.|The dashboard is not exposed by the Helm chart, and it should stay that way. Publishing it through an ingress gives unprotected insight into every route in the cluster — then it needs at least a BasicAuth middleware in front of it.")}] : [])
+      .concat(o.ingress === "caddy" ? [{lvl:"warn", m:t("Das automatische HTTPS ist der Grund für Caddy und zugleich sein Fallstrick: Es setzt einen öffentlich auflösbaren Namen und Erreichbarkeit auf Port 80 voraus. In einem Cluster hinter der eigenen Firewall trifft beides nicht zu — dort bleibt Caddy ohne Zusatzeinstellung bei HTTP oder bei einem selbst ausgestellten Zertifikat, dem kein Browser traut.|Automatic HTTPS is the reason for Caddy and at the same time its pitfall: it presupposes a publicly resolvable name and reachability on port 80. In a cluster behind your own firewall neither holds — there Caddy stays on HTTP or on a self-issued certificate no browser trusts, unless configured otherwise.")},
+        {lvl:"warn", m:t("Mit mehr als einer Replik muss der Zertifikatsspeicher geteilt sein, sonst holt jede Replik ihr eigenes Zertifikat und du läufst in die Ausstellungsgrenzen von Let's Encrypt. Für den Anfang ist eine einzelne Replik der sichere Weg.|With more than one replica the certificate store has to be shared, otherwise each replica fetches its own certificate and you run into Let's Encrypt's issuance limits. To begin with, a single replica is the safe route.")},
+        {lvl:"warn", m:t("Der Service-Name folgt dem Helm-Release-Namen. Die Befehle hier gehen von caddy-ingress-controller aus. Wählst du einen anderen Release-Namen, zeigt kubectl -n caddy-system get svc den tatsächlichen.|The service name follows the Helm release name. The commands here assume caddy-ingress-controller. If you pick a different release name, kubectl -n caddy-system get svc shows the actual one.")}] : [])
       .concat(o.ingress === "haproxy" ? [{lvl:"warn", m:t("Es gibt zwei verschiedene Projekte mit fast demselben Namen: dieses hier von HAProxy Technologies und haproxy-ingress von jcmoraisjr. Annotations und Chart unterscheiden sich. Beim Nachschlagen im Netz zuerst prüfen, zu welchem der beiden die Seite gehört.|There are two different projects with almost the same name: this one from HAProxy Technologies and haproxy-ingress from jcmoraisjr. Annotations and chart differ. When looking things up, first check which of the two a page belongs to.")}] : [])
   });
 
@@ -5939,7 +5969,7 @@ const METALLB_FIELDS = [
    hint:"Aus: Ein Service bekommt nur dann eine Adresse, wenn er den Pool ausdrücklich nennt. Sinnvoll, wenn der Bereich klein ist.|Off: a service only gets an address if it names the pool explicitly. Sensible when the range is small."},
   {k:"ingress", t:"bool", structural:true, l:"Ingress-Controller auf die erste Adresse setzen|Point the ingress controller at the first address"},
   {k:"ingclass", t:"select", l:"Welcher Controller|Which controller", half:true, when:o => o.ingress,
-   opts:[["nginx","ingress-nginx"],["traefik","Traefik"],["haproxy","HAProxy"]],
+   opts:[["nginx","ingress-nginx"],["traefik","Traefik"],["haproxy","HAProxy"],["caddy","Caddy"]],
    hint:"Bestimmt Namespace und Service-Namen im Befehl darunter.|Decides the namespace and service name in the command below."},
   {k:"ipvs", t:"bool", l:"kube-proxy läuft im IPVS-Modus|kube-proxy runs in IPVS mode",
    hint:"Dann braucht es strictARP. Im Standardmodus iptables schadet die Einstellung nicht.|Then strictARP is required. In the default iptables mode the setting does no harm."},
