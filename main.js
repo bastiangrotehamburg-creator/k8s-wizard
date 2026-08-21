@@ -4619,6 +4619,26 @@ function runSelfTests(){
   ok("Alle drei Anmeldearten liefern eine kubeconfig",
     ["cert","oidc","sa"].every(id => tenantGuide({identity:id}).some(s =>
       s.items.some(i => i.c.indexOf("kubectl config set-credentials") !== -1))), "");
+  ok("Zertifikatsweg: ein zweiter Anlauf löscht die alte Anfrage zuerst",
+    (function(){
+      const g = tenantGuide({user:"bge", identity:"cert"});
+      const s = g.filter(x => t(x.h).indexOf("Die Identität") === 0)[0];
+      const befehle = s.items.map(i => i.c);
+      const iDel = befehle.findIndex(c => c.indexOf("kubectl delete csr bge") === 0);
+      const iNeu = befehle.findIndex(c => c.indexOf("CSR=$(base64") === 0);
+      return iDel >= 0 && iNeu > iDel;
+    })(), "");
+  ok("Zertifikatsweg: Schlüssel, Anfrage und Zertifikat werden verglichen",
+    (function(){
+      const s = tenantGuide({user:"bge"}).filter(x => t(x.h).indexOf("Die Identität") === 0)[0];
+      const c = s.items.map(i => i.c).join("\n");
+      return c.indexOf("x509 -in bge.crt -noout -pubkey | openssl md5") !== -1 &&
+             c.indexOf("rsa  -in bge.key -pubout") !== -1 &&
+             c.indexOf("req  -in bge.csr -noout -pubkey") !== -1;
+    })(), "");
+  ok("Zertifikatsweg: das Fehlerbild ist benannt",
+    tenantGuide({identity:"cert"}).some(s => s.r.some(x => x.lvl === "err" &&
+      (x.m.indexOf("private key does not match") !== -1))), "");
   ok("API-Adresse: fehlender Port wird ergänzt",
     tenantOpts({api:"k8s-cp1.highq.org"}).api === "k8s-cp1.highq.org:6443" &&
     tenantOpts({api:"k8s-cp1.highq.org:6443"}).api === "k8s-cp1.highq.org:6443" &&
@@ -5394,14 +5414,19 @@ function tenantGuide(raw){
       items:[
         {c:"openssl genrsa -out " + o.user + ".key 4096\nopenssl req -new -key " + o.user + ".key -out " + o.user + ".csr \\\n  -subj \"/CN=" + o.user + "/O=" + o.ns + "\"",
          d:"CN ist der Benutzername, mit dem der API-Server ihn später kennt. O ist die Gruppe — praktisch, wenn später mehrere Personen dieselben Rechte bekommen sollen.|CN is the user name the API server will know them by. O is the group — handy when several people are to get the same rights later."},
+        {c:"kubectl delete csr " + o.user + " --ignore-not-found",
+         d:"Bei einem zweiten Anlauf zuerst. Das Feld request in einer CertificateSigningRequest ist **unveränderlich** — ein erneutes apply mit demselben Namen lässt die alte Anfrage stehen, und das Zertifikat, das du danach abholst, gehört zum alten Schlüssel. Genau daher kommt später tls: private key does not match public key.|On a second attempt, do this first. The request field in a CertificateSigningRequest is **immutable** — applying again under the same name leaves the old request in place, and the certificate you fetch afterwards belongs to the old key. That is exactly where tls: private key does not match public key comes from later."},
         {c:"CSR=$(base64 -w0 " + o.user + ".csr)          # macOS: base64 -i " + o.user + ".csr | tr -d '\\n'\ncase \"$CSR\" in LS0tLS1CRUdJTi*) echo ok ;; *) echo \"FEHLER: keine gueltige CSR\"; false ;; esac",
          d:"Erst den Wert erzeugen und ansehen. Eine base64-kodierte CSR beginnt **immer** mit `LS0tLS1CRUdJTi` — das ist `-----BEGIN` in base64. Steht dort etwas anderes, hat der nächste Schritt keine Aussicht auf Erfolg.|Create the value first and look at it. A base64-encoded CSR **always** starts with `LS0tLS1CRUdJTi` — that is `-----BEGIN` in base64. If something else is there, the next step has no chance of succeeding."},
         {c:"cat <<EOF | kubectl apply -f -\napiVersion: certificates.k8s.io/v1\nkind: CertificateSigningRequest\nmetadata:\n  name: " + o.user + "\nspec:\n  request: ${CSR}\n  signerName: kubernetes.io/kube-apiserver-client\n  expirationSeconds: " + (o.days * 86400) + "\n  usages:\n    - client auth\nEOF\n\nkubectl certificate approve " + o.user,
          d:"Der Cluster unterschreibt selbst, mit seiner eigenen CA. Das `EOF` steht hier **ohne** Anführungszeichen, damit die Shell `${CSR}` einsetzt — bei den reinen YAML-Blöcken in dieser Anleitung ist es umgekehrt Absicht, dass sie in Anführungszeichen stehen.|The cluster signs it itself, with its own CA. The `EOF` here has **no** quotes so the shell substitutes `${CSR}` — with the plain YAML blocks in this guide it is deliberately the other way round."},
         {c:"kubectl get csr " + o.user + " -o jsonpath='{.spec.request}' | base64 -d | openssl req -noout -subject\nkubectl get csr " + o.user + " -o jsonpath='{.status.certificate}' | base64 -d > " + o.user + ".crt\nopenssl x509 -in " + o.user + ".crt -noout -subject -dates",
-         d:"Holt das unterschriebene Zertifikat heraus und zeigt zur Kontrolle Name und Laufzeit an.|Fetches the signed certificate and prints name and validity for checking."}
+         d:"Holt das unterschriebene Zertifikat heraus und zeigt zur Kontrolle Name und Laufzeit an.|Fetches the signed certificate and prints name and validity for checking."},
+        {c:"openssl x509 -in " + o.user + ".crt -noout -pubkey | openssl md5\nopenssl rsa  -in " + o.user + ".key -pubout 2>/dev/null | openssl md5\nopenssl req  -in " + o.user + ".csr -noout -pubkey | openssl md5",
+         d:"Drei gleiche Prüfsummen, sonst passt etwas nicht zusammen. Weicht die zweite ab, ist der Schlüssel nach der Anfrage neu erzeugt worden; weicht die dritte ab, liegt im Cluster noch eine ältere Anfrage. In beiden Fällen: csr löschen und ab dem Schlüssel neu.|Three identical checksums, otherwise something does not belong together. If the second one differs, the key was regenerated after the request; if the third differs, an older request is still in the cluster. Either way: delete the csr and start again from the key."}
       ],
-      r:[{lvl:"err", m:t("Dieser Abschnitt gehoert in eine Shell, nicht in eine Datei. Wer den Block als bge.yaml speichert und mit kubectl apply -f anwendet, bekommt illegal base64 data at input byte 0 — dann steht im Feld request woertlich $(base64 ...) statt des Wertes. Byte 0 ist das Dollarzeichen.|This section belongs in a shell, not in a file. Anyone who saves the block as bge.yaml and applies it with kubectl apply -f gets illegal base64 data at input byte 0 — the request field then literally contains $(base64 ...) instead of the value. Byte 0 is the dollar sign.")},
+      r:[{lvl:"err", m:t("Meldet kubectl spaeter tls: private key does not match public key, gehoeren Schluessel und Zertifikat nicht zusammen. Fast immer ist der Schluessel nach der Anfrage noch einmal erzeugt worden, oder im Cluster liegt eine aeltere CertificateSigningRequest gleichen Namens — deren request laesst sich nicht ueberschreiben. Der Weg zurueck ist immer derselbe: kubectl delete csr, dann ab dem Schluessel neu.|If kubectl later reports tls: private key does not match public key, the key and the certificate do not belong together. Almost always the key was generated once more after the request, or an older CertificateSigningRequest of the same name sits in the cluster — its request cannot be overwritten. The way back is always the same: kubectl delete csr, then start again from the key.")},
+         {lvl:"err", m:t("Dieser Abschnitt gehoert in eine Shell, nicht in eine Datei. Wer den Block als bge.yaml speichert und mit kubectl apply -f anwendet, bekommt illegal base64 data at input byte 0 — dann steht im Feld request woertlich $(base64 ...) statt des Wertes. Byte 0 ist das Dollarzeichen.|This section belongs in a shell, not in a file. Anyone who saves the block as bge.yaml and applies it with kubectl apply -f gets illegal base64 data at input byte 0 — the request field then literally contains $(base64 ...) instead of the value. Byte 0 is the dollar sign.")},
          {lvl:"warn", m:t("Bei verwalteten Clustern — EKS, GKE, AKS — ist dieser Weg meist gesperrt: Die Steuerungsebene unterschreibt keine fremden Client-Anfragen, weil die Anmeldung über den Anbieter läuft. Dort führt der Weg über dessen Rechteverwaltung, oder über einen ServiceAccount.|With managed clusters — EKS, GKE, AKS — this route is usually closed: the control plane signs no external client requests because sign-in goes through the provider. There the way leads through the provider's own access management, or through a service account.")},
          {lvl:"err", m:t("Ein ausgestelltes Client-Zertifikat lässt sich nicht zurückziehen. Kubernetes führt keine Sperrliste. Bis zum Ablauf hilft nur, die RoleBindings zu entfernen: Der Benutzer kommt weiterhin an die API, darf dann aber nichts mehr. Deshalb eine kurze Laufzeit wählen.|An issued client certificate cannot be revoked. Kubernetes keeps no revocation list. Until it expires the only remedy is removing the role bindings: the user still reaches the API but may do nothing. So pick a short lifetime.")}]
     });
