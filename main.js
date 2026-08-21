@@ -4378,6 +4378,48 @@ function runSelfTests(){
   ok("Installation: jeder Abschnitt nennt weiterhin seinen Ort",
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
   const ingHeads = x => guideOf(x).map(s => t(s.h)).join(" | ");
+  ok("Sandbox: ohne Wahl bleibt die Anleitung wie sie war",
+    guideOf({}).length === guideOf({sandbox:"none"}).length &&
+    ingHeads({sandbox:"none"}).indexOf("Sandbox") === -1, "");
+  ok("Sandbox: gVisor und Kata bringen je zwei Abschnitte mit",
+    ["gvisor","kata"].every(s =>
+      guideOf({sandbox:s}).length === guideOf({}).length + 2 &&
+      guideOf({sandbox:s}).filter(x => t(x.h).indexOf("Sandbox") === 0).length === 2), "");
+  ok("Sandbox: die RuntimeClass nennt den handler des Knotens, nicht ihren eigenen Namen",
+    ["gvisor","kata"].every(function(s){
+      const c = allCmds({sandbox:s});
+      return c.indexOf("kind: RuntimeClass") !== -1 &&
+             c.indexOf("handler: " + SANDBOX[s].handler) !== -1 &&
+             c.indexOf("runtimeClassName: " + SANDBOX[s].cls) !== -1;
+    }), "");
+  ok("Sandbox: jede RuntimeClass grenzt sich per nodeSelector auf passende Knoten ein",
+    ["gvisor","kata"].every(s =>
+      allCmds({sandbox:s}).indexOf("nodeSelector:\n    " + SANDBOX[s].label) !== -1), "");
+  ok("Sandbox: Kata verlangt KVM und sagt das als Fehler, gVisor nicht",
+    (function(){
+      const r = s => guideOf({sandbox:s}).filter(x => t(x.h).indexOf("Sandbox") === 0)
+        .reduce((a, x) => a.concat(x.r), []);
+      return r("kata").some(x => x.lvl === "err" && x.m.indexOf("/dev/kvm") !== -1) &&
+             r("gvisor").every(x => x.lvl !== "err") &&
+             allCmds({sandbox:"kata"}).indexOf("ls -l /dev/kvm") !== -1;
+    })(), "");
+  ok("Sandbox: gVisor wird je Runtime anders eingetragen",
+    allCmds({sandbox:"gvisor", runtime:"containerd"}).indexOf("runsc install") !== -1 &&
+    allCmds({sandbox:"gvisor", runtime:"crio"}).indexOf("runsc install") === -1 &&
+    allCmds({sandbox:"gvisor", runtime:"crio"}).indexOf("crio.conf.d/10-runsc.conf") !== -1, "");
+  ok("Sandbox: Kata kommt per DaemonSet, nicht je Knoten von Hand",
+    (function(){
+      const knoten = guideOf({sandbox:"kata"})
+        .filter(x => t(x.h).indexOf("Sandbox-Laufzeit auf den Knoten") === 0)[0];
+      return knoten.items.length === 1 &&
+             allCmds({sandbox:"kata"}).indexOf("kata-deploy") !== -1;
+    })(), "");
+  ok("Sandbox: beim Hinzufügen eines Knotens entfällt die RuntimeClass",
+    (function(){
+      const g = guideOf({have:"node", sandbox:"gvisor"});
+      return g.filter(x => t(x.h).indexOf("Sandbox") === 0).length === 1 &&
+             g.every(s => s.items.every(i => i.c.indexOf("kind: RuntimeClass") === -1));
+    })(), "");
   ok("Ingress: jede Wahl bekommt ihren eigenen Abschnitt",
     ["nginx","traefik","haproxy","caddy","cilium"].every(c =>
       ingHeads({ingress:c}).indexOf("Ingress-Controller: " + INGRESS_CTRL[c].n) !== -1),
@@ -4953,6 +4995,18 @@ $("testClose").addEventListener("click", () => { $("testPanel").hidden = true; }
 
 /* ---------- Cluster aufsetzen ---------- */
 
+/* ---------- Sandbox-Laufzeiten ----------
+   Wichtig fuer das Verstaendnis: gVisor und Kata sind **kein** Ersatz fuer
+   containerd oder CRI-O. Sie haengen sich als weitere OCI-Laufzeit darunter
+   und werden je Pod ueber eine RuntimeClass ausgewaehlt. Ohne RuntimeClass
+   laeuft weiterhin alles unter runc, also auf dem Kernel des Knotens. */
+const SANDBOX = {
+  gvisor: {n:"gVisor", cls:"gvisor", handler:"runsc", kvm:false,
+           label:"runtime.sandbox/gvisor"},
+  kata:   {n:"Kata Containers", cls:"kata-qemu", handler:"kata-qemu", kvm:true,
+           label:"katacontainers.io/kata-runtime"}
+};
+
 /* ---------- Ingress-Controller ----------
    Fünf Wege zu derselben Aufgabe: HTTP von außen annehmen und anhand
    von Hostname und Pfad an einen Service weitergeben. Die Ingress-Ressource
@@ -5066,6 +5120,11 @@ const CLUSTER_FIELDS = [
    opts:[["apt","Debian / Ubuntu"],["dnf","RHEL / Rocky / AlmaLinux"]]},
   {k:"runtime", t:"select", l:"Container-Runtime|Container runtime", half:true, structural:true,
    opts:[["containerd","containerd"],["crio","CRI-O"]]},
+  {k:"sandbox", t:"select", l:"Zusätzliche Sandbox-Laufzeit|Additional sandbox runtime", structural:true,
+   opts:[["none","Keine — runc, alle Pods auf dem Kernel des Knotens|None — runc, every pod on the node's kernel"],
+         ["gvisor","gVisor — Kernel im Userspace, braucht keine Virtualisierung|gVisor — a kernel in user space, needs no virtualisation"],
+         ["kata","Kata Containers — eine echte MicroVM je Pod|Kata Containers — a real microVM per pod"]],
+   hint:"Kommt **zusätzlich** zu containerd oder CRI-O, nicht an deren Stelle. Ausgewählt wird sie je Pod über eine RuntimeClass — ohne die läuft weiterhin alles unter runc.|Comes **in addition** to containerd or CRI-O, not in their place. It is picked per pod through a RuntimeClass — without one, everything keeps running under runc."},
   {k:"cni", t:"select", l:"Netzwerk (CNI)|Networking (CNI)", half:true, structural:true,
    opts:[["cilium","Cilium — eBPF, ohne kube-proxy möglich|Cilium — eBPF, can replace kube-proxy"],
          ["calico","Calico — verbreitet, NetworkPolicy inklusive|Calico — widespread, network policy included"],
@@ -5112,6 +5171,7 @@ function clusterOpts(o){
     version: (o.version || "1.34").replace(/^v/, ""),
     os: o.os || "apt",
     runtime: o.runtime || "containerd",
+    sandbox: o.sandbox || "none",
     cni: cni,
     ingress: o.ingress || "nginx",
     endpoint: (o.endpoint || "").trim(),
@@ -5138,6 +5198,8 @@ function clusterGuide(raw){
   const api = o.endpoint || (o.ha ? "STABILE-ADRESSE" : "IP-DES-HAUPTSERVERS");
   /* null heisst: der Anwender will keinen — dann entfaellt der ganze Abschnitt. */
   const ing = INGRESS_CTRL[o.ingress] || null;
+  /* null heisst runc und sonst nichts — dann entfallen beide Abschnitte. */
+  const sb = SANDBOX[o.sandbox] || null;
   const out = [];
   const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
 
@@ -5352,6 +5414,82 @@ function clusterGuide(raw){
        d:"Ein Pod von Hand, um den Weg von der Registry bis in den Container einmal zu gehen.|A pod by hand, to walk the path from the registry into the container once."}
     ].concat(o.add ? [{c:"kubectl run neutest --image=busybox:1.36 --restart=Never --rm -it \\\n  --overrides='{\"spec\":{\"nodeName\":\"KNOTEN\"}}' -- \\\n  nslookup kubernetes.default.svc.cluster.local",
        d:"Ein Pod, der ausdrücklich auf dem neuen Knoten landet. Erst das beweist, dass Registry, Pod-Netz und DNS auf **dieser** Maschine arbeiten — ein Pod irgendwo im Cluster beweist es nicht.|A pod that lands on the new node deliberately. Only that proves registry, pod network and DNS work on **this** machine — a pod somewhere in the cluster does not prove it."}] : [])
+  });
+
+  /* --- Sandbox: auf den Knoten --- */
+  if (sb) sec("Sandbox-Laufzeit auf den Knoten: " + sb.n + "|Sandbox runtime on the nodes: " + sb.n,
+              o.add ? "neu" : "all", {
+    p:["Ein gewöhnlicher Container teilt sich den Kernel mit dem Knoten und mit allen anderen Containern darauf. Namespaces und cgroups trennen die Sicht, nicht den Kernel. Eine Lücke im Kernel ist damit eine Lücke zwischen allen Pods — und genau da setzen diese Laufzeiten an.|An ordinary container shares the kernel with the node and with every other container on it. Namespaces and cgroups separate the view, not the kernel. A hole in the kernel is therefore a hole between all pods — and that is exactly where these runtimes come in.",
+       "Beide sind **kein** Ersatz für containerd oder CRI-O, sondern hängen sich als weitere OCI-Laufzeit darunter. Welcher Pod sie benutzt, entscheidet eine RuntimeClass. Alles, was keine nennt, läuft weiter wie bisher — das macht die Einführung gefahrlos.|Neither replaces containerd or CRI-O; they hook in underneath as an additional OCI runtime. Which pod uses them is decided by a RuntimeClass. Everything that names none keeps running as before — which makes the introduction risk-free.",
+       o.sandbox === "gvisor"
+         ? "**gVisor** schiebt einen in Go geschriebenen Kernel dazwischen. Der Container spricht nicht mehr mit dem Linux-Kernel des Knotens, sondern mit runsc, und nur ein kleiner, geprüfter Teil geht wirklich nach unten durch. Das braucht keine Virtualisierung und läuft deshalb auch dort, wo die Knoten selbst schon virtuelle Maschinen sind.|**gVisor** slides a kernel written in Go in between. The container no longer talks to the node's Linux kernel but to runsc, and only a small, audited part actually passes through downwards. That needs no virtualisation and therefore works even where the nodes are themselves virtual machines."
+         : "**Kata Containers** geht den anderen Weg: Jeder Pod bekommt eine eigene, sehr kleine virtuelle Maschine mit eigenem Kernel. Die Trennung ist damit dieselbe wie zwischen zwei VMs — dafür braucht der Knoten echte Hardware-Virtualisierung, und jeder Pod kostet Startzeit und Arbeitsspeicher.|**Kata Containers** goes the other way: every pod gets a very small virtual machine of its own with its own kernel. The separation is then the same as between two VMs — in exchange the node needs real hardware virtualisation, and every pod costs start-up time and memory."],
+    table:[
+      ["", "runc", "gVisor", "Kata"],
+      ["Trennung|Separation", "gemeinsamer Kernel|shared kernel", "Kernel im Userspace|kernel in user space", "eigener Kernel in einer VM|own kernel in a VM"],
+      ["Braucht|Requires", "nichts|nothing", "nichts|nothing", "/dev/kvm"],
+      ["Startzeit|Start-up time", "Millisekunden|milliseconds", "Millisekunden|milliseconds", "hunderte Millisekunden|hundreds of milliseconds"],
+      ["Speicher je Pod extra|Extra memory per pod", "keiner|none", "wenig|little", "100–200 MB"],
+      ["Syscalls", "alle|all of them", "eine Teilmenge|a subset", "alle, echter Kernel|all of them, a real kernel"],
+      ["hostNetwork", "ja|yes", "ja|yes", "nein|no"],
+      ["handler", "runc", "runsc", "kata-qemu, kata-clh, kata-fc"]
+    ],
+    p2:["Die Zeile **Syscalls** ist die, an der Vorhaben scheitern. gVisor bildet den Linux-Kernel nach, aber nicht vollständig — was einen ungewöhnlichen Systemaufruf braucht, läuft womöglich nicht. Kata hat das Problem nicht, weil dort ein echter Kernel steht; dafür kostet jeder Pod eine VM.|The **syscalls** row is where plans come apart. gVisor reimplements the Linux kernel, but not completely — anything needing an unusual system call may not run. Kata does not have that problem because there is a real kernel in there; in exchange every pod costs a VM.",
+      "Firecracker taucht hier nicht als eigene Zeile auf, weil es unter Kubernetes kein eigener Weg ist: Es ist einer der Hypervisoren, die Kata benutzen kann — dann heißt die RuntimeClass kata-fc statt kata-qemu.|Firecracker gets no row of its own here because under Kubernetes it is not a separate route: it is one of the hypervisors Kata can use — then the runtime class is called kata-fc instead of kata-qemu."],
+    items:(o.sandbox === "kata"
+      ? [{c:"ls -l /dev/kvm\ngrep -cE 'vmx|svm' /proc/cpuinfo\nlsmod | grep -E '^kvm'",
+          d:"Die Vorprüfung, und die einzige, die auf den Knoten nötig ist — den Rest erledigt kata-deploy vom Hauptserver aus. Erwartung: /dev/kvm existiert, die zweite Zeile liefert eine Zahl größer null. Fehlt /dev/kvm, ist der Knoten selbst eine VM ohne durchgereichte Virtualisierung — dann hilft nur, sie beim Hypervisor einzuschalten, oder gVisor statt Kata.|The preflight check, and the only one needed on the nodes — kata-deploy does the rest from the control plane. Expected: /dev/kvm exists and the second line returns a number greater than zero. If /dev/kvm is missing, the node is itself a VM without nested virtualisation — then the only options are enabling it on the hypervisor, or gVisor instead of Kata."}]
+      : (apt
+        ? [{c:"curl -fsSL https://gvisor.dev/archive.key \\\n  | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg\necho \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main\" \\\n  | sudo tee /etc/apt/sources.list.d/gvisor.list\nsudo apt-get update && sudo apt-get install -y runsc",
+            d:"Die eigene Paketquelle von gVisor. Damit kommen zwei Programme auf den Knoten: runsc selbst und containerd-shim-runsc-v1, über den containerd es anspricht.|gVisor's own package repository. It brings two programs onto the node: runsc itself and containerd-shim-runsc-v1, through which containerd addresses it."}]
+        : [{c:"ARCH=$(uname -m)\nURL=https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}\ncurl -fsSLO ${URL}/runsc -O ${URL}/runsc.sha512 \\\n  -O ${URL}/containerd-shim-runsc-v1 -O ${URL}/containerd-shim-runsc-v1.sha512\nsha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512\nsudo install -m 755 -t /usr/local/bin runsc containerd-shim-runsc-v1",
+            d:"Für RHEL und Verwandte gibt es keine Paketquelle — hier gehen die zwei Programme direkt auf den Knoten. Die Prüfsummenzeile ist nicht Zierde: Sie ist die einzige Kontrolle, dass unterwegs nichts vertauscht wurde.|For RHEL and relatives there is no repository — here the two programs go onto the node directly. The checksum line is not decoration: it is the only check that nothing got swapped on the way."}])
+        .concat(o.runtime === "containerd"
+          ? [{c:"sudo runsc install\nsudo systemctl restart containerd",
+              d:"**runsc install** trägt die Laufzeit selbst in /etc/containerd/config.toml ein — von Hand sieht der Eintrag so aus: [plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc] mit runtime_type = \"io.containerd.runsc.v1\". Bei containerd 2.x heißt der Pfad anders, deshalb ist der Befehl der sicherere Weg.|**runsc install** writes the runtime into /etc/containerd/config.toml itself — by hand the entry looks like this: [plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc] with runtime_type = \"io.containerd.runsc.v1\". On containerd 2.x the path is different, which is why the command is the safer route."},
+             {c:"sudo ctr image pull docker.io/library/alpine:3.20\nsudo ctr run --rm --runtime io.containerd.runsc.v1 \\\n  docker.io/library/alpine:3.20 gvtest dmesg | head -5",
+              d:"Der Beweis, noch ganz ohne Kubernetes: In der Ausgabe von dmesg muss **Starting gVisor...** stehen. Steht dort die Bootmeldung des Knotens, läuft der Container unter runc und der Eintrag hat nicht gegriffen.|The proof, still entirely without Kubernetes: the dmesg output has to say **Starting gVisor...**. If it shows the node's boot messages, the container is running under runc and the entry did not take."}]
+          : [{c:"cat <<'EOF' | sudo tee /etc/crio/crio.conf.d/10-runsc.conf\n[crio.runtime.runtimes.runsc]\nruntime_path = \"/usr/local/bin/runsc\"\nruntime_type = \"oci\"\nruntime_root = \"/run/runsc\"\nEOF\nsudo systemctl restart crio",
+              d:"CRI-O kennt kein runsc install — der Eintrag kommt als eigene Datei in crio.conf.d. Der Name in eckigen Klammern ist genau der Name, den die RuntimeClass später als handler nennt.|CRI-O has no runsc install — the entry goes into crio.conf.d as a file of its own. The name in square brackets is exactly the name the RuntimeClass will later give as its handler."}])),
+    r:[{lvl:"warn", m:t("Der Neustart der Runtime hält kurz jeden Container auf dem Knoten an. Auf einem frischen Cluster ist das folgenlos; auf einem laufenden gehört der Knoten vorher mit kubectl drain geleert.|Restarting the runtime briefly stops every container on the node. On a fresh cluster that has no consequences; on a running one the node belongs drained with kubectl drain first.")}]
+      .concat(o.sandbox === "kata" ? [{lvl:"err", m:t("Ohne /dev/kvm läuft Kata nicht — es gibt dafür keinen Ersatz und keinen Schalter. Auf Knoten, die selbst virtuelle Maschinen sind, muss die verschachtelte Virtualisierung beim Hypervisor eingeschaltet sein: bei Proxmox der CPU-Typ host, bei VMware Expose hardware assisted virtualization, bei Hyper-V ExposeVirtualizationExtensions. Ist das nicht möglich, ist gVisor die Antwort, denn das braucht keine.|Without /dev/kvm Kata does not run — there is no substitute and no flag for it. On nodes that are themselves virtual machines, nested virtualisation has to be switched on at the hypervisor: CPU type host on Proxmox, Expose hardware assisted virtualization on VMware, ExposeVirtualizationExtensions on Hyper-V. If that is not possible, gVisor is the answer, because it needs none.")}] : [])
+      .concat(o.sandbox === "gvisor" ? [{lvl:"warn", m:t("gVisor bildet den Linux-Kernel nach, aber nicht ganz. Was ungewöhnliche Systemaufrufe braucht, kann scheitern — betroffen sind vor allem Datenbanken, alles mit io_uring, und Werkzeuge, die tief in /proc oder /sys greifen. Jede Anwendung, die dorthin soll, gehört vorher einmal probeweise darunter gestartet.|gVisor reimplements the Linux kernel, but not entirely. Anything needing unusual system calls can fail — mainly databases, anything using io_uring, and tools reaching deep into /proc or /sys. Every application meant to go there belongs started under it once as a trial first.")}] : [])
+  });
+
+  /* --- Sandbox: benutzen --- */
+  if (sb && !o.add) sec("Sandbox-Laufzeit benutzen: " + sb.n + "|Using the sandbox runtime: " + sb.n, "cp", {
+    p:["Die Laufzeit auf dem Knoten allein bewirkt nichts. Kubernetes erfährt erst über eine **RuntimeClass** davon, und ein Pod benutzt sie erst, wenn er sie in `runtimeClassName` nennt.|The runtime on the node alone does nothing. Kubernetes only learns about it through a **RuntimeClass**, and a pod only uses it once it names it in `runtimeClassName`.",
+       "Das ist die angenehme Eigenschaft dieser Sache: Sie lässt sich einführen, ohne irgendetwas Bestehendes anzufassen. Ein Pod nach dem anderen zieht um, und was nicht umzieht, läuft weiter wie zuvor.|That is the pleasant property here: it can be introduced without touching anything that already exists. One pod moves over at a time, and what does not move keeps running as before."],
+    items:(o.sandbox === "kata"
+      ? [{c:"KATA=3.20.0   # aktuelle Version aus den Release Notes\nkubectl apply -f https://raw.githubusercontent.com/kata-containers/kata-containers/${KATA}/tools/packaging/kata-deploy/kata-rbac/base/kata-rbac.yaml\nkubectl apply -f https://raw.githubusercontent.com/kata-containers/kata-containers/${KATA}/tools/packaging/kata-deploy/kata-deploy/base/kata-deploy.yaml",
+          d:"**kata-deploy** ist ein DaemonSet: Es legt auf jedem Knoten die Kata-Programme ab, trägt sie in containerd oder CRI-O ein und startet die Runtime neu. Deshalb gibt es hier keinen Installationsschritt je Knoten. Die genauen Pfade können sich zwischen Ausgaben ändern — vor dem Anwenden ein Blick in die Release Notes der Version, die du nimmst.|**kata-deploy** is a DaemonSet: it drops the Kata programs onto every node, registers them with containerd or CRI-O and restarts the runtime. That is why there is no per-node installation step here. The exact paths can change between releases — before applying, take a look at the release notes of the version you are using."},
+         {c:"kubectl -n kube-system rollout status ds/kata-deploy --timeout=300s\nkubectl get nodes -L katacontainers.io/kata-runtime",
+          d:"Der zweite Befehl ist der aussagekräftige: kata-deploy setzt auf jedem Knoten, den es fertig eingerichtet hat, das Label katacontainers.io/kata-runtime=true. Bleibt die Spalte bei einem Knoten leer, ist dort etwas schiefgegangen — meist das fehlende /dev/kvm.|The second command is the telling one: kata-deploy sets the label katacontainers.io/kata-runtime=true on every node it has finished preparing. If the column stays empty for a node, something went wrong there — usually the missing /dev/kvm."},
+         {c:"kubectl apply -k github.com/kata-containers/kata-containers/tools/packaging/kata-deploy/runtimeclasses\nkubectl get runtimeclass",
+          d:"Bringt die RuntimeClasses mit: kata-qemu, kata-clh für Cloud Hypervisor und kata-fc für Firecracker. Welche davon sinnvoll ist, hängt vom Knoten ab — kata-qemu ist die breiteste und die richtige Wahl zum Anfangen.|Brings the runtime classes along: kata-qemu, kata-clh for Cloud Hypervisor and kata-fc for Firecracker. Which one makes sense depends on the node — kata-qemu is the broadest and the right one to start with."},
+         {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: kata-qemu\nhandler: kata-qemu\noverhead:\n  podFixed:\n    memory: \"160Mi\"\n    cpu: \"250m\"\nscheduling:\n  nodeSelector:\n    katacontainers.io/kata-runtime: \"true\"\nEOF",
+          d:"Zwei Ergänzungen, die kata-deploy nicht mitbringt und die beide wichtig sind. **overhead** sagt dem Scheduler, was die VM selbst kostet — ohne die Angabe rechnet er den Knoten voll und wundert sich später über Speicherdruck. **scheduling.nodeSelector** sorgt dafür, dass solche Pods nur auf Knoten landen, die Kata wirklich haben.|Two additions kata-deploy does not bring, both of them important. **overhead** tells the scheduler what the VM itself costs — without it, it fills the node up and is surprised by memory pressure later. **scheduling.nodeSelector** makes sure such pods only land on nodes that really have Kata."}]
+      : [{c:"kubectl label node --all " + sb.label + "=true\nkubectl get nodes -L " + sb.label,
+          d:"Bei gVisor gibt es kein DaemonSet, das die Knoten markiert — das machst du selbst. --all ist richtig, solange runsc überall installiert ist; sonst gehören hier die Namen der Knoten hin, auf denen es liegt.|With gVisor there is no daemon set marking the nodes — you do that yourself. --all is right as long as runsc is installed everywhere; otherwise the names of the nodes that have it belong here."},
+         {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: node.k8s.io/v1\nkind: RuntimeClass\nmetadata:\n  name: gvisor\nhandler: runsc\nscheduling:\n  nodeSelector:\n    " + sb.label + ": \"true\"\nEOF\nkubectl get runtimeclass",
+          d:"**handler: runsc** ist der Name aus der Runtime-Konfiguration vom vorigen Abschnitt, nicht etwa der Name der RuntimeClass. Stimmen die beiden nicht überein, bleibt jeder Pod mit dieser Klasse im Zustand ContainerCreating stehen.|**handler: runsc** is the name from the runtime configuration in the previous section, not the name of the RuntimeClass. If the two do not match, every pod with this class stays stuck in ContainerCreating."}])
+      .concat([
+      {c:"cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nkind: Pod\nmetadata:\n  name: sandbox-test\nspec:\n  runtimeClassName: " + sb.cls + "\n  containers:\n    - name: test\n      image: alpine:3.20\n      command: [\"sh\", \"-c\", \"uname -r; dmesg | head -3; sleep 3600\"]\nEOF\nkubectl wait --for=condition=ready pod/sandbox-test --timeout=180s\nkubectl logs sandbox-test",
+       d:(o.sandbox === "gvisor"
+          ? "Der Beweis steht in der zweiten Zeile der Ausgabe: **Starting gVisor...**. Erscheint stattdessen die Bootmeldung des Knotens, hat der Pod die Klasse nicht bekommen.|The proof is in the second line of the output: **Starting gVisor...**. If the node's boot message appears instead, the pod did not get the class."
+          : "Der Beweis ist die erste Zeile, uname -r: In der VM steht dort ein **anderer** Kernel als auf dem Knoten. Gleicht die Ausgabe dem Knoten, läuft der Pod unter runc. Das dmesg dahinter darf ruhig eine Fehlermeldung liefern — dafür bräuchte der Container CAP_SYSLOG, und die Zeile steht nur da, weil sie bei gVisor der eigentliche Beweis wäre.|The proof is the first line, uname -r: inside the VM it shows a **different** kernel than the node's. If the output matches the node, the pod is running under runc. The dmesg behind it may well return an error — that would need CAP_SYSLOG in the container, and the line is only there because with gVisor it would be the actual proof.")},
+      {c:"uname -r\nkubectl exec sandbox-test -- uname -r",
+       d:"Der direkte Vergleich, einmal auf dem Knoten und einmal im Pod. " +
+         (o.sandbox === "gvisor"
+           ? "gVisor meldet eine erfundene, gleichbleibende Kernelversion — sie stimmt mit nichts überein, was auf dem Knoten läuft, und genau das ist der Punkt.|The direct comparison, once on the node and once in the pod. gVisor reports an invented, constant kernel version — it matches nothing running on the node, which is exactly the point."
+           : "Zwei verschiedene Kernel heißt: zwei verschiedene Kernel. Anders als bei Namespaces ist das hier wörtlich zu nehmen.|The direct comparison, once on the node and once in the pod. Two different kernels means: two different kernels. Unlike with namespaces, that is to be taken literally here.")},
+      {c:"kubectl describe pod sandbox-test | tail -20",
+       d:"Nur nötig, wenn der Pod nicht hochkommt. **unknown runtime** oder **failed to create shim task** heißt: Der handler in der RuntimeClass passt nicht zu dem, was auf dem Knoten eingetragen ist. **FailedScheduling** heißt: Kein Knoten trägt das Label aus dem nodeSelector.|Only needed if the pod does not come up. **unknown runtime** or **failed to create shim task** means the handler in the RuntimeClass does not match what is registered on the node. **FailedScheduling** means no node carries the label from the nodeSelector."},
+      {c:"kubectl delete pod sandbox-test",
+       d:"Aufräumen. Die RuntimeClass bleibt — die ist ab jetzt das, worüber Pods hineinkommen.|Clean up. The RuntimeClass stays — from now on that is how pods get in."}]),
+    r:[{lvl:"warn", m:t("Eine RuntimeClass zwingt niemanden. Wer sie in seinem Pod nicht nennt, landet weiterhin unter runc, und Kubernetes bringt keinen Weg mit, das je Namespace vorzuschreiben. Wenn es verbindlich sein soll, braucht es einen Policy-Dienst wie Kyverno oder Gatekeeper, der runtimeClassName beim Anlegen setzt oder Pods ohne ihn ablehnt.|A RuntimeClass compels nobody. Whoever does not name it in their pod keeps landing under runc, and Kubernetes brings no way to prescribe it per namespace. If it is to be binding, you need a policy service such as Kyverno or Gatekeeper that sets runtimeClassName on creation or rejects pods without it.")},
+       {lvl:"warn", m:t("Die Sandbox ersetzt den Pod Security Standard nicht, sie ergänzt ihn. restricted verhindert, dass ein Pod gefährliche Dinge überhaupt verlangt; die Sandbox begrenzt den Schaden, wenn er trotzdem ausbricht. Beides zusammen ist der Sinn der Sache, eins davon allein ist die halbe Miete.|The sandbox does not replace the Pod Security Standard, it complements it. restricted keeps a pod from asking for dangerous things in the first place; the sandbox limits the damage if it breaks out anyway. Both together is the point of the exercise; either alone is half the job.")}]
+      .concat(o.sandbox === "kata" ? [{lvl:"warn", m:t("In einer Kata-VM gilt manches nicht mehr, was unter runc selbstverständlich war: hostNetwork geht nicht, hostPath nur eingeschränkt, und Geräte vom Knoten müssen ausdrücklich durchgereicht werden. Was das braucht, gehört nicht in eine Kata-RuntimeClass.|Inside a Kata VM some things no longer hold that were a given under runc: hostNetwork does not work, hostPath only in a limited way, and devices from the node have to be passed through explicitly. Anything needing those does not belong in a Kata runtime class.")}] : [])
   });
 
   sec("Funktionstest|Smoke test", "cp", {
