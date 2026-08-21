@@ -4619,6 +4619,26 @@ function runSelfTests(){
   ok("Alle drei Anmeldearten liefern eine kubeconfig",
     ["cert","oidc","sa"].every(id => tenantGuide({identity:id}).some(s =>
       s.items.some(i => i.c.indexOf("kubectl config set-credentials") !== -1))), "");
+  ok("API-Adresse: fehlender Port wird ergänzt",
+    tenantOpts({api:"k8s-cp1.highq.org"}).api === "k8s-cp1.highq.org:6443" &&
+    tenantOpts({api:"k8s-cp1.highq.org:6443"}).api === "k8s-cp1.highq.org:6443" &&
+    tenantOpts({api:"172.18.42.10"}).api === "172.18.42.10:6443", "");
+  ok("API-Adresse: die Ergänzung wird als Fehler gemeldet",
+    (function(){
+      const ohne = tenantGuide({api:"k8s-cp1.highq.org"});
+      const mit  = tenantGuide({api:"k8s-cp1.highq.org:6443"});
+      const kc = g => g.filter(s => t(s.h).indexOf("kubeconfig") !== -1)[0];
+      return kc(ohne).r.some(x => x.lvl === "err") && !kc(mit).r.some(x => x.lvl === "err");
+    })(), "");
+  ok("API-Adresse: der Server trägt immer einen Port",
+    ["k8s-cp1.highq.org", "k8s-cp1.highq.org:6443", "172.18.42.10"].every(a =>
+      tenantGuide({api:a}).some(s => s.items.some(i =>
+        /--server=https:\/\/[^\s]+:\d+/.test(i.c)))), "");
+  ok("Benutzer-Abschnitt: die Namensauflösung wird zuerst geprüft",
+    (function(){
+      const s = tenantGuide({api:"k8s-cp1.highq.org"}).filter(x => t(x.h).indexOf("Beim Benutzer") === 0)[0];
+      return s.items[0].c.indexOf("getent hosts") === 0 && s.items[0].c.indexOf("6443") !== -1;
+    })(), "");
   ok("Benutzer-Assistent: die CA kommt aus der eigenen kubeconfig, nicht nur aus kubeadm",
     tenantGuide({}).some(s => s.items.some(i =>
       i.c.indexOf("certificate-authority-data") !== -1)), "");
@@ -5213,7 +5233,9 @@ function domainOf(api){
 
 function tenantOpts(o){
   const user = (o.user || "").trim() || "anna";
-  const api = (o.api || "").trim() || "API-ADRESSE:6443";
+  const apiRoh = (o.api || "").trim() || "API-ADRESSE:6443";
+  /* Ohne Port landet die kubeconfig auf 443 — dort antwortet kein API-Server. */
+  const api = /:\d+$/.test(apiRoh) ? apiRoh : apiRoh + ":6443";
   const dom = domainOf(api);
   /* Gebunden wird der Namespace, nicht die Person — also haengt die Vorgabe an ihm. */
   const ns = (o.ns || "").trim() || ("team-" + user);
@@ -5224,7 +5246,8 @@ function tenantOpts(o){
     ns: ns,
     level: o.level || "edit",
     identity: o.identity || "cert",
-    api: (o.api || "").trim() || "API-ADRESSE:6443",
+    api: api,
+    apiOhnePort: !/:\d+$/.test(apiRoh) && apiRoh.indexOf("API-ADRESSE") === -1,
     days: num(o.days) === undefined ? 365 : num(o.days),
     pss: o.pss || "restricted",
     linux: !!o.linux,
@@ -5420,6 +5443,9 @@ function tenantGuide(raw){
     : oidc
     ? "kubectl krew install oidc-login   # einmalig, auch beim Benutzer\n\nkubectl config set-credentials " + o.user + " \\\n  --exec-api-version=client.authentication.k8s.io/v1beta1 \\\n  --exec-command=kubectl \\\n  --exec-arg=oidc-login --exec-arg=get-token \\\n  --exec-arg=--oidc-issuer-url=" + o.issuer + " \\\n  --exec-arg=--oidc-client-id=kubernetes \\\n  --exec-arg=--oidc-client-secret=KLIENT-GEHEIMNIS-HIER \\\n  --exec-arg=--oidc-extra-scope=email --exec-arg=--oidc-extra-scope=groups \\\n  --exec-arg=--grant-type=password \\\n  --exec-arg=--certificate-authority=dex-ca.crt \\\n  --kubeconfig=" + kc
     : "kubectl config set-credentials " + o.user + " \\\n  --token=\"$(kubectl create token " + o.user + " -n " + o.ns + " --duration=" + (o.days * 24) + "h)\" \\\n  --kubeconfig=" + kc;
+  const apiRisiken = [{lvl:"warn", m:t("Der Name in der kubeconfig muss auf dem Rechner des Benutzers aufloesen, nicht nur auf deinem. Tut er das nicht, meldet kubectl \"dial tcp: lookup " + o.api.split(":")[0] + ": no such host\". Die Datei ist dann in Ordnung und trotzdem nutzlos — es fehlt ein Eintrag im DNS oder notfalls in der lokalen hosts-Datei.|The name in the kubeconfig has to resolve on the user's machine, not only on yours. If it does not, kubectl reports \"dial tcp: lookup " + o.api.split(":")[0] + ": no such host\". The file is then fine and still useless — an entry in DNS, or in the local hosts file if need be, is missing.")}]
+    .concat(o.apiOhnePort ? [{lvl:"err", m:t("Die API-Adresse stand ohne Port da — der Assistent hat :6443 ergaenzt. Ohne Port zeigt die kubeconfig auf 443, wo kein API-Server antwortet, und die Fehlermeldung sieht aus wie ein Namensproblem. Erkennen kann man es daran, dass in der Meldung hinter dem Namen kein :6443 steht.|The API address came without a port — the wizard appended :6443. Without a port the kubeconfig points at 443, where no API server answers, and the error looks like a name problem. You spot it by there being no :6443 after the name in the message.")}] : []);
+
   sec("Die kubeconfig bauen|Building the kubeconfig", "admin", {
     p:["Eine kubeconfig besteht aus drei Teilen, die getrennt gesetzt und dann verbunden werden: **wo** der Cluster ist, **wer** du bist, und **welche Kombination** aus beidem gerade gilt. Der letzte Befehl setzt den Namespace mit — sonst landet der Benutzer in `default` und sieht nichts.|A kubeconfig consists of three parts that are set separately and then joined: **where** the cluster is, **who** you are, and **which combination** of the two is currently active. The last command sets the namespace too — otherwise the user lands in `default` and sees nothing."],
     items:[
@@ -5436,7 +5462,8 @@ function tenantGuide(raw){
       {c:oidc ? "KUBECONFIG=" + kc + " kubectl get pods   # fragt jetzt nach Name und Kennwort"
               : "KUBECONFIG=" + kc + " kubectl get pods",
        d:"Der erste echte Test, noch als du selbst. Kommt hier eine Fehlermeldung über Rechte, stimmt die Bindung nicht — kommt eine über die Verbindung, stimmt die Adresse nicht.|The first real test, still as yourself. An error about permissions here means the binding is wrong — one about the connection means the address is wrong."}
-    ]
+    ],
+    r:apiRisiken
   });
 
   /* --- 5b. beim Benutzer --- */
@@ -5444,6 +5471,8 @@ function tenantGuide(raw){
     p:["Die fertige Datei geht an die Person, für die sie ist — über einen Weg, dem du beide vertraut: verschlüsselt, nicht als Chatnachricht und nicht als Anhang in einem Ticket. Sie enthält den vollständigen Zugang.|The finished file goes to the person it is for — over a route you both trust: encrypted, not as a chat message and not as an attachment in a ticket. It contains complete access.",
        "Wichtig zu wissen: Ein Konto auf dem Server braucht dafür niemand. Der Cluster ist über die API erreichbar, und kubectl läuft genauso gut auf dem eigenen Rechner. Der Linux-Benutzer im nächsten Schritt ist nur nötig, wenn wirklich **auf** dem Server gearbeitet werden soll.|Worth knowing: nobody needs an account on the server for this. The cluster is reachable over the API and kubectl runs just as well on your own machine. The Linux user in the next step is only needed if work really has to happen **on** the server."],
     items:[
+      {c:"getent hosts " + o.api.split(":")[0] + " || echo 'loest hier nicht auf'\nnc -vz " + o.api.replace(":", " ") + "\ncurl -sk https://" + o.api + "/version",
+       d:"**Zuerst das, vor allem anderen.** Die drei Zeilen beantworten getrennt: löst der Name auf diesem Rechner auf, ist der Port erreichbar, antwortet dort ein API-Server. Scheitert schon die erste, ist die kubeconfig in Ordnung und trotzdem nutzlos — dann fehlt der Eintrag im DNS oder in der lokalen hosts-Datei.|**This first, before anything else.** The three lines answer separately: does the name resolve on this machine, is the port reachable, does an API server answer there. If the first one already fails, the kubeconfig is fine and still useless — then the entry in DNS or in the local hosts file is missing."},
       {c:"# auf dem Rechner des Benutzers, sobald die Datei dort angekommen ist:\nmkdir -p ~/.kube\ninstall -m 600 " + kc + " ~/.kube/config",
        d:"install kopiert und setzt die Rechte in einem Zug — die Vorlage bleibt liegen, denn beim Verwalter wird sie im nächsten Schritt noch gebraucht. Wer schon eine kubeconfig hat, legt diese daneben und schaltet mit der Umgebungsvariable KUBECONFIG um, statt die vorhandene zu überschreiben.|install copies and sets the permissions in one go — the original stays, because the admin still needs it in the next step. Anyone who already has a kubeconfig puts this one next to it and switches with the KUBECONFIG environment variable instead of overwriting the existing one."},
       {c:"kubectl config get-contexts\nkubectl config current-context\nkubectl config view --minify",
