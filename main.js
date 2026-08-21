@@ -1167,7 +1167,8 @@ RES._stack = {
               ["app","nur für diese Anwendung|for this application only"],
               ["deny","zusätzlich Default-Deny für den Namespace|plus default-deny for the namespace"]]},
       {k:"netpolNs", t:"text", l:"Ingress-Controller läuft in Namespace|Ingress controller runs in namespace",
-        ph:"ingress-nginx", def:"ingress-nginx", when:d=>d.netpol},
+        ph:"ingress-nginx", def:"ingress-nginx", when:d=>d.netpol,
+        hint:"Je nach Controller ingress-nginx, traefik oder haproxy-controller. Steht hier der falsche Namespace, ist die Anwendung von außen tot — ohne Fehlermeldung.|Depending on the controller: ingress-nginx, traefik or haproxy-controller. The wrong namespace here leaves the app dead from outside — with no error message."},
       {k:"hardened", t:"bool", l:"Restricted-Härtung anwenden|Apply restricted hardening", def:true,
         hint:"Erfüllt den Pod Security Standard restricted. Wenn der Container ins Dateisystem schreiben muss, außerhalb von /tmp, dann hier aus.|Meets the restricted Pod Security Standard. Turn it off if the container has to write outside /tmp."},
       {k:"runAsNonRoot", t:"bool", l:"runAsNonRoot erzwingen|Enforce runAsNonRoot", def:true}
@@ -4376,6 +4377,66 @@ function runSelfTests(){
     heads(addGuide).indexOf("Neu aufsetzen") === -1, "");
   ok("Installation: jeder Abschnitt nennt weiterhin seinen Ort",
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
+  const ingHeads = x => guideOf(x).map(s => t(s.h)).join(" | ");
+  ok("Ingress: jede Wahl bekommt ihren eigenen Abschnitt",
+    ["nginx","traefik","haproxy"].every(c =>
+      ingHeads({ingress:c}).indexOf("Ingress-Controller: " + INGRESS_CTRL[c].n) !== -1),
+    ingHeads({ingress:"traefik"}));
+  ok("Ingress: keiner heißt kein Abschnitt",
+    ingHeads({ingress:"none"}).indexOf("Ingress-Controller") === -1 &&
+    guideOf({ingress:"none"}).length === guideOf({ingress:"nginx"}).length - 1, "");
+  ok("Ingress: Namespace, Klasse und Service passen zur Wahl",
+    ["nginx","traefik","haproxy"].every(function(c){
+      const ic = INGRESS_CTRL[c], cmds = allCmds({ingress:c});
+      const fremd = ["nginx","traefik","haproxy"].filter(x => x !== c)
+        .map(x => INGRESS_CTRL[x].ns);
+      return cmds.indexOf("-n " + ic.ns + " get pods") !== -1 &&
+             cmds.indexOf("--class=" + ic.cls) !== -1 &&
+             cmds.indexOf("get svc " + ic.svc) !== -1 &&
+             fremd.every(n => cmds.indexOf("-n " + n + " ") === -1);
+    }), "");
+  ok("Ingress: nginx per Manifest, die beiden anderen per Helm",
+    allCmds({ingress:"nginx"}).indexOf("kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx") !== -1 &&
+    allCmds({ingress:"nginx"}).indexOf("helm install") === -1 &&
+    allCmds({ingress:"traefik"}).indexOf("helm install traefik traefik/traefik") !== -1 &&
+    allCmds({ingress:"haproxy"}).indexOf("helm install haproxy haproxytech/kubernetes-ingress") !== -1, "");
+  ok("Ingress: der Typ LoadBalancer wird überall ausdrücklich gesetzt",
+    ["nginx","traefik","haproxy"].every(c =>
+      allCmds({ingress:c}).indexOf("LoadBalancer") !== -1), "");
+  ok("Ingress: die Tabelle nennt alle drei Annotations-Präfixe",
+    (function(){
+      const s = guideOf({ingress:"nginx"}).filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0];
+      const flach = JSON.stringify(s.table);
+      return ["nginx","traefik","haproxy"].every(c => flach.indexOf(INGRESS_CTRL[c].ann) !== -1);
+    })(), "");
+  ok("Ingress: ingress-nginx wird mit dem Ende der Pflege ausgeliefert",
+    (function(){
+      const risk = c => guideOf({ingress:c})
+        .filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0].r;
+      return risk("nginx").some(x => x.lvl === "err" && x.m.indexOf("Ende der Pflege") !== -1) &&
+             risk("traefik").every(x => x.lvl !== "err") &&
+             risk("haproxy").every(x => x.lvl !== "err");
+    })(), "");
+  ok("Ingress: beim Hinzufügen eines Knotens wird nichts neu installiert",
+    (function(){
+      const s = guideOf({have:"node", ingress:"traefik"})
+        .filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0];
+      return s && s.items.every(i => i.c.indexOf("helm install") === -1 &&
+                                     i.c.indexOf("kubectl apply -f") === -1);
+    })(), "");
+  ok("Ingress: der Funktionstest davor führt keinen Controller mehr",
+    (function(){
+      const s = guideOf({ingress:"nginx"}).filter(x => t(x.h).indexOf("Funktionstest") === 0)[0];
+      return s.items.every(i => i.c.indexOf("ingressclass") === -1 &&
+                                i.c.indexOf("create ingress") === -1);
+    })(), "");
+  ok("Ingress: MetalLB zeigt auf den gewählten Controller",
+    ["nginx","traefik","haproxy"].every(function(c){
+      const ic = INGRESS_CTRL[c];
+      const cmds = metallbGuide({ingress:true, ingclass:c})
+        .map(s => s.items.map(i => i.c).join("\n")).join("\n");
+      return cmds.indexOf("-n " + ic.ns + " annotate service " + ic.svc) !== -1;
+    }), "");
   const oidcGuide = tenantGuide({user:"bge", ns:"team-admin", identity:"oidc", api:"k8s-cp1.highq.org:6443"});
   const oidcTxt = oidcGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
   const ymlTest = (function(){
@@ -4865,6 +4926,66 @@ $("testClose").addEventListener("click", () => { $("testPanel").hidden = true; }
 
 /* ---------- Cluster aufsetzen ---------- */
 
+/* ---------- Ingress-Controller ----------
+   Drei Programme für dieselbe Aufgabe: HTTP von außen annehmen und anhand
+   von Hostname und Pfad an einen Service weitergeben. Die Ingress-Ressource
+   selbst ist bei allen dieselbe — was sich unterscheidet, sind Namespace,
+   Klassenname und vor allem das Annotations-Präfix. Genau daran scheitert
+   jeder Umzug von einem Controller zum nächsten, denn Annotations mit
+   fremdem Präfix werden wortlos ignoriert. */
+const INGRESS_CTRL = {
+  nginx: {
+    n:"ingress-nginx", ns:"ingress-nginx", cls:"nginx",
+    svc:"ingress-nginx-controller", dep:"ingress-nginx-controller",
+    sel:"app.kubernetes.io/component=controller",
+    ann:"nginx.ingress.kubernetes.io/",
+    repo:["ingress-nginx", "https://kubernetes.github.io/ingress-nginx"],
+    chart:"ingress-nginx/ingress-nginx", rel:"ingress-nginx",
+    manifest:"https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml",
+    svcArg:"controller.service.type"
+  },
+  haproxy: {
+    n:"HAProxy", ns:"haproxy-controller", cls:"haproxy",
+    svc:"haproxy-kubernetes-ingress", dep:"haproxy-kubernetes-ingress",
+    sel:"app.kubernetes.io/instance=haproxy",
+    ann:"haproxy.org/",
+    repo:["haproxytech", "https://haproxytech.github.io/helm-charts"],
+    chart:"haproxytech/kubernetes-ingress", rel:"haproxy",
+    manifest:"",
+    svcArg:"controller.service.type"
+  },
+  traefik: {
+    n:"Traefik", ns:"traefik", cls:"traefik",
+    svc:"traefik", dep:"traefik",
+    sel:"app.kubernetes.io/name=traefik",
+    ann:"traefik.ingress.kubernetes.io/",
+    repo:["traefik", "https://traefik.github.io/charts"],
+    chart:"traefik/traefik", rel:"traefik",
+    manifest:"",
+    svcArg:"service.type"
+  }
+};
+
+/* Die Installation, je Controller sein dokumentierter Weg: ingress-nginx hat
+   ein fertiges Manifest für eigene Hardware, die beiden anderen werden per
+   Helm ausgeliefert. */
+function ingressInstall(ing){
+  if (ing.manifest) return [
+    {c:"kubectl apply -f " + ing.manifest,
+     d:"Das Baremetal-Manifest: Namespace, Deployment, Service und die IngressClass **" + ing.cls + "** in einem Zug. Es legt einen NodePort-Service an — mit MetalLB wird daraus gleich eine eigene Adresse.|The baremetal manifest: namespace, deployment, service and the **" + ing.cls + "** ingress class in one go. It creates a NodePort service — with MetalLB that becomes an address of its own in a moment."},
+    {c:"kubectl -n " + ing.ns + " wait --for=condition=available \\\n  deploy/" + ing.dep + " --timeout=120s",
+     d:"Wartet, statt zu raten. Bleibt der Befehl hängen, läuft der Pod noch nicht — dann sagt kubectl -n " + ing.ns + " describe pod, woran es liegt.|Waits instead of guessing. If the command hangs, the pod is not up yet — then kubectl -n " + ing.ns + " describe pod says why."}
+  ];
+  return [
+    {c:"helm repo add " + ing.repo[0] + " " + ing.repo[1] + "\nhelm repo update",
+     d:"Der Hersteller liefert " + ing.n + " als Helm-Chart aus; ein einzelnes Manifest wie bei ingress-nginx gibt es dafür nicht.|The vendor ships " + ing.n + " as a Helm chart; there is no single manifest for it the way ingress-nginx has one."},
+    {c:"helm install " + ing.rel + " " + ing.chart + " \\\n  --namespace " + ing.ns + " --create-namespace \\\n  --set " + ing.svcArg + "=LoadBalancer",
+     d:"Der Typ LoadBalancer setzt MetalLB voraus. Ohne MetalLB stattdessen NodePort setzen — dann erreichst du den Controller über die Knoten-Adresse und einen hohen Port.|Type LoadBalancer assumes MetalLB. Without MetalLB set NodePort instead — then you reach the controller through a node address and a high port."},
+    {c:"kubectl -n " + ing.ns + " rollout status deploy/" + ing.dep,
+     d:"Wartet, statt zu raten. Bleibt der Befehl hängen, läuft der Pod noch nicht — dann sagt kubectl -n " + ing.ns + " describe pod, woran es liegt.|Waits instead of guessing. If the command hangs, the pod is not up yet — then kubectl -n " + ing.ns + " describe pod says why."}
+  ];
+}
+
 const CLUSTER_FIELDS = [
   {k:"have", t:"select", l:"Ausgangslage|Starting point", structural:true,
    opts:[["neu","Es gibt noch keinen Cluster|There is no cluster yet"],
@@ -4880,6 +5001,12 @@ const CLUSTER_FIELDS = [
    opts:[["cilium","Cilium — eBPF, ohne kube-proxy möglich|Cilium — eBPF, can replace kube-proxy"],
          ["calico","Calico — verbreitet, NetworkPolicy inklusive|Calico — widespread, network policy included"],
          ["flannel","Flannel — einfach, ohne NetworkPolicy|Flannel — simple, no network policy"]]},
+  {k:"ingress", t:"select", l:"Ingress-Controller|Ingress controller", structural:true,
+   opts:[["nginx","ingress-nginx — am weitesten verbreitet|ingress-nginx — the most widespread"],
+         ["traefik","Traefik — eigene CRDs, Dashboard, ACME eingebaut|Traefik — own CRDs, dashboard, built-in ACME"],
+         ["haproxy","HAProxy — schlank, sehr schnell, wenig Beiwerk|HAProxy — lean, very fast, little around it"],
+         ["none","Keiner — später oder gar nicht|None — later or not at all"]],
+   hint:"Nimmt HTTP von außen an und verteilt es nach Hostname und Pfad. Die Ingress-Ressource ist bei allen dreien dieselbe; unterschiedlich sind Namespace, Klassenname und das Annotations-Präfix.|Takes HTTP from outside and distributes it by host name and path. The Ingress resource is the same for all three; what differs is the namespace, the class name and the annotation prefix."},
   {k:"endpoint", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de",
    hint:"Name oder VIP, unter dem der API-Server erreichbar ist. Leer lassen heißt: die IP des ersten Hauptservers — die lässt sich später nicht mehr ändern. Für mehrere Hauptserver ist die Angabe zwingend.|Name or VIP the API server answers on. Empty means the first control-plane node's IP — which cannot be changed later. With several control-plane nodes it is mandatory."},
   {k:"ha", t:"bool", structural:true, when:o => o.have !== "node",
@@ -4915,6 +5042,7 @@ function clusterOpts(o){
     os: o.os || "apt",
     runtime: o.runtime || "containerd",
     cni: cni,
+    ingress: o.ingress || "nginx",
     endpoint: (o.endpoint || "").trim(),
     ha: !!o.ha,
     workers: num(o.workers) === undefined ? 3 : num(o.workers),
@@ -4937,6 +5065,8 @@ function clusterGuide(raw){
   /* Bei Hochverfuegbarkeit ist die Node-IP keine gueltige Antwort. */
   const noEndpoint = o.ha && !o.endpoint;
   const api = o.endpoint || (o.ha ? "STABILE-ADRESSE" : "IP-DES-HAUPTSERVERS");
+  /* null heisst: der Anwender will keinen — dann entfaellt der ganze Abschnitt. */
+  const ing = INGRESS_CTRL[o.ingress] || null;
   const out = [];
   const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
 
@@ -5178,29 +5308,84 @@ function clusterGuide(raw){
        d:"Vom eigenen Rechner aus, nicht vom Knoten. Kommt die nginx-Seite, ist der Weg von aussen bis in den Pod offen.|From your own machine, not from a node. If the nginx page appears, the path from outside into the pod is open."},
       {c:"kubectl -n metallb-system logs -l component=speaker --tail=30\nip neigh | grep ADRESSE-AUS-EXTERNAL-IP",
        d:"Nur noetig, wenn die Adresse zwar vergeben ist, aber nichts antwortet. MetalLB kuendigt sie im lokalen Netz per ARP an. Taucht sie in der Nachbarschaftstabelle deines Rechners nicht auf, liegt sie ausserhalb des Subnetzes der Knoten oder die L2Advertisement fehlt. Antwortet der NodePort von oben weiterhin, ist der Cluster in Ordnung und es liegt allein an MetalLB.|Only needed if the address is assigned but nothing answers. MetalLB announces it on the local network via ARP. If it does not show up in your machine's neighbour table, it sits outside the nodes' subnet or the L2Advertisement is missing. If the NodePort above still answers, the cluster is fine and it is MetalLB alone."},
-      {c:"kubectl -n ingress-nginx get pods\nkubectl get ingressclass",
-       d:"Zuerst: Gibt es den Controller ueberhaupt? Erwartung ist ein Pod im Zustand Running und eine IngressClass namens nginx. Fehlt die Klasse, wird jede Ingress-Regel spaeter stillschweigend ignoriert — ohne Fehlermeldung, denn niemand fuehlt sich zustaendig.|First: does the controller exist at all? Expected is a pod in Running and an IngressClass called nginx. Without that class every ingress rule is silently ignored later — with no error, because nobody feels responsible."},
-      {c:"kubectl -n ingress-nginx patch svc ingress-nginx-controller \\\n  -p '{\"spec\":{\"type\":\"LoadBalancer\"}}'\nkubectl -n ingress-nginx get svc ingress-nginx-controller",
-       d:"Das Baremetal-Manifest des Ingress-Controllers legt einen NodePort-Service an. Mit MetalLB bekommt er stattdessen eine eigene Adresse — die Adresse, auf die spaeter alle Hostnamen zeigen.|The ingress controller's baremetal manifest creates a NodePort service. With MetalLB it gets an address of its own instead — the address all your hostnames will later point at."},
-      {c:"curl -I http://ADRESSE-DES-INGRESS",
-       d:"Der aussagekraeftigste Einzeltest, noch **ohne** jede Ingress-Regel. Erwartung: **404 Not Found** mit einer Zeile server: nginx. Das klingt nach Fehler, ist aber der Beweis, dass der Controller lebt und erreichbar ist — er hat nur noch keine passende Regel. Kommt stattdessen connection refused oder ein Timeout, ist es kein Ingress-Problem, sondern eines der Adresse.|The single most telling test, still **without** any ingress rule. Expected: **404 Not Found** with a server: nginx line. That looks like a failure but proves the controller is alive and reachable — it simply has no matching rule yet. If you get connection refused or a timeout instead, this is not an ingress problem but an address problem."},
-      {c:"kubectl create ingress web --class=nginx \\\n  --rule=\"web.example.lan/*=web:80\"\nkubectl get ingress",
-       d:"Erwartung: Nach ein paar Sekunden steht in der Spalte ADDRESS die Adresse des Controllers. Bleibt sie leer, hat der Controller die Regel nicht angenommen — dann stimmt die Klasse nicht mit dem ueberein, was kubectl get ingressclass oben gezeigt hat.|Expected: after a few seconds the ADDRESS column shows the controller's address. If it stays empty the controller has not taken the rule — then the class does not match what kubectl get ingressclass showed above."},
-      {c:"curl -H 'Host: web.example.lan' http://ADRESSE-DES-INGRESS",
-       d:"Der Host-Header ersetzt den DNS-Eintrag fuer den ersten Test. Kommt die nginx-Seite, funktioniert die ganze Kette: MetalLB, Ingress-Controller, Regel, Service, Pod. Die beiden Fehlerbilder sind eindeutig: **404** heisst, die Regel greift nicht — meist ein Tippfehler im Hostnamen. **503** heisst, die Regel greift, aber der Service hat keine bereiten Endpoints. Danach den Namen im DNS oder in /etc/hosts auf dieselbe Adresse zeigen lassen.|The Host header stands in for the DNS record for a first test. If the nginx page appears, the whole chain works: MetalLB, ingress controller, rule, service, pod. The two failure modes are unambiguous: **404** means the rule does not match — usually a typo in the hostname. **503** means the rule matches but the service has no ready endpoints. After that, point the name at the same address in DNS or /etc/hosts."},
-      {c:"kubectl -n ingress-nginx logs -l app.kubernetes.io/component=controller \\\n  --tail=20 -f",
-       d:"Die letzte Instanz bei jedem Ingress-Problem: Der Controller schreibt jede Anfrage mit, samt Statuscode. Taucht dein curl hier auf, ist die Anfrage angekommen und die Ursache liegt in Regel oder Backend. Taucht sie nicht auf, hat sie den Controller nie erreicht — dann ist es das Netz oder die Adresse.|The last resort for any ingress problem: the controller logs every request with its status code. If your curl shows up here, the request arrived and the cause lies in the rule or the backend. If it does not, it never reached the controller — then it is the network or the address."},
-      {c:"kubectl delete ingress web\nkubectl delete svc web\nkubectl delete deployment web",
-       d:"Aufraeumen. MetalLB und der Ingress-Controller bleiben stehen, die brauchst du weiter.|Clean up. MetalLB and the ingress controller stay, you will keep needing those."}
+      {c:"kubectl delete svc web\nkubectl delete deployment web",
+       d:"Aufraeumen. MetalLB bleibt stehen, das brauchst du weiter." +
+         (ing ? " Die Testanwendung kommt im naechsten Abschnitt noch einmal — deshalb erst danach loeschen, wenn du gleich weitermachst.|Clean up. MetalLB stays, you will keep needing it. The test app comes back in the next section — so delete it afterwards if you carry straight on."
+              : "|Clean up. MetalLB stays, you will keep needing it.")}
     ],
     r:[{lvl:"warn", m:t("Bleibt ein Service auf Pending oder ein Pod auf ContainerCreating, hilft kubectl describe auf genau dieses Objekt weiter — der Abschnitt Events ganz unten nennt die Ursache fast immer im Klartext.|If a service stays Pending or a pod stays in ContainerCreating, kubectl describe on exactly that object is the way forward — the Events section at the bottom almost always names the cause outright.")}]
   });
 
+  /* --- Ingress-Controller --- */
+  if (ing) sec("Ingress-Controller: " + ing.n + "|Ingress controller: " + ing.n, "cp", {
+    p:["Ein Service vom Typ LoadBalancer verbraucht **eine** Adresse pro Anwendung. Das geht bei drei Diensten und hört bei dreißig auf. Der Ingress-Controller dreht das um: Er nimmt eine einzige Adresse und verteilt darauf nach Hostname und Pfad — alles andere braucht dann nur noch eine Regel.|A LoadBalancer service consumes **one** address per application. That works for three services and stops working at thirty. The ingress controller turns it around: it takes a single address and distributes on it by host name and path — everything else then needs only a rule.",
+       "Ohne Controller ist eine Ingress-Ressource ein Stück Papier. Sie lässt sich anlegen, sie steht in kubectl get ingress, und es passiert nichts. Kubernetes selbst kann kein HTTP — es verwaltet nur die Regel, umsetzen muss sie jemand anders.|Without a controller an Ingress resource is a piece of paper. It can be created, it shows up in kubectl get ingress, and nothing happens. Kubernetes itself speaks no HTTP — it only manages the rule; somebody else has to carry it out.",
+       o.ingress === "nginx"
+         ? "**ingress-nginx** ist die verbreitetste Wahl und die, auf die sich fast jede Anleitung im Netz bezieht. Es steckt eine nginx-Konfiguration hinter der Ingress-Ressource; alles, was über das Standardfeld hinausgeht, läuft über Annotations.|**ingress-nginx** is the most widespread choice and the one nearly every guide on the net refers to. It puts an nginx configuration behind the Ingress resource; anything beyond the standard fields runs through annotations."
+         : o.ingress === "traefik"
+         ? "**Traefik** bringt am meisten mit: ein eigenes Dashboard, eingebautes Let's Encrypt und mit IngressRoute und Middleware eigene Ressourcen, die deutlich mehr können als eine Ingress-Regel. Der Preis dafür ist, dass die interessanten Fähigkeiten nicht mehr portabel sind — eine IngressRoute lässt sich nicht auf einen anderen Controller umziehen.|**Traefik** brings the most with it: a dashboard of its own, built-in Let's Encrypt, and with IngressRoute and Middleware its own resources that can do considerably more than an ingress rule. The price is that the interesting capabilities stop being portable — an IngressRoute cannot be moved to another controller."
+         : "**HAProxy** ist der schlankeste der drei und der mit dem geringsten Beiwerk. Es bringt keine eigenen Routing-CRDs mit — was es kann, steht in der Ingress-Ressource und in Annotations. Wer HAProxy schon vor Kubernetes eingesetzt hat, findet dieselbe Konfigurationssprache wieder.|**HAProxy** is the leanest of the three and the one with the least around it. It brings no routing CRDs of its own — what it can do lives in the Ingress resource and in annotations. Anyone who used HAProxy before Kubernetes finds the same configuration language again."],
+    table:[
+      ["", "ingress-nginx", "Traefik", "HAProxy"],
+      ["Namespace|Namespace", "ingress-nginx", "traefik", "haproxy-controller"],
+      ["ingressClassName", "nginx", "traefik", "haproxy"],
+      ["Annotations", "nginx.ingress.kubernetes.io/", "traefik.ingress.kubernetes.io/", "haproxy.org/"],
+      ["Installation", "Manifest oder Helm|manifest or Helm", "Helm", "Helm"],
+      ["Eigene Routing-Ressourcen|Routing resources of its own", "keine|none", "IngressRoute, Middleware, TLSOption", "keine|none"],
+      ["Oberfläche|Web interface", "keine|none", "Dashboard auf Port 9000|dashboard on port 9000", "Stats auf Port 1024|stats on port 1024"],
+      ["Zertifikate|Certificates", "cert-manager", "cert-manager oder eingebautes ACME|cert-manager or built-in ACME", "cert-manager"]
+    ],
+    p2:["Die Zeile **Annotations** ist die wichtigste der Tabelle. Ein `nginx.ingress.kubernetes.io/rewrite-target` an einem Ingress, den Traefik bedient, wird nicht etwa abgelehnt — es wird wortlos ignoriert. Der Ingress funktioniert, nur eben ohne das Umschreiben, und niemand sagt etwas. Wer den Controller wechselt, muss jede Annotation einzeln übersetzen.|The **annotations** row is the most important one in the table. An `nginx.ingress.kubernetes.io/rewrite-target` on an Ingress served by Traefik is not rejected — it is silently ignored. The Ingress works, just without the rewriting, and nobody says a word. Anyone switching controllers has to translate every annotation one by one.",
+      "Mehrere Controller nebeneinander sind erlaubt, solange jeder seine eigene Klasse und seine eigene Adresse hat. Üblich ist das etwa für eine getrennte Behandlung von innen und außen. Was **nicht** geht: zwei Controller, die sich auf demselben Knoten die Ports 80 und 443 teilen wollen.|Several controllers side by side are allowed as long as each has its own class and its own address. That is common for handling inside and outside traffic separately. What does **not** work: two controllers wanting to share ports 80 and 443 on the same node."],
+    items:(o.add ? [] : ingressInstall(ing)).concat([
+      {c:"kubectl -n " + ing.ns + " get pods\nkubectl get ingressclass",
+       d:"Erwartung: ein Pod im Zustand Running und eine IngressClass namens **" + ing.cls + "**. Fehlt die Klasse, wird später jede Ingress-Regel stillschweigend ignoriert — ohne Fehlermeldung, denn niemand fühlt sich zuständig.|Expected: a pod in Running and an IngressClass called **" + ing.cls + "**. Without that class every ingress rule is silently ignored later — with no error, because nobody feels responsible."},
+      {c:"kubectl annotate ingressclass " + ing.cls + " \\\n  ingressclass.kubernetes.io/is-default-class=true --overwrite",
+       d:"Optional, aber bequem: Danach gilt " + ing.cls + " für jeden Ingress, der keine Klasse nennt. Genau **eine** Klasse darf das sein — sind es zwei, verhaelt sich der Cluster unvorhersehbar.|Optional but convenient: after this " + ing.cls + " applies to every ingress that names no class. Exactly **one** class may carry this — with two, the cluster behaves unpredictably."}]
+      .concat(ing.manifest ? [
+      {c:"kubectl -n " + ing.ns + " patch svc " + ing.svc + " \\\n  -p '{\"spec\":{\"type\":\"LoadBalancer\"}}'",
+       d:"Das Baremetal-Manifest legt einen NodePort-Service an. Mit MetalLB bekommt er stattdessen eine eigene Adresse — die, auf die später alle Hostnamen zeigen.|The baremetal manifest creates a NodePort service. With MetalLB it gets an address of its own instead — the one all your host names will later point at."}] : [])
+      .concat([
+      {c:"kubectl -n " + ing.ns + " get svc " + ing.svc,
+       d:"Unter EXTERNAL-IP muss eine Adresse aus dem MetalLB-Bereich stehen. Bleibt dort dauerhaft pending, hat MetalLB keinen freien Platz oder läuft gar nicht.|EXTERNAL-IP has to show an address from the MetalLB range. If it stays pending forever, MetalLB has no free slot or is not running at all."},
+      {c:"curl -I http://ADRESSE-DES-INGRESS",
+       d:"Der aussagekräftigste Einzeltest, noch **ohne** jede Regel. Erwartung: **404 Not Found**. Das klingt nach Fehler und ist der Beweis, dass der Controller lebt und erreichbar ist — er hat nur noch keine passende Regel." +
+         (o.ingress === "nginx"
+           ? " ingress-nginx traegt sich dabei mit einer Zeile server: nginx ein."
+           : " " + ing.n + " nennt sich im Kopf nicht beim Namen, anders als ingress-nginx — entscheidend ist deshalb nur: eine Antwort, statt connection refused oder Timeout.") +
+         " Kommt connection refused oder ein Timeout, ist es kein Ingress-Problem, sondern eines der Adresse." +
+         "|The single most telling test, still **without** any rule. Expected: **404 Not Found**. That looks like a failure and proves the controller is alive and reachable — it simply has no matching rule yet." +
+         (o.ingress === "nginx"
+           ? " ingress-nginx adds a server: nginx line while it is at it."
+           : " " + ing.n + " does not name itself in the headers the way ingress-nginx does — so all that counts is: an answer at all, rather than connection refused or a timeout.") +
+         " If you get connection refused or a timeout, this is not an ingress problem but an address problem."},
+      {c:"kubectl create deployment web --image=nginx:1.27-alpine --replicas=2\nkubectl expose deployment web --port=80\nkubectl create ingress web --class=" + ing.cls + " \\\n  --rule=\"web.example.lan/*=web:80\"\nkubectl get ingress",
+       d:"Erwartung: Nach ein paar Sekunden steht in der Spalte ADDRESS die Adresse des Controllers. Bleibt sie leer, hat der Controller die Regel nicht angenommen — dann stimmt --class nicht mit dem überein, was kubectl get ingressclass gezeigt hat.|Expected: after a few seconds the ADDRESS column shows the controller's address. If it stays empty the controller has not taken the rule — then --class does not match what kubectl get ingressclass showed."},
+      {c:"curl -H 'Host: web.example.lan' http://ADRESSE-DES-INGRESS",
+       d:"Der Host-Header ersetzt den DNS-Eintrag für den ersten Test. Kommt die nginx-Startseite, funktioniert die ganze Kette: MetalLB, Controller, Regel, Service, Pod. Die beiden Fehlerbilder sind eindeutig: **404** heisst, die Regel greift nicht — meist ein Tippfehler im Hostnamen. **503** heisst, die Regel greift, aber der Service hat keine bereiten Endpoints. Danach den Namen im DNS oder in /etc/hosts auf dieselbe Adresse zeigen lassen.|The Host header stands in for the DNS record for a first test. If the nginx welcome page appears, the whole chain works: MetalLB, controller, rule, service, pod. The two failure modes are unambiguous: **404** means the rule does not match — usually a typo in the host name. **503** means the rule matches but the service has no ready endpoints. After that, point the name at the same address in DNS or /etc/hosts."}]
+      .concat(o.ingress === "traefik" ? [
+      {c:"kubectl -n traefik port-forward deploy/traefik 9000:9000\n# dann im Browser: http://localhost:9000/dashboard/",
+       d:"Traefiks Dashboard zeigt alle erkannten Router, Services und Middlewares — und vor allem, **warum** eine Regel nicht greift. Der abschließende Schrägstrich in /dashboard/ ist Pflicht, ohne ihn kommt eine leere Seite. Nicht dauerhaft nach außen öffnen: Das Dashboard ist ohne weitere Einstellungen ungeschützt.|Traefik's dashboard shows every router, service and middleware it recognised — and above all **why** a rule does not match. The trailing slash in /dashboard/ is mandatory; without it you get a blank page. Do not expose it permanently: the dashboard is unprotected unless you configure otherwise."}] : [])
+      .concat(o.ingress === "haproxy" ? [
+      {c:"kubectl -n haproxy-controller port-forward svc/haproxy-kubernetes-ingress 1024:1024\n# dann im Browser: http://localhost:1024/",
+       d:"Die Stats-Seite von HAProxy: je Backend die Zahl der Sitzungen, der Zustand der Health-Checks und die Fehlerzaehler. Kein Dashboard zum Konfigurieren, sondern eine Betriebsanzeige — und genau dafür die beste der drei.|HAProxy's stats page: per backend the session counts, the health-check state and the error counters. Not a dashboard for configuring but an operations display — and the best of the three for exactly that."}] : [])
+      .concat([
+      {c:"kubectl -n " + ing.ns + " logs -l " + ing.sel + " --tail=20 -f",
+       d:"Die letzte Instanz bei jedem Ingress-Problem: Der Controller schreibt jede Anfrage mit, samt Statuscode. Taucht dein curl hier auf, ist die Anfrage angekommen und die Ursache liegt in Regel oder Backend. Taucht sie nicht auf, hat sie den Controller nie erreicht — dann ist es das Netz oder die Adresse.|The last resort for any ingress problem: the controller logs every request with its status code. If your curl shows up here, the request arrived and the cause lies in the rule or the backend. If it does not, it never reached the controller — then it is the network or the address."},
+      {c:"kubectl delete ingress web\nkubectl delete svc web\nkubectl delete deployment web",
+       d:"Aufräumen. Der Controller bleibt stehen, den brauchst du weiter.|Clean up. The controller stays, you will keep needing it."}]))),
+    r:[{lvl:"warn", m:t("Der Controller braucht die Ports 80 und 443, entweder über einen Service vom Typ LoadBalancer mit MetalLB oder über hostPort auf den Knoten. Laeuft auf denselben Knoten schon ein Webserver oder ein anderer Controller, bleibt der Pod hängen — im describe steht dann address already in use.|The controller needs ports 80 and 443, either through a LoadBalancer service with MetalLB or through hostPort on the nodes. If a web server or another controller already runs on those nodes, the pod gets stuck — describe then says address already in use.")}]
+      .concat(o.ingress === "nginx" ? [{lvl:"err", m:t("Für ingress-nginx hat das Kubernetes-Projekt das Ende der Pflege angekündigt — die Ankündigung stammt aus Ende 2025, als Termin war März 2026 genannt, und danach sollen auch keine Sicherheitslücken mehr geschlossen werden. Prüfe den aktuellen Stand, bevor du es für etwas Neues wählst. Genau das ist der Grund, warum hier überhaupt Alternativen stehen.|For ingress-nginx the Kubernetes project has announced the end of maintenance — the announcement dates from late 2025, the date named was March 2026, and after that security holes are to go unfixed as well. Check the current state before choosing it for something new. That is precisely why alternatives are offered here at all.")},
+        {lvl:"warn", m:t("Der Admission-Webhook von ingress-nginx war 2025 aus dem Pod-Netz heraus angreifbar und führte bis zur vollständigen Übernahme des Clusters (CVE-2025-1974). Wenn es ingress-nginx sein soll: eine gepflegte Version nehmen und den Webhook nicht aus beliebigen Pods erreichbar lassen.|The admission webhook of ingress-nginx was attackable from the pod network in 2025 and led all the way to full cluster takeover (CVE-2025-1974). If it is to be ingress-nginx: take a maintained version and do not leave the webhook reachable from arbitrary pods.")}] : [])
+      .concat(o.ingress === "traefik" ? [{lvl:"warn", m:t("Das Dashboard ist im Helm-Chart nicht nach außen veröffentlicht, und das soll so bleiben. Wer es über einen Ingress erreichbar macht, gibt ungeschützt Einblick in jede Route des Clusters — dann gehört mindestens eine BasicAuth-Middleware davor.|The dashboard is not exposed by the Helm chart, and it should stay that way. Publishing it through an ingress gives unprotected insight into every route in the cluster — then it needs at least a BasicAuth middleware in front of it.")}] : [])
+      .concat(o.ingress === "haproxy" ? [{lvl:"warn", m:t("Es gibt zwei verschiedene Projekte mit fast demselben Namen: dieses hier von HAProxy Technologies und haproxy-ingress von jcmoraisjr. Annotations und Chart unterscheiden sich. Beim Nachschlagen im Netz zuerst prüfen, zu welchem der beiden die Seite gehört.|There are two different projects with almost the same name: this one from HAProxy Technologies and haproxy-ingress from jcmoraisjr. Annotations and chart differ. When looking things up, first check which of the two a page belongs to.")}] : [])
+  });
+
   if (!o.add) sec("Danach|Afterwards", "cp", {
-    p:["Ein frischer Cluster kann noch nichts von außen annehmen und keinen Speicher bereitstellen. Diese drei Dinge fehlen praktisch immer.|A fresh cluster can neither accept anything from outside nor provide storage. These three are missing practically every time."],
+    p:[ing
+      ? "Der Ingress-Controller steht schon. Was einem frischen Cluster jetzt noch fehlt, ist die Messung und der Speicher.|The ingress controller is up. What a fresh cluster still lacks now is measurement and storage."
+      : "Ein frischer Cluster kann noch nichts von außen annehmen und keinen Speicher bereitstellen. Ohne Ingress-Controller bleibt jede Ingress-Ressource wirkungslos — sie lässt sich anlegen, und es passiert nichts.|A fresh cluster can neither accept anything from outside nor provide storage. Without an ingress controller every Ingress resource stays inert — it can be created, and nothing happens."],
     items:[
-      {c:"kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/baremetal/deploy.yaml",
-       d:"Ein Ingress-Controller, sonst bleibt jeder Ingress wirkungslos. Auf eigener Hardware ist zusätzlich MetalLB nötig, damit ein Service vom Typ LoadBalancer eine Adresse bekommt.|An ingress controller, otherwise every Ingress stays inert. On your own hardware you also need MetalLB so a LoadBalancer service gets an address."},
       {c:"kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml",
        d:"Ohne metrics-server liefert kubectl top nichts und ein HorizontalPodAutoscaler skaliert nie.|Without metrics-server, kubectl top returns nothing and a HorizontalPodAutoscaler never scales."},
       {c:"kubectl -n kube-system patch deployment metrics-server --type=json \\\n  -p='[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--kubelet-insecure-tls\"}]'\nkubectl -n kube-system rollout status deploy/metrics-server\nkubectl top nodes",
@@ -5752,7 +5937,10 @@ const METALLB_FIELDS = [
    hint:"Steht fest in der Manifest-Adresse. Vor der Installation kurz nachsehen, ob es eine neuere gibt.|Baked into the manifest URL. Check for a newer one before installing."},
   {k:"autoAssign", t:"bool", structural:true, l:"Adressen automatisch vergeben|Hand out addresses automatically",
    hint:"Aus: Ein Service bekommt nur dann eine Adresse, wenn er den Pool ausdrücklich nennt. Sinnvoll, wenn der Bereich klein ist.|Off: a service only gets an address if it names the pool explicitly. Sensible when the range is small."},
-  {k:"ingress", t:"bool", l:"Ingress-Controller auf die erste Adresse setzen|Point the ingress controller at the first address"},
+  {k:"ingress", t:"bool", structural:true, l:"Ingress-Controller auf die erste Adresse setzen|Point the ingress controller at the first address"},
+  {k:"ingclass", t:"select", l:"Welcher Controller|Which controller", half:true, when:o => o.ingress,
+   opts:[["nginx","ingress-nginx"],["traefik","Traefik"],["haproxy","HAProxy"]],
+   hint:"Bestimmt Namespace und Service-Namen im Befehl darunter.|Decides the namespace and service name in the command below."},
   {k:"ipvs", t:"bool", l:"kube-proxy läuft im IPVS-Modus|kube-proxy runs in IPVS mode",
    hint:"Dann braucht es strictARP. Im Standardmodus iptables schadet die Einstellung nicht.|Then strictARP is required. In the default iptables mode the setting does no harm."},
   {k:"peer", t:"text", l:"Router-Adresse (BGP)|Router address (BGP)", ph:"172.18.42.1", half:true,
@@ -5772,6 +5960,7 @@ function metallbOpts(o){
     version: ((o.version || "").trim() || "v0.15.2").replace(/^(?!v)/, "v"),
     autoAssign: o.autoAssign === undefined ? true : !!o.autoAssign,
     ingress: !!o.ingress,
+    ingclass: o.ingclass || "nginx",
     ipvs: !!o.ipvs,
     peer: (o.peer || "").trim() || "172.18.42.1",
     peerAsn: num(o.peerAsn) === undefined ? 64512 : num(o.peerAsn),
@@ -5790,6 +5979,7 @@ function metallbGuide(raw){
   const sec = (h, role, x) => { out.push(Object.assign({h:h, role:role, items:[], p:[], r:[]}, x)); };
   const ip = firstAddr(o.range);
   const l2 = o.mode === "l2";
+  const ic = INGRESS_CTRL[o.ingclass] || INGRESS_CTRL.nginx;
 
   /* --- 1. vorher --- */
   sec("Vorher: passt der Bereich überhaupt|First: does the range fit at all", "all", {
@@ -5867,11 +6057,12 @@ function metallbGuide(raw){
       p:["Damit schließt sich der Kreis: **Eine** Adresse von außen, dahinter der Ingress-Controller, der anhand des Host-Namens verteilt. Jede weitere Anwendung braucht dann nur noch eine Ingress-Regel und keine eigene Adresse mehr.|That closes the circle: **one** address from outside, behind it the ingress controller distributing by host name. Every further application then needs only an ingress rule, no address of its own.",
          "Genau dafür lohnt sich ein kleiner Bereich — im Grunde reicht eine einzige Adresse, solange alles über HTTP und HTTPS läuft.|That is exactly why a small range pays off — one single address is enough as long as everything runs over HTTP and HTTPS."],
       items:[
-        {c:"kubectl -n ingress-nginx annotate service ingress-nginx-controller \\\n  metallb.io/loadBalancerIPs=" + ip + " --overwrite" + (o.autoAssign ? "" : " \\\n  metallb.io/address-pool=haupt"),
+        {c:"kubectl -n " + ic.ns + " annotate service " + ic.svc + " \\\n  metallb.io/loadBalancerIPs=" + ip + " --overwrite" + (o.autoAssign ? "" : " \\\n  metallb.io/address-pool=haupt"),
          d:"Wirkt sofort, ohne Neustart. Ein bereits vergebener Wert wird durch --overwrite ersetzt.|Takes effect immediately, no restart. An existing value is replaced by --overwrite."},
-        {c:"kubectl -n ingress-nginx get svc ingress-nginx-controller",
+        {c:"kubectl -n " + ic.ns + " get svc " + ic.svc,
          d:"In der Spalte EXTERNAL-IP muss die gewünschte Adresse stehen. Bleibt dort pending, ist der Pool nicht erreichbar oder die Adresse liegt außerhalb.|The EXTERNAL-IP column has to show the wanted address. If it stays pending, the pool is unreachable or the address lies outside it."}
-      ]
+      ],
+      r:[{lvl:"warn", m:t("Namespace und Service-Name gehören zu " + ic.n + ". Ein anderer Controller heißt anders — mit kubectl get svc -A | grep -i ingress findest du den richtigen Namen, falls der Befehl nichts findet.|The namespace and service name belong to " + ic.n + ". A different controller is named differently — kubectl get svc -A | grep -i ingress finds the right name if the command comes up empty.")}]
     });
   }
 
