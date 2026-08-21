@@ -4379,17 +4379,18 @@ function runSelfTests(){
     addGuide.concat(newGuide).every(s => CLUSTER_ROLE[s.role]), "");
   const ingHeads = x => guideOf(x).map(s => t(s.h)).join(" | ");
   ok("Ingress: jede Wahl bekommt ihren eigenen Abschnitt",
-    ["nginx","traefik","haproxy","caddy"].every(c =>
+    ["nginx","traefik","haproxy","caddy","cilium"].every(c =>
       ingHeads({ingress:c}).indexOf("Ingress-Controller: " + INGRESS_CTRL[c].n) !== -1),
     ingHeads({ingress:"traefik"}));
   ok("Ingress: keiner heißt kein Abschnitt",
     ingHeads({ingress:"none"}).indexOf("Ingress-Controller") === -1 &&
     guideOf({ingress:"none"}).length === guideOf({ingress:"nginx"}).length - 1, "");
   ok("Ingress: Namespace, Klasse und Service passen zur Wahl",
-    ["nginx","traefik","haproxy","caddy"].every(function(c){
+    ["nginx","traefik","haproxy","caddy","cilium"].every(function(c){
       const ic = INGRESS_CTRL[c], cmds = allCmds({ingress:c});
-      const fremd = ["nginx","traefik","haproxy","caddy"].filter(x => x !== c)
-        .map(x => INGRESS_CTRL[x].ns);
+      /* kube-system gehoert allen — nur die eigenen Namespaces sind ein Beleg. */
+      const fremd = ["nginx","traefik","haproxy","caddy","cilium"].filter(x => x !== c)
+        .map(x => INGRESS_CTRL[x].ns).filter(n => n !== "kube-system");
       return cmds.indexOf("-n " + ic.ns + " get pods") !== -1 &&
              cmds.indexOf("--class=" + ic.cls) !== -1 &&
              cmds.indexOf("get svc " + ic.svc) !== -1 &&
@@ -4402,6 +4403,24 @@ function runSelfTests(){
              g.r.some(x => x.m.indexOf("Port 80") !== -1) &&
              guideOf({ingress:"nginx"}).every(s => s.items.every(i => i.d.indexOf("Im LAN wird es nicht klappen") === -1));
     })(), "");
+  ok("Ingress: Cilium wird eingeschaltet, nicht installiert",
+    (function(){
+      /* Nur der Ingress-Abschnitt zaehlt — anderswo im Cluster wird sehr wohl
+         installiert, etwa der metrics-server. */
+      const s = guideOf({cni:"cilium", ingress:"cilium"})
+        .filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0];
+      const c = s.items.map(i => i.c).join("\n");
+      return c.indexOf("helm install") === -1 && c.indexOf("kubectl apply -f") === -1 &&
+             c.indexOf("--set ingressController.enabled=true") !== -1 &&
+             c.indexOf("--set kubeProxyReplacement=true") !== -1 &&
+             c.indexOf("annotate ingressclass") === -1;
+    })(), "");
+  ok("Ingress: Cilium ohne Cilium als CNI ist ein Fehler, mit ihm nicht",
+    (function(){
+      const risk = x => guideOf(x).filter(s => t(s.h).indexOf("Ingress-Controller") === 0)[0].r;
+      return risk({cni:"calico", ingress:"cilium"}).some(x => x.lvl === "err" && x.m.indexOf("calico") !== -1) &&
+             risk({cni:"cilium", ingress:"cilium"}).every(x => x.lvl !== "err");
+    })(), "");
   ok("Ingress: nginx per Manifest, die anderen per Helm",
     allCmds({ingress:"nginx"}).indexOf("kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx") !== -1 &&
     allCmds({ingress:"nginx"}).indexOf("helm install") === -1 &&
@@ -4409,20 +4428,21 @@ function runSelfTests(){
     allCmds({ingress:"haproxy"}).indexOf("helm install haproxy haproxytech/kubernetes-ingress") !== -1 &&
     allCmds({ingress:"caddy"}).indexOf("helm install caddy-ingress-controller caddy-ingress/caddy-ingress-controller") !== -1, "");
   ok("Ingress: der Typ LoadBalancer wird überall ausdrücklich gesetzt",
-    ["nginx","traefik","haproxy","caddy"].every(c =>
+    ["nginx","traefik","haproxy","caddy","cilium"].every(c =>
       allCmds({ingress:c}).indexOf("LoadBalancer") !== -1), "");
   ok("Ingress: die Tabelle nennt alle drei Annotations-Präfixe",
     (function(){
       const s = guideOf({ingress:"nginx"}).filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0];
       const flach = JSON.stringify(s.table);
-      return ["nginx","traefik","haproxy","caddy"].every(c => flach.indexOf(INGRESS_CTRL[c].ann) !== -1);
+      return ["nginx","traefik","haproxy","caddy","cilium"].every(c => flach.indexOf(INGRESS_CTRL[c].ann) !== -1);
     })(), "");
   ok("Ingress: ingress-nginx wird mit dem Ende der Pflege ausgeliefert",
     (function(){
       const risk = c => guideOf({ingress:c})
         .filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0].r;
       return risk("nginx").some(x => x.lvl === "err" && x.m.indexOf("Ende der Pflege") !== -1) &&
-             ["traefik","haproxy","caddy"].every(c => risk(c).every(x => x.lvl !== "err"));
+             ["traefik","haproxy","caddy"].every(c => risk(c).every(x => x.lvl !== "err")) &&
+             risk("cilium").every(x => x.lvl !== "err");
     })(), "");
   ok("Ingress: beim Hinzufügen eines Knotens wird nichts neu installiert",
     (function(){
@@ -4438,7 +4458,7 @@ function runSelfTests(){
                                 i.c.indexOf("create ingress") === -1);
     })(), "");
   ok("Ingress: MetalLB zeigt auf den gewählten Controller",
-    ["nginx","traefik","haproxy","caddy"].every(function(c){
+    ["nginx","traefik","haproxy","caddy","cilium"].every(function(c){
       const ic = INGRESS_CTRL[c];
       const cmds = metallbGuide({ingress:true, ingclass:c})
         .map(s => s.items.map(i => i.c).join("\n")).join("\n");
@@ -4934,7 +4954,7 @@ $("testClose").addEventListener("click", () => { $("testPanel").hidden = true; }
 /* ---------- Cluster aufsetzen ---------- */
 
 /* ---------- Ingress-Controller ----------
-   Vier Programme für dieselbe Aufgabe: HTTP von außen annehmen und anhand
+   Fünf Wege zu derselben Aufgabe: HTTP von außen annehmen und anhand
    von Hostname und Pfad an einen Service weitergeben. Die Ingress-Ressource
    selbst ist bei allen dieselbe — was sich unterscheidet, sind Namespace,
    Klassenname und vor allem das Annotations-Präfix. Genau daran scheitert
@@ -4960,6 +4980,18 @@ const INGRESS_CTRL = {
     chart:"haproxytech/kubernetes-ingress", rel:"haproxy",
     manifest:"",
     svcArg:"controller.service.type"
+  },
+  /* Sonderfall: Cilium bringt den Ingress-Controller selbst mit. Es gibt
+     nichts zu installieren — nur einen Schalter am CNI umzulegen. Deshalb
+     eingebaut:true statt eines Charts. */
+  cilium: {
+    n:"Cilium", ns:"kube-system", cls:"cilium",
+    svc:"cilium-ingress", dep:"cilium",
+    sel:"k8s-app=cilium-envoy",
+    ann:"ingress.cilium.io/",
+    repo:null, chart:"", rel:"",
+    manifest:"", eingebaut:true,
+    svcArg:""
   },
   caddy: {
     n:"Caddy", ns:"caddy-system", cls:"caddy",
@@ -4988,14 +5020,25 @@ const INGRESS_CTRL = {
 const INGRESS_TEXT = {
   nginx: "**ingress-nginx** ist die verbreitetste Wahl und die, auf die sich fast jede Anleitung im Netz bezieht. Es steckt eine nginx-Konfiguration hinter der Ingress-Ressource; alles, was über das Standardfeld hinausgeht, läuft über Annotations.|**ingress-nginx** is the most widespread choice and the one nearly every guide on the net refers to. It puts an nginx configuration behind the Ingress resource; anything beyond the standard fields runs through annotations.",
   traefik: "**Traefik** bringt am meisten mit: ein eigenes Dashboard, eingebautes Let's Encrypt und mit IngressRoute und Middleware eigene Ressourcen, die deutlich mehr können als eine Ingress-Regel. Der Preis dafür ist, dass die interessanten Fähigkeiten nicht mehr portabel sind — eine IngressRoute lässt sich nicht auf einen anderen Controller umziehen.|**Traefik** brings the most with it: a dashboard of its own, built-in Let's Encrypt, and with IngressRoute and Middleware its own resources that can do considerably more than an ingress rule. The price is that the interesting capabilities stop being portable — an IngressRoute cannot be moved to another controller.",
-  haproxy: "**HAProxy** ist der schlankeste der vier und der mit dem geringsten Beiwerk. Es bringt keine eigenen Routing-CRDs mit — was es kann, steht in der Ingress-Ressource und in Annotations. Wer HAProxy schon vor Kubernetes eingesetzt hat, findet dieselbe Konfigurationssprache wieder.|**HAProxy** is the leanest of the four and the one with the least around it. It brings no routing CRDs of its own — what it can do lives in the Ingress resource and in annotations. Anyone who used HAProxy before Kubernetes finds the same configuration language again.",
-  caddy: "**Caddy** hat einen einzigen großen Trumpf: Es besorgt und erneuert HTTPS-Zertifikate von allein, ohne cert-manager, ohne Annotation, ohne Secret, das jemand anlegen müsste. Ein Ingress mit einem Hostnamen genügt. Dafür ist es das kleinste der vier Projekte — weniger Mitwirkende, weniger Ausgaben, und für seltenere Anforderungen findet man im Netz kaum etwas.|**Caddy** has one big trump card: it obtains and renews HTTPS certificates on its own — no cert-manager, no annotation, no secret anybody has to create. An ingress with a host name is enough. In exchange it is the smallest of the four projects — fewer contributors, fewer releases, and for rarer requirements there is barely anything to find on the net."
+  haproxy: "**HAProxy** ist der schlankeste der eigenständigen Controller und der mit dem geringsten Beiwerk. Es bringt keine eigenen Routing-CRDs mit — was es kann, steht in der Ingress-Ressource und in Annotations. Wer HAProxy schon vor Kubernetes eingesetzt hat, findet dieselbe Konfigurationssprache wieder.|**HAProxy** is the leanest of the standalone controllers and the one with the least around it. It brings no routing CRDs of its own — what it can do lives in the Ingress resource and in annotations. Anyone who used HAProxy before Kubernetes finds the same configuration language again.",
+  cilium: "**Cilium** ist der Sonderfall unter den fünf: Es ist kein eigenes Programm, sondern eine Funktion des CNI, das ohnehin schon läuft. Kein zusätzliches Deployment, kein zusätzlicher Namespace, keine zweite Stelle, die man aktuell halten muss — ein Schalter am Cilium-Chart genügt. Der Preis ist die Bindung: Diese Wahl setzt Cilium als CNI voraus und lässt sich später nicht ohne Weiteres von ihm lösen.|**Cilium** is the odd one out among the five: not a program of its own but a function of the CNI that is running anyway. No extra deployment, no extra namespace, no second place to keep up to date — one switch on the Cilium chart is enough. The price is the tie-in: this choice presupposes Cilium as the CNI and cannot easily be separated from it later.",
+  caddy: "**Caddy** hat einen einzigen großen Trumpf: Es besorgt und erneuert HTTPS-Zertifikate von allein, ohne cert-manager, ohne Annotation, ohne Secret, das jemand anlegen müsste. Ein Ingress mit einem Hostnamen genügt. Dafür ist es das kleinste dieser Projekte — weniger Mitwirkende, weniger Ausgaben, und für seltenere Anforderungen findet man im Netz kaum etwas.|**Caddy** has one big trump card: it obtains and renews HTTPS certificates on its own — no cert-manager, no annotation, no secret anybody has to create. An ingress with a host name is enough. In exchange it is the smallest of these projects — fewer contributors, fewer releases, and for rarer requirements there is barely anything to find on the net."
 };
 
 /* Die Installation, je Controller sein dokumentierter Weg: ingress-nginx hat
-   ein fertiges Manifest für eigene Hardware, die drei anderen werden per
-   Helm ausgeliefert. */
+   ein fertiges Manifest für eigene Hardware, Traefik, HAProxy und Caddy
+   kommen per Helm, und Cilium bringt seinen schon mit. */
 function ingressInstall(ing){
+  /* Bei Cilium gibt es kein Chart und keinen Namespace anzulegen — der
+     Controller steckt schon im CNI und wird nur eingeschaltet. */
+  if (ing.eingebaut) return [
+    {c:"kubectl -n kube-system get ds cilium\ncilium status --wait",
+     d:"Die Vorprüfung, und hier die wichtigste von allen: Cilium Ingress ist kein eigenes Programm, sondern eine Funktion des CNI. Läuft als CNI etwas anderes, gibt es hier nichts einzuschalten — dann muss es einer der vier eigenständigen Controller sein.|The preflight check, and here the most important of all: Cilium Ingress is not a program of its own but a function of the CNI. If something else is the CNI there is nothing to switch on here — then it has to be one of the four standalone controllers."},
+    {c:"cilium upgrade \\\n  --set kubeProxyReplacement=true \\\n  --set ingressController.enabled=true \\\n  --set ingressController.loadbalancerMode=shared \\\n  --set ingressController.default=true",
+     d:"Vier Schalter, und jeder trägt etwas bei. **kubeProxyReplacement** ist Voraussetzung, nicht Geschmackssache — ohne sie arbeitet der Ingress-Controller nicht. **loadbalancerMode=shared** heißt: **eine** Adresse für alle Ingresses zusammen, genau das Bild aus dem MetalLB-Abschnitt. Mit dedicated bekommt jeder Ingress seine eigene Adresse, was einen kleinen Bereich schnell aufbraucht. **default=true** macht cilium zur Vorgabeklasse; bei den anderen Controllern erledigt das eine Annotation, hier gehört es in die Helm-Werte, weil Cilium die IngressClass selbst verwaltet.|Four switches, each pulling its weight. **kubeProxyReplacement** is a prerequisite, not a preference — without it the ingress controller does not work. **loadbalancerMode=shared** means **one** address for all ingresses together, exactly the picture from the MetalLB section. With dedicated every ingress gets an address of its own, which uses up a small range fast. **default=true** makes cilium the default class; on the other controllers an annotation does that, here it belongs in the Helm values because Cilium manages the IngressClass itself."},
+    {c:"kubectl -n kube-system rollout restart ds/cilium\nkubectl -n kube-system rollout status ds/cilium --timeout=180s\ncilium status --wait",
+     d:"Die Agenten lesen die neue Einstellung erst beim Start. Ohne diesen Neustart bleibt alles wie vorher, ohne dass irgendwo ein Fehler auftaucht.|The agents only read the new setting on start-up. Without this restart everything stays as it was, and nothing anywhere reports an error."}
+  ];
   if (ing.manifest) return [
     {c:"kubectl apply -f " + ing.manifest,
      d:"Das Baremetal-Manifest: Namespace, Deployment, Service und die IngressClass **" + ing.cls + "** in einem Zug. Es legt einen NodePort-Service an — mit MetalLB wird daraus gleich eine eigene Adresse.|The baremetal manifest: namespace, deployment, service and the **" + ing.cls + "** ingress class in one go. It creates a NodePort service — with MetalLB that becomes an address of its own in a moment."},
@@ -5032,6 +5075,7 @@ const CLUSTER_FIELDS = [
          ["traefik","Traefik — eigene CRDs, Dashboard, ACME eingebaut|Traefik — own CRDs, dashboard, built-in ACME"],
          ["haproxy","HAProxy — schlank, sehr schnell, wenig Beiwerk|HAProxy — lean, very fast, little around it"],
          ["caddy","Caddy — holt HTTPS-Zertifikate von allein|Caddy — obtains HTTPS certificates on its own"],
+         ["cilium","Cilium — schon im CNI, nur einschalten|Cilium — already in the CNI, just switch it on"],
          ["none","Keiner — später oder gar nicht|None — later or not at all"]],
    hint:"Nimmt HTTP von außen an und verteilt es nach Hostname und Pfad. Die Ingress-Ressource ist bei allen dieselbe; unterschiedlich sind Namespace, Klassenname und das Annotations-Präfix.|Takes HTTP from outside and distributes it by host name and path. The Ingress resource is the same for all of them; what differs is the namespace, the class name and the annotation prefix."},
   {k:"endpoint", t:"text", l:"API-Adresse|API address", ph:"k8s-api.firma.de",
@@ -5349,23 +5393,28 @@ function clusterGuide(raw){
        "Ohne Controller ist eine Ingress-Ressource ein Stück Papier. Sie lässt sich anlegen, sie steht in kubectl get ingress, und es passiert nichts. Kubernetes selbst kann kein HTTP — es verwaltet nur die Regel, umsetzen muss sie jemand anders.|Without a controller an Ingress resource is a piece of paper. It can be created, it shows up in kubectl get ingress, and nothing happens. Kubernetes itself speaks no HTTP — it only manages the rule; somebody else has to carry it out.",
        INGRESS_TEXT[o.ingress]],
     table:[
-      ["", "ingress-nginx", "Traefik", "HAProxy", "Caddy"],
-      ["Namespace|Namespace", "ingress-nginx", "traefik", "haproxy-controller", "caddy-system"],
-      ["ingressClassName", "nginx", "traefik", "haproxy", "caddy"],
-      ["Annotations", "nginx.ingress.kubernetes.io/", "traefik.ingress.kubernetes.io/", "haproxy.org/", "caddy.ingress.kubernetes.io/"],
-      ["Installation", "Manifest oder Helm|manifest or Helm", "Helm", "Helm", "Helm"],
-      ["Eigene Routing-Ressourcen|Routing resources of its own", "keine|none", "IngressRoute, Middleware, TLSOption", "keine|none", "keine|none"],
-      ["Oberfläche|Web interface", "keine|none", "Dashboard auf Port 9000|dashboard on port 9000", "Stats auf Port 1024|stats on port 1024", "keine|none"],
-      ["Zertifikate|Certificates", "cert-manager", "cert-manager oder eingebautes ACME|cert-manager or built-in ACME", "cert-manager", "von allein, ohne Zutun|on its own, unprompted"],
-      ["Verbreitung|How widespread", "am größten|the largest", "groß|large", "mittel|medium", "klein|small"]
+      ["", "ingress-nginx", "Traefik", "HAProxy", "Caddy", "Cilium"],
+      ["Namespace|Namespace", "ingress-nginx", "traefik", "haproxy-controller", "caddy-system", "kube-system"],
+      ["ingressClassName", "nginx", "traefik", "haproxy", "caddy", "cilium"],
+      ["Annotations", "nginx.ingress.kubernetes.io/", "traefik.ingress.kubernetes.io/", "haproxy.org/", "caddy.ingress.kubernetes.io/", "ingress.cilium.io/"],
+      ["Installation", "Manifest oder Helm|manifest or Helm", "Helm", "Helm", "Helm", "Schalter am CNI|a switch on the CNI"],
+      ["Eigene Routing-Ressourcen|Routing resources of its own", "keine|none", "IngressRoute, Middleware, TLSOption", "keine|none", "keine|none", "CiliumEnvoyConfig"],
+      ["Oberfläche|Web interface", "keine|none", "Dashboard auf Port 9000|dashboard on port 9000", "Stats auf Port 1024|stats on port 1024", "keine|none", "Hubble UI"],
+      ["Zertifikate|Certificates", "cert-manager", "cert-manager oder eingebautes ACME|cert-manager or built-in ACME", "cert-manager", "von allein, ohne Zutun|on its own, unprompted", "cert-manager"],
+      ["Verbreitung|How widespread", "am größten|the largest", "groß|large", "mittel|medium", "klein|small", "mittel|medium"],
+      ["Setzt voraus|Presupposes", "nichts|nothing", "nichts|nothing", "nichts|nothing", "nichts|nothing", "Cilium als CNI|Cilium as the CNI"]
     ],
     p2:["Die Zeile **Annotations** ist die wichtigste der Tabelle. Ein `nginx.ingress.kubernetes.io/rewrite-target` an einem Ingress, den Traefik bedient, wird nicht etwa abgelehnt — es wird wortlos ignoriert. Der Ingress funktioniert, nur eben ohne das Umschreiben, und niemand sagt etwas. Wer den Controller wechselt, muss jede Annotation einzeln übersetzen.|The **annotations** row is the most important one in the table. An `nginx.ingress.kubernetes.io/rewrite-target` on an Ingress served by Traefik is not rejected — it is silently ignored. The Ingress works, just without the rewriting, and nobody says a word. Anyone switching controllers has to translate every annotation one by one.",
       "Mehrere Controller nebeneinander sind erlaubt, solange jeder seine eigene Klasse und seine eigene Adresse hat. Üblich ist das etwa für eine getrennte Behandlung von innen und außen. Was **nicht** geht: zwei Controller, die sich auf demselben Knoten die Ports 80 und 443 teilen wollen.|Several controllers side by side are allowed as long as each has its own class and its own address. That is common for handling inside and outside traffic separately. What does **not** work: two controllers wanting to share ports 80 and 443 on the same node."],
     items:(o.add ? [] : ingressInstall(ing)).concat([
-      {c:"kubectl -n " + ing.ns + " get pods\nkubectl get ingressclass",
+      {c:"kubectl -n " + ing.ns + " get pods -l " + ing.sel + "\nkubectl get ingressclass",
        d:"Erwartung: ein Pod im Zustand Running und eine IngressClass namens **" + ing.cls + "**. Fehlt die Klasse, wird später jede Ingress-Regel stillschweigend ignoriert — ohne Fehlermeldung, denn niemand fühlt sich zuständig.|Expected: a pod in Running and an IngressClass called **" + ing.cls + "**. Without that class every ingress rule is silently ignored later — with no error, because nobody feels responsible."},
+      ]
+      /* Bei Cilium erledigt das die Helm-Einstellung oben — von Hand gesetzt
+         verschwindet die Annotation beim naechsten Upgrade wieder. */
+      .concat(ing.eingebaut ? [] : [
       {c:"kubectl annotate ingressclass " + ing.cls + " \\\n  ingressclass.kubernetes.io/is-default-class=true --overwrite",
-       d:"Optional, aber bequem: Danach gilt " + ing.cls + " für jeden Ingress, der keine Klasse nennt. Genau **eine** Klasse darf das sein — sind es zwei, verhaelt sich der Cluster unvorhersehbar.|Optional but convenient: after this " + ing.cls + " applies to every ingress that names no class. Exactly **one** class may carry this — with two, the cluster behaves unpredictably."}]
+       d:"Optional, aber bequem: Danach gilt " + ing.cls + " für jeden Ingress, der keine Klasse nennt. Genau **eine** Klasse darf das sein — sind es zwei, verhält sich der Cluster unvorhersehbar.|Optional but convenient: after this " + ing.cls + " applies to every ingress that names no class. Exactly **one** class may carry this — with two, the cluster behaves unpredictably."}])
       .concat(ing.manifest ? [
       {c:"kubectl -n " + ing.ns + " patch svc " + ing.svc + " \\\n  -p '{\"spec\":{\"type\":\"LoadBalancer\"}}'",
        d:"Das Baremetal-Manifest legt einen NodePort-Service an. Mit MetalLB bekommt er stattdessen eine eigene Adresse — die, auf die später alle Hostnamen zeigen.|The baremetal manifest creates a NodePort service. With MetalLB it gets an address of its own instead — the one all your host names will later point at."}] : [])
@@ -5390,12 +5439,17 @@ function clusterGuide(raw){
       .concat(o.ingress === "traefik" ? [
       {c:"kubectl -n traefik port-forward deploy/traefik 9000:9000\n# dann im Browser: http://localhost:9000/dashboard/",
        d:"Traefiks Dashboard zeigt alle erkannten Router, Services und Middlewares — und vor allem, **warum** eine Regel nicht greift. Der abschließende Schrägstrich in /dashboard/ ist Pflicht, ohne ihn kommt eine leere Seite. Nicht dauerhaft nach außen öffnen: Das Dashboard ist ohne weitere Einstellungen ungeschützt.|Traefik's dashboard shows every router, service and middleware it recognised — and above all **why** a rule does not match. The trailing slash in /dashboard/ is mandatory; without it you get a blank page. Do not expose it permanently: the dashboard is unprotected unless you configure otherwise."}] : [])
+      .concat(o.ingress === "cilium" ? [
+      {c:"kubectl -n kube-system get cm cilium-config -o yaml \\\n  | grep -iE 'ingress|kube-proxy|envoy'",
+       d:"Zeigt, was der Agent tatsächlich gelesen hat, und nicht, was du gesetzt zu haben glaubst. Hier muss **enable-ingress-controller: \"true\"** stehen. Steht es nicht da, ist das helm-Upgrade nicht durchgelaufen oder es hat einen anderen Release erwischt.|Shows what the agent actually read, not what you believe you set. **enable-ingress-controller: \"true\"** has to appear here. If it does not, the helm upgrade did not go through, or it hit a different release."},
+      {c:"cilium status\nkubectl -n kube-system get pods -l k8s-app=cilium-envoy -o wide",
+       d:"Seit Cilium 1.16 läuft Envoy als eigenes DaemonSet neben dem Agenten — das ist der Teil, der den HTTP-Verkehr tatsächlich anfasst. Ist envoy.enabled auf false gesetzt, steckt Envoy im Agenten und diese Abfrage bleibt leer; dann gilt stattdessen k8s-app=cilium.|Since Cilium 1.16 Envoy runs as a DaemonSet of its own beside the agent — that is the part actually handling the HTTP traffic. With envoy.enabled set to false, Envoy sits inside the agent and this query stays empty; then k8s-app=cilium applies instead."}] : [])
       .concat(o.ingress === "caddy" ? [
       {c:"kubectl -n caddy-system logs -l app.kubernetes.io/name=caddy-ingress-controller \\\n  --tail=60 | grep -iE 'certificate|acme|obtain'",
-       d:"Sobald ein Ingress einen Hostnamen trägt, versucht Caddy von allein, dafür ein Zertifikat zu holen. Im Log steht, ob es geklappt hat. **Im LAN wird es nicht klappen**: Let's Encrypt muss den Namen öffentlich auflösen und Port 80 von außen erreichen können. Für interne Namen wie web.example.lan bleibt nur die DNS-01-Prüfung mit einem passenden Anbieter — oder ein eigenes Zertifikat wie bei den anderen drei.|As soon as an ingress carries a host name, Caddy tries to fetch a certificate for it on its own. The log says whether it worked. **On a LAN it will not**: Let's Encrypt has to resolve the name publicly and reach port 80 from outside. For internal names such as web.example.lan only the DNS-01 challenge with a supporting provider is left — or a certificate of your own, as with the other three."}] : [])
+       d:"Sobald ein Ingress einen Hostnamen trägt, versucht Caddy von allein, dafür ein Zertifikat zu holen. Im Log steht, ob es geklappt hat. **Im LAN wird es nicht klappen**: Let's Encrypt muss den Namen öffentlich auflösen und Port 80 von außen erreichen können. Für interne Namen wie web.example.lan bleibt nur die DNS-01-Prüfung mit einem passenden Anbieter — oder ein eigenes Zertifikat wie bei den übrigen.|As soon as an ingress carries a host name, Caddy tries to fetch a certificate for it on its own. The log says whether it worked. **On a LAN it will not**: Let's Encrypt has to resolve the name publicly and reach port 80 from outside. For internal names such as web.example.lan only the DNS-01 challenge with a supporting provider is left — or a certificate of your own, as with the other three."}] : [])
       .concat(o.ingress === "haproxy" ? [
       {c:"kubectl -n haproxy-controller port-forward svc/haproxy-kubernetes-ingress 1024:1024\n# dann im Browser: http://localhost:1024/",
-       d:"Die Stats-Seite von HAProxy: je Backend die Zahl der Sitzungen, der Zustand der Health-Checks und die Fehlerzaehler. Kein Dashboard zum Konfigurieren, sondern eine Betriebsanzeige — und genau dafür die beste der vier.|HAProxy's stats page: per backend the session counts, the health-check state and the error counters. Not a dashboard for configuring but an operations display — and the best of the four for exactly that."}] : [])
+       d:"Die Stats-Seite von HAProxy: je Backend die Zahl der Sitzungen, der Zustand der Health-Checks und die Fehlerzaehler. Kein Dashboard zum Konfigurieren, sondern eine Betriebsanzeige — und genau dafür die beste von allen.|HAProxy's stats page: per backend the session counts, the health-check state and the error counters. Not a dashboard for configuring but an operations display — and the best of them all for exactly that."}] : [])
       .concat([
       {c:"kubectl -n " + ing.ns + " logs -l " + ing.sel + " --tail=20 -f",
        d:"Die letzte Instanz bei jedem Ingress-Problem: Der Controller schreibt jede Anfrage mit, samt Statuscode. Taucht dein curl hier auf, ist die Anfrage angekommen und die Ursache liegt in Regel oder Backend. Taucht sie nicht auf, hat sie den Controller nie erreicht — dann ist es das Netz oder die Adresse.|The last resort for any ingress problem: the controller logs every request with its status code. If your curl shows up here, the request arrived and the cause lies in the rule or the backend. If it does not, it never reached the controller — then it is the network or the address."},
@@ -5405,6 +5459,12 @@ function clusterGuide(raw){
       .concat(o.ingress === "nginx" ? [{lvl:"err", m:t("Für ingress-nginx hat das Kubernetes-Projekt das Ende der Pflege angekündigt — die Ankündigung stammt aus Ende 2025, als Termin war März 2026 genannt, und danach sollen auch keine Sicherheitslücken mehr geschlossen werden. Prüfe den aktuellen Stand, bevor du es für etwas Neues wählst. Genau das ist der Grund, warum hier überhaupt Alternativen stehen.|For ingress-nginx the Kubernetes project has announced the end of maintenance — the announcement dates from late 2025, the date named was March 2026, and after that security holes are to go unfixed as well. Check the current state before choosing it for something new. That is precisely why alternatives are offered here at all.")},
         {lvl:"warn", m:t("Der Admission-Webhook von ingress-nginx war 2025 aus dem Pod-Netz heraus angreifbar und führte bis zur vollständigen Übernahme des Clusters (CVE-2025-1974). Wenn es ingress-nginx sein soll: eine gepflegte Version nehmen und den Webhook nicht aus beliebigen Pods erreichbar lassen.|The admission webhook of ingress-nginx was attackable from the pod network in 2025 and led all the way to full cluster takeover (CVE-2025-1974). If it is to be ingress-nginx: take a maintained version and do not leave the webhook reachable from arbitrary pods.")}] : [])
       .concat(o.ingress === "traefik" ? [{lvl:"warn", m:t("Das Dashboard ist im Helm-Chart nicht nach außen veröffentlicht, und das soll so bleiben. Wer es über einen Ingress erreichbar macht, gibt ungeschützt Einblick in jede Route des Clusters — dann gehört mindestens eine BasicAuth-Middleware davor.|The dashboard is not exposed by the Helm chart, and it should stay that way. Publishing it through an ingress gives unprotected insight into every route in the cluster — then it needs at least a BasicAuth middleware in front of it.")}] : [])
+      .concat(o.ingress === "cilium" && o.cni !== "cilium"
+        ? [{lvl:"err", m:t("Oben steht als CNI " + o.cni + ", hier steht Cilium als Ingress-Controller. Das passt nicht zusammen: Cilium Ingress ist Teil von Cilium und lässt sich nicht neben einem anderen CNI betreiben. Entweder das Netzwerk oben auf Cilium stellen — oder hier einen der vier eigenständigen Controller wählen, die mit jedem CNI laufen.|The CNI above says " + o.cni + ", and here Cilium is chosen as the ingress controller. Those do not fit together: Cilium Ingress is part of Cilium and cannot run alongside a different CNI. Either switch the network above to Cilium — or pick one of the four standalone controllers here, which run with any CNI.")}]
+        : [])
+      .concat(o.ingress === "cilium" ? [
+        {lvl:"warn", m:t("kubeProxyReplacement ist keine Nebensache: Sie schaltet kube-proxy ab und überlässt Cilium die Service-Weiterleitung. Auf einem laufenden Cluster ist das ein Eingriff ins Netz, bei dem bestehende Verbindungen abreißen können. Auf einem frischen Cluster ist der richtige Zeitpunkt jetzt, vor der ersten Anwendung.|kubeProxyReplacement is not a detail: it turns kube-proxy off and hands service forwarding to Cilium. On a running cluster that is surgery on the network, and existing connections can break. On a fresh cluster the right moment is now, before the first application.")},
+        {lvl:"warn", m:t("Die Adresse gehört an den Service cilium-ingress in kube-system. Weil Cilium diesen Service selbst verwaltet, kann eine von Hand gesetzte Annotation beim nächsten Upgrade wieder verschwinden — dauerhaft gehört sie in die Helm-Werte.|The address belongs on the cilium-ingress service in kube-system. Because Cilium manages that service itself, an annotation set by hand can disappear again at the next upgrade — permanently it belongs in the Helm values.")}] : [])
       .concat(o.ingress === "caddy" ? [{lvl:"warn", m:t("Das automatische HTTPS ist der Grund für Caddy und zugleich sein Fallstrick: Es setzt einen öffentlich auflösbaren Namen und Erreichbarkeit auf Port 80 voraus. In einem Cluster hinter der eigenen Firewall trifft beides nicht zu — dort bleibt Caddy ohne Zusatzeinstellung bei HTTP oder bei einem selbst ausgestellten Zertifikat, dem kein Browser traut.|Automatic HTTPS is the reason for Caddy and at the same time its pitfall: it presupposes a publicly resolvable name and reachability on port 80. In a cluster behind your own firewall neither holds — there Caddy stays on HTTP or on a self-issued certificate no browser trusts, unless configured otherwise.")},
         {lvl:"warn", m:t("Mit mehr als einer Replik muss der Zertifikatsspeicher geteilt sein, sonst holt jede Replik ihr eigenes Zertifikat und du läufst in die Ausstellungsgrenzen von Let's Encrypt. Für den Anfang ist eine einzelne Replik der sichere Weg.|With more than one replica the certificate store has to be shared, otherwise each replica fetches its own certificate and you run into Let's Encrypt's issuance limits. To begin with, a single replica is the safe route.")},
         {lvl:"warn", m:t("Der Service-Name folgt dem Helm-Release-Namen. Die Befehle hier gehen von caddy-ingress-controller aus. Wählst du einen anderen Release-Namen, zeigt kubectl -n caddy-system get svc den tatsächlichen.|The service name follows the Helm release name. The commands here assume caddy-ingress-controller. If you pick a different release name, kubectl -n caddy-system get svc shows the actual one.")}] : [])
@@ -5969,7 +6029,7 @@ const METALLB_FIELDS = [
    hint:"Aus: Ein Service bekommt nur dann eine Adresse, wenn er den Pool ausdrücklich nennt. Sinnvoll, wenn der Bereich klein ist.|Off: a service only gets an address if it names the pool explicitly. Sensible when the range is small."},
   {k:"ingress", t:"bool", structural:true, l:"Ingress-Controller auf die erste Adresse setzen|Point the ingress controller at the first address"},
   {k:"ingclass", t:"select", l:"Welcher Controller|Which controller", half:true, when:o => o.ingress,
-   opts:[["nginx","ingress-nginx"],["traefik","Traefik"],["haproxy","HAProxy"],["caddy","Caddy"]],
+   opts:[["nginx","ingress-nginx"],["traefik","Traefik"],["haproxy","HAProxy"],["caddy","Caddy"],["cilium","Cilium"]],
    hint:"Bestimmt Namespace und Service-Namen im Befehl darunter.|Decides the namespace and service name in the command below."},
   {k:"ipvs", t:"bool", l:"kube-proxy läuft im IPVS-Modus|kube-proxy runs in IPVS mode",
    hint:"Dann braucht es strictARP. Im Standardmodus iptables schadet die Einstellung nicht.|Then strictARP is required. In the default iptables mode the setting does no harm."},
