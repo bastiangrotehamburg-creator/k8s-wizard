@@ -4506,6 +4506,26 @@ function runSelfTests(){
         .map(s => s.items.map(i => i.c).join("\n")).join("\n");
       return cmds.indexOf("-n " + ic.ns + " annotate service " + ic.svc) !== -1;
     }), "");
+  ok("Ingress: der alte nginx-Webhook wird bei den anderen vier geprüft",
+    ["traefik","haproxy","caddy","cilium"].every(c =>
+      allCmds({cni:"cilium", ingress:c}).indexOf("kubectl get validatingwebhookconfigurations") !== -1) &&
+    allCmds({ingress:"nginx"}).indexOf("kubectl get validatingwebhookconfigurations") === -1, "");
+  ok("Ingress: das Fehlerbild des Blindgängers steht als Hinweis dabei",
+    (function(){
+      const risk = c => guideOf({cni:"cilium", ingress:c})
+        .filter(x => t(x.h).indexOf("Ingress-Controller") === 0)[0].r
+        .map(x => x.m).join(" ");
+      return ["traefik","haproxy","caddy","cilium"].every(c =>
+               risk(c).indexOf("ingress-nginx-controller-admission") !== -1 &&
+               risk(c).indexOf("delete validatingwebhookconfiguration ingress-nginx-admission") !== -1) &&
+             risk("nginx").indexOf("ingress-nginx-controller-admission") === -1;
+    })(), "");
+  ok("Ingress: die Prüfung steht vor dem Anlegen der Test-Regel",
+    ["traefik","haproxy","caddy"].every(function(c){
+      const cmds = allCmds({ingress:c});
+      return cmds.indexOf("kubectl get validatingwebhookconfigurations") <
+             cmds.indexOf("kubectl create ingress web");
+    }), "");
   const oidcGuide = tenantGuide({user:"bge", ns:"team-admin", identity:"oidc", api:"k8s-cp1.highq.org:6443"});
   const oidcTxt = oidcGuide.map(s => s.items.map(i => i.c).join(" ")).join(" ");
   const ymlTest = (function(){
@@ -5569,7 +5589,14 @@ function clusterGuide(raw){
          (ing.kopf
            ? " " + ing.n + " adds a " + ing.kopf + " line while it is at it."
            : " " + ing.n + " does not name itself in the headers the way ingress-nginx does — so all that counts is: an answer at all, rather than connection refused or a timeout.") +
-         " If you get connection refused or a timeout, this is not an ingress problem but an address problem."},
+         " If you get connection refused or a timeout, this is not an ingress problem but an address problem."}]
+      /* Ein zurueckgebliebener Admission-Webhook von ingress-nginx laesst
+         keine Ingress-Ressource mehr durch, auch nicht die eines anderen
+         Controllers. Nur ingress-nginx bringt hier ueberhaupt einen mit. */
+      .concat(o.ingress === "nginx" ? [] : [
+      {c:"kubectl get validatingwebhookconfigurations",
+       d:"Ein Zwischenschritt, der viel Ratlosigkeit erspart. Ein Admission-Webhook prüft **jede** Ingress-Ressource im Cluster, gleich welcher Klasse. Von den fünf Controllern hier bringt nur ingress-nginx einen mit — und dessen Registrierung ist clusterweit, gehört also zu keinem Namespace und bleibt stehen, wenn der Namespace verschwindet. Erwartung: keine Zeile namens **ingress-nginx-admission**. Steht sie da, obwohl ingress-nginx nicht mehr läuft, ist sie ein Blindgänger und muss weg, bevor der nächste Schritt gelingt.|An intermediate step that saves a lot of head-scratching. An admission webhook validates **every** ingress resource in the cluster, whatever its class. Of the five controllers here only ingress-nginx brings one along — and its registration is cluster-wide, so it belongs to no namespace and survives when the namespace goes. Expected: no line called **ingress-nginx-admission**. If it is there although ingress-nginx no longer runs, it is a dud and has to go before the next step can succeed."}])
+      .concat([
       {c:"kubectl create deployment web --image=nginx:1.27-alpine --replicas=2\nkubectl expose deployment web --port=80\nkubectl create ingress web --class=" + ing.cls + " \\\n  --rule=\"web.example.lan/*=web:80\"\nkubectl get ingress",
        d:"Erwartung: Nach ein paar Sekunden steht in der Spalte ADDRESS die Adresse des Controllers. Bleibt sie leer, hat der Controller die Regel nicht angenommen — dann stimmt --class nicht mit dem überein, was kubectl get ingressclass gezeigt hat.|Expected: after a few seconds the ADDRESS column shows the controller's address. If it stays empty the controller has not taken the rule — then --class does not match what kubectl get ingressclass showed."},
       {c:"curl -H 'Host: web.example.lan' http://ADRESSE-DES-INGRESS",
@@ -5592,7 +5619,7 @@ function clusterGuide(raw){
       {c:"kubectl -n " + ing.ns + " logs -l " + ing.sel + " --tail=20 -f",
        d:"Die letzte Instanz bei jedem Ingress-Problem: Der Controller schreibt jede Anfrage mit, samt Statuscode. Taucht dein curl hier auf, ist die Anfrage angekommen und die Ursache liegt in Regel oder Backend. Taucht sie nicht auf, hat sie den Controller nie erreicht — dann ist es das Netz oder die Adresse.|The last resort for any ingress problem: the controller logs every request with its status code. If your curl shows up here, the request arrived and the cause lies in the rule or the backend. If it does not, it never reached the controller — then it is the network or the address."},
       {c:"kubectl delete ingress web\nkubectl delete svc web\nkubectl delete deployment web",
-       d:"Aufräumen. Der Controller bleibt stehen, den brauchst du weiter.|Clean up. The controller stays, you will keep needing it."}]))),
+       d:"Aufräumen. Der Controller bleibt stehen, den brauchst du weiter.|Clean up. The controller stays, you will keep needing it."}])))),
     r:[{lvl:"warn", m:t("Der Controller braucht die Ports 80 und 443, entweder über einen Service vom Typ LoadBalancer mit MetalLB oder über hostPort auf den Knoten. Läuft auf denselben Knoten schon ein Webserver oder ein anderer Controller, bleibt der Pod hängen — im describe steht dann address already in use.|The controller needs ports 80 and 443, either through a LoadBalancer service with MetalLB or through hostPort on the nodes. If a web server or another controller already runs on those nodes, the pod gets stuck — describe then says address already in use.")}]
       .concat(o.ingress === "nginx" ? [{lvl:"err", m:t("Für ingress-nginx hat das Kubernetes-Projekt das Ende der Pflege angekündigt — die Ankündigung stammt aus Ende 2025, als Termin war März 2026 genannt, und danach sollen auch keine Sicherheitslücken mehr geschlossen werden. Prüfe den aktuellen Stand, bevor du es für etwas Neues wählst. Genau das ist der Grund, warum hier überhaupt Alternativen stehen.|For ingress-nginx the Kubernetes project has announced the end of maintenance — the announcement dates from late 2025, the date named was March 2026, and after that security holes are to go unfixed as well. Check the current state before choosing it for something new. That is precisely why alternatives are offered here at all.")},
         {lvl:"warn", m:t("Der Admission-Webhook von ingress-nginx war 2025 aus dem Pod-Netz heraus angreifbar und führte bis zur vollständigen Übernahme des Clusters (CVE-2025-1974). Wenn es ingress-nginx sein soll: eine gepflegte Version nehmen und den Webhook nicht aus beliebigen Pods erreichbar lassen.|The admission webhook of ingress-nginx was attackable from the pod network in 2025 and led all the way to full cluster takeover (CVE-2025-1974). If it is to be ingress-nginx: take a maintained version and do not leave the webhook reachable from arbitrary pods.")}] : [])
@@ -5607,6 +5634,7 @@ function clusterGuide(raw){
         {lvl:"warn", m:t("Mit mehr als einer Replik muss der Zertifikatsspeicher geteilt sein, sonst holt jede Replik ihr eigenes Zertifikat und du läufst in die Ausstellungsgrenzen von Let's Encrypt. Für den Anfang ist eine einzelne Replik der sichere Weg.|With more than one replica the certificate store has to be shared, otherwise each replica fetches its own certificate and you run into Let's Encrypt's issuance limits. To begin with, a single replica is the safe route.")},
         {lvl:"warn", m:t("Der Service-Name folgt dem Helm-Release-Namen. Die Befehle hier gehen von caddy-ingress-controller aus. Wählst du einen anderen Release-Namen, zeigt kubectl -n caddy-system get svc den tatsächlichen.|The service name follows the Helm release name. The commands here assume caddy-ingress-controller. If you pick a different release name, kubectl -n caddy-system get svc shows the actual one.")}] : [])
       .concat(o.ingress === "haproxy" ? [{lvl:"warn", m:t("Es gibt zwei verschiedene Projekte mit fast demselben Namen: dieses hier von HAProxy Technologies und haproxy-ingress von jcmoraisjr. Annotations und Chart unterscheiden sich. Beim Nachschlagen im Netz zuerst prüfen, zu welchem der beiden die Seite gehört.|There are two different projects with almost the same name: this one from HAProxy Technologies and haproxy-ingress from jcmoraisjr. Annotations and chart differ. When looking things up, first check which of the two a page belongs to.")}] : [])
+      .concat(o.ingress !== "nginx" ? [{lvl:"warn", m:t("Scheitert `kubectl create ingress` mit *failed calling webhook \"validate.nginx.ingress.kubernetes.io\" ... service \"ingress-nginx-controller-admission\" not found*, dann liegt es weder an " + ing.n + " noch an der Regel. Im Cluster steht dann noch die Webhook-Registrierung einer früheren ingress-nginx-Installation, deren Dienst es nicht mehr gibt: Der API-Server fragt bei **jedem** Ingress dort nach, bekommt keine Antwort und lehnt ab — auch bei --class=" + ing.cls + ". Weg damit mit kubectl delete validatingwebhookconfiguration ingress-nginx-admission, danach geht der Befehl durch. Ein helm uninstall oder ein gelöschter Namespace nimmt sie nicht mit, weil sie clusterweit ist.|If `kubectl create ingress` fails with *failed calling webhook \"validate.nginx.ingress.kubernetes.io\" ... service \"ingress-nginx-controller-admission\" not found*, the cause is neither " + ing.n + " nor the rule. What is left in the cluster is the webhook registration of an earlier ingress-nginx installation whose service is gone: the API server asks it about **every** ingress, gets no answer and refuses — with --class=" + ing.cls + " as well. Remove it with kubectl delete validatingwebhookconfiguration ingress-nginx-admission and the command goes through. A helm uninstall or a deleted namespace does not take it along, because it is cluster-wide.")}] : [])
   });
 
   if (!o.add) sec("Danach|Afterwards", "cp", {
