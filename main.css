@@ -1,37 +1,43 @@
 
 :root{
   color-scheme:light;
-  --a1:#5b53e8; --a2:#8b5cf6; --a3:#06b6d4;
+  /* Blau trägt die Struktur, Orange ausschliesslich die Handlung — wie auf highq.de. */
+  --a1:#2c6eb5; --a2:#255f9e; --a3:#1f3a68;
   --grad:linear-gradient(135deg,var(--a1),var(--a2));
-  --grad-soft:linear-gradient(135deg,rgba(91,83,232,.13),rgba(139,92,246,.07));
+  --grad-soft:linear-gradient(135deg,rgba(44,110,181,.11),rgba(31,58,104,.05));
 
-  --bg:#eceff8;
-  --blob1:rgba(99,91,255,.20);
-  --blob2:rgba(6,182,212,.15);
-  --surface:rgba(255,255,255,.70);
+  --go:#ee8b22; --go-2:#dd7d15; --go-ink:#16233a;
+  --go-sh:rgba(238,139,34,.34); --go-sh-2:rgba(238,139,34,.46);
+
+  --bg:#eef3f9;
+  --blob1:rgba(44,110,181,.17);
+  --blob2:rgba(31,58,104,.10);
+  --surface:rgba(255,255,255,.74);
   --surface-solid:#fff;
-  --field:rgba(255,255,255,.85);
-  --glass-brd:rgba(255,255,255,.75);
-  --brd:rgba(16,19,28,.10);
-  --brd-2:rgba(16,19,28,.18);
-  --ink:#0f1220;
-  --ink-2:#39415a;
-  --muted:#66708a;
-  --accent:#5b53e8;
-  --accent-soft:rgba(91,83,232,.10);
-  --ok:#0d9668;   --ok-bg:rgba(13,150,104,.12);
-  --warn:#b45309; --warn-bg:rgba(180,83,9,.12);
-  --err:#dc2626;  --err-bg:rgba(220,38,38,.10);
+  --field:rgba(255,255,255,.88);
+  --glass-brd:rgba(255,255,255,.78);
+  --brd:rgba(20,35,58,.11);
+  --brd-2:rgba(20,35,58,.20);
+  --ink:#16233a;
+  --ink-2:#3b4a63;
+  --muted:#5f6d86;
+  --accent:#2c6eb5;
+  --accent-soft:rgba(44,110,181,.10);
+  --ok:#057757;   --ok-bg:rgba(5,119,87,.12);
+  --warn:#9f5602; --warn-bg:rgba(159,86,2,.12);
+  --err:#c62828;  --err-bg:rgba(198,40,40,.10);
 
-  --sh1:0 1px 2px rgba(16,19,28,.05), 0 4px 14px rgba(16,19,28,.05);
-  --sh2:0 2px 8px rgba(16,19,28,.07), 0 14px 38px rgba(16,19,28,.10);
-  --sh3:0 -8px 26px rgba(16,19,28,.09), 0 -30px 70px rgba(16,19,28,.14);
-  --ring:0 0 0 3px rgba(91,83,232,.22);
+  --sh1:0 1px 2px rgba(20,35,58,.05), 0 4px 14px rgba(20,35,58,.06);
+  --sh2:0 2px 8px rgba(20,35,58,.08), 0 14px 38px rgba(20,35,58,.11);
+  --sh3:0 -8px 26px rgba(20,35,58,.10), 0 -30px 70px rgba(20,35,58,.15);
+  --ring:0 0 0 3px rgba(44,110,181,.25);
 
-  --cs-bg:#12161f; --cs-bg2:#161b26;
-  --cs-fg:#d8deec; --cs-muted:#8595ad; --cs-dim:#5b6c86;
-  --cs-brd:rgba(255,255,255,.09); --cs-hover:rgba(255,255,255,.05);
-  --cs-key:#93b4ff; --cs-num:#f2bd8e; --cs-accent:#a99bff;
+  --cs-bg:#16233a; --cs-bg2:#1b2b45;
+  --cs-fg:#dbe4f0; --cs-muted:#93a6c2; --cs-dim:#647a99;
+  --cs-brd:rgba(255,255,255,.10); --cs-hover:rgba(255,255,255,.06);
+  --cs-key:#9cc4ee; --cs-num:#f2bd8e; --cs-accent:#f0a95c;
+  --cs-accent-soft:rgba(240,169,92,.13); --cs-accent-brd:rgba(240,169,92,.35);
+  --cs-accent-ink:#ffd9b0;
 
   --r:10px; --r-sm:8px; --r-lg:18px;
   --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono","Cascadia Mono",Menlo,Consolas,"Liberation Mono",monospace;
@@ -39,28 +45,33 @@
 }
 [data-theme="dark"]{
   color-scheme:dark;
-  --bg:#070911;
-  --blob1:rgba(112,101,255,.22);
-  --blob2:rgba(6,182,212,.13);
-  --surface:rgba(23,27,39,.66);
-  --surface-solid:#161b28;
-  --field:rgba(255,255,255,.045);
+  /* Dasselbe Blau, nur aufgehellt — auf dunklem Grund braucht es mehr Helligkeit. */
+  --a1:#3b7fc4; --a2:#2a5f9e;
+  --grad-soft:linear-gradient(135deg,rgba(59,127,196,.16),rgba(31,58,104,.08));
+  --go:#f59b3c; --go-2:#e78c2a;
+  --go-sh:rgba(245,155,60,.30); --go-sh-2:rgba(245,155,60,.42);
+  --bg:#08111d;
+  --blob1:rgba(44,110,181,.24);
+  --blob2:rgba(31,58,104,.20);
+  --surface:rgba(22,35,58,.68);
+  --surface-solid:#16233a;
+  --field:rgba(255,255,255,.05);
   --glass-brd:rgba(255,255,255,.09);
-  --brd:rgba(255,255,255,.10);
-  --brd-2:rgba(255,255,255,.20);
-  --ink:#e9edf8;
-  --ink-2:#bcc6da;
-  --muted:#8d9ab4;
-  --accent:#a293ff;
-  --accent-soft:rgba(162,147,255,.14);
+  --brd:rgba(255,255,255,.11);
+  --brd-2:rgba(255,255,255,.21);
+  --ink:#e6edf7;
+  --ink-2:#bac7dc;
+  --muted:#8c9ab4;
+  --accent:#7fb3e8;
+  --accent-soft:rgba(127,179,232,.15);
   --ok:#34d399;   --ok-bg:rgba(52,211,153,.13);
   --warn:#fbbf24; --warn-bg:rgba(251,191,36,.12);
   --err:#f87171;  --err-bg:rgba(248,113,113,.13);
   --sh1:0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.28);
   --sh2:0 2px 10px rgba(0,0,0,.45), 0 18px 44px rgba(0,0,0,.5);
   --sh3:0 -10px 34px rgba(0,0,0,.5), 0 -30px 80px rgba(0,0,0,.6);
-  --ring:0 0 0 3px rgba(162,147,255,.26);
-  --cs-bg:#0d111a; --cs-bg2:#111624;
+  --ring:0 0 0 3px rgba(127,179,232,.28);
+  --cs-bg:#0d1826; --cs-bg2:#122034;
 }
 
 *{box-sizing:border-box}
@@ -261,6 +272,30 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   border-left:2px solid var(--accent);padding-left:12px;max-width:62ch;
 }
 
+/* ---------- Empfehlungen je Ressource ---------- */
+/* Blau wie alle Erklärungen — Orange bleibt der Handlung vorbehalten. */
+.best{
+  grid-column:1/-1;margin:0 0 18px;padding:12px 15px;
+  background:var(--accent-soft);border:1px solid var(--brd);
+  border-left:3px solid var(--accent);border-radius:var(--r);
+}
+.best summary{
+  display:inline-flex;align-items:center;gap:6px;list-style:none;cursor:pointer;
+  font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;font-weight:700;
+  color:var(--accent);
+}
+.best summary::-webkit-details-marker{display:none}
+.best summary::after{content:"›";transform:rotate(90deg);display:inline-block;font-size:13px;line-height:1;letter-spacing:0}
+.best[open] summary::after{transform:rotate(-90deg)}
+.best ul{margin:10px 0 0;padding:0 0 0 17px;display:grid;gap:7px}
+.best li{font-size:12.5px;line-height:1.6;color:var(--ink-2);max-width:70ch}
+.best li::marker{color:var(--accent)}
+.best code{
+  font-family:var(--mono);font-size:11.5px;background:var(--surface-solid);
+  color:var(--accent);padding:1px 5px;border-radius:5px;
+}
+.best strong{font-weight:660;color:var(--ink)}
+
 /* ---------- Schritt-Navigation ---------- */
 .stepnav{
   position:fixed;left:14px;bottom:14px;width:calc(50% - 24px);z-index:25;
@@ -276,11 +311,15 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   transition:all .16s cubic-bezier(.22,1,.36,1);
 }
 .btn:hover{border-color:var(--accent);color:var(--accent);transform:translateY(-1px)}
+/* Dunkle Schrift statt weisser: Weiss auf diesem Orange kommt nur auf 2,4:1. */
 .btn--go{
-  background:var(--grad);border-color:transparent;color:#fff;font-weight:650;
-  box-shadow:0 2px 10px rgba(91,83,232,.35);
+  background:var(--go);border-color:transparent;color:var(--go-ink);font-weight:680;
+  box-shadow:0 2px 10px var(--go-sh);
 }
-.btn--go:hover{color:#fff;box-shadow:0 4px 18px rgba(91,83,232,.45);transform:translateY(-1px)}
+.btn--go:hover{
+  background:var(--go-2);color:var(--go-ink);
+  box-shadow:0 4px 18px var(--go-sh-2);transform:translateY(-1px);
+}
 .btn--ghost{border-style:dashed;background:transparent;color:var(--muted)}
 
 /* ---------- YAML-Fläche ---------- */
@@ -332,9 +371,9 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   padding:4px 11px;font-family:var(--mono);font-size:10.5px;cursor:pointer;transition:all .16s ease;
 }
 .cmd::before{content:"$ ";color:var(--cs-dim)}
-.cmd--seal{border-color:rgba(162,147,255,.35);color:var(--cs-accent)}
+.cmd--seal{border-color:var(--cs-accent-brd);color:var(--cs-accent)}
 .cmd--seal::before{content:"🔒 ";color:var(--cs-accent)}
-.cmd--seal:hover{background:rgba(162,147,255,.12)}
+.cmd--seal:hover{background:var(--cs-accent-soft)}
 .cmd:hover{border-color:var(--cs-accent);color:var(--cs-accent);background:var(--cs-hover)}
 
 .doclist{border-top:1px solid var(--cs-brd);padding:10px 15px 13px;display:flex;flex-wrap:wrap;gap:7px;align-items:center;background:var(--cs-bg2)}
@@ -344,7 +383,7 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   font-family:var(--mono);font-size:11px;color:var(--cs-muted);overflow:hidden;transition:all .16s ease;
 }
 .chip:hover{border-color:var(--cs-accent);background:var(--cs-hover)}
-.chip--on{border-color:var(--cs-accent);background:rgba(162,147,255,.14);color:#cfc6ff}
+.chip--on{border-color:var(--cs-accent);background:var(--cs-accent-soft);color:var(--cs-accent-ink)}
 .chip button{background:none;border:0;color:inherit;cursor:pointer;font:inherit;padding:4px 5px 4px 11px}
 .chip .chip-x{padding:4px 9px 4px 5px;color:var(--cs-dim);font-size:13px;line-height:1}
 .chip .chip-x:hover{color:#fca5a5}
@@ -443,6 +482,53 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
 .swtable td{border-bottom:1px solid var(--brd);padding:10px 14px;vertical-align:top;line-height:1.55;color:var(--ink-2)}
 .swtable tr:last-child td{border-bottom:0}
 .swtable .swkey{font-family:var(--mono);font-size:11.5px;color:var(--ink);white-space:nowrap;font-weight:600}
+.swnav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 26px;padding:0 0 18px;border-bottom:1px solid var(--brd)}
+.swchip{
+  border:1px solid var(--brd);background:var(--surface);color:var(--ink-2);
+  padding:5px 11px;border-radius:999px;font:inherit;font-size:11.5px;cursor:pointer;
+  transition:background .12s,color .12s,border-color .12s;
+}
+.swchip:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+/* Abschnitte mit Anleitung heben sich ab. */
+.swchip--go{border-color:var(--accent);color:var(--accent);font-weight:640}
+.swpart{margin:0 0 20px;padding:0 0 0 15px;border-left:2px solid var(--brd)}
+.swpart:last-child{margin-bottom:11px}
+.swpart .swph{font-size:12.5px;font-weight:660;color:var(--ink);margin:0 0 8px;line-height:1.5}
+.swpart .swcode{margin-bottom:0}
+.swpart p + .swcode{margin-top:11px}
+
+/* ---------- Spickzettel ---------- */
+.cheatwiki{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:0 26px;align-items:start}
+.cheatwiki .swsec{margin:0 0 22px;break-inside:avoid}
+.cheatwiki .swsec--wide{grid-column:1/-1}
+.cheatwiki .swtable{font-size:12px}
+.cheatwiki .swtable th,.cheatwiki .swtable td{padding:7px 11px}
+.cheatwiki .swcode{font-size:11px;line-height:1.6;padding:11px 13px;white-space:pre}
+.cheatwiki .swsec p{font-size:12.5px;line-height:1.6}
+
+@media print{
+  .top,.shell,.toast,.profilepanel,#searchPanel,#testPanel{display:none !important}
+  .wikipanel{
+    position:static;max-height:none;overflow:visible;animation:none;
+    border:0;border-radius:0;padding:0;box-shadow:none;background:#fff;
+    -webkit-backdrop-filter:none;backdrop-filter:none;
+  }
+  .wikihead,#wikiDesc,#wikiList,#cmdBuild,#storageWiki{display:none !important}
+  /* Eine Spalte: berechenbar, ohne halbleere Seiten — dafür kleiner und enger gesetzt. */
+  .cheatwiki{display:block;color:#000}
+  .cheatwiki .swsec{margin:0 0 14px}
+  .cheatwiki .swsec .hgroup{color:#000;font-size:10.5px;margin:0 0 6px}
+  .cheatwiki .swtable{font-size:10.5px}
+  .cheatwiki .swtable th{font-size:8.5px;padding:5px 9px}
+  .cheatwiki .swtable td{padding:5px 9px;line-height:1.45}
+  .cheatwiki .swcode{font-size:10px;line-height:1.5;padding:8px 10px}
+  .cheatwiki .swtable td,.cheatwiki .swsec p{color:#222}
+  .cheatwiki .swsec p{font-size:10.5px;line-height:1.5;margin:0 0 6px}
+  .cheatwiki .swcode{background:#f4f4f5;color:#000;border-color:#d4d4d8;box-shadow:none}
+  .cheatwiki .swsec code{background:#f4f4f5;color:#000}
+  .swtwrap{border-color:#d4d4d8;background:#fff}
+  @page{margin:12mm}
+}
 
 /* ---------- Suche ---------- */
 .sresults{display:grid;gap:7px;margin:0 0 20px}
@@ -485,7 +571,7 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
 /* ---------- Schmale Fenster ---------- */
 @media (max-width:960px){
   .shell{grid-template-columns:1fr}
-  .pane--form{padding:20px 16px 100px}
+  .pane--form{padding:20px 16px 130px}
   .pane--yaml{position:static;height:auto;margin:0 14px 20px}
   .code{max-height:60vh}
   .stepnav{width:calc(100% - 28px)}
@@ -497,11 +583,77 @@ textarea{min-height:84px;resize:vertical;line-height:1.5}
   .fields{grid-template-columns:1fr}
   .top{padding:10px 14px;gap:7px}
   .brand em{display:none}
+  /* Vier Knoepfe passen bei dieser Breite nicht nebeneinander. */
+  .pane--form{padding-bottom:200px}
+  .stepnav{flex-wrap:wrap;row-gap:8px}
+  .stepnav .nav-sp{display:none}
+  .stepnav .btn{flex:1 1 auto;justify-content:center;text-align:center;white-space:nowrap}
+  .stepnav .btn--go,.stepnav [data-nav="commit"]{flex-basis:100%;order:3}
+  .stepnav .jump{flex:0 0 auto}
+  /* Sonst schiebt die Sprungleiste den Text sieben Reihen weit nach unten. */
+  .swnav{flex-wrap:nowrap;overflow-x:auto;margin-bottom:18px;padding-bottom:12px;scrollbar-width:thin}
+  .swchip{flex:0 0 auto}
+  /* Sonst schiebt die Reiterzeile den Schliessknopf aus dem Bild. */
+  .wikihead{flex-wrap:wrap;row-gap:9px}
+  .wikihead .tabs{flex:1 1 100%;flex-wrap:wrap}
 }
 @media (min-width:961px){
   .wikipanel,.profilepanel{left:auto;width:56%;border-left:1px solid var(--glass-brd)}
+  /* Die Anleitung ist ein Dokument: volle Breite, Angaben links stehend. */
+  #clusterPanel{
+    left:0;width:100%;border-left:0;
+    display:grid;grid-template-columns:360px minmax(0,1fr);
+    column-gap:30px;align-items:start;
+  }
+  #clusterPanel .wikihead,#clusterPanel > .stepdesc,#clusterPanel > .ymlnav{grid-column:1/-1}
+  #clusterFields{
+    position:sticky;top:0;align-self:start;
+    max-height:calc(86vh - 130px);overflow:auto;padding-right:8px;
+  }
+  #clusterOut{margin-top:0}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none!important;transition:none!important}
   .rescard:hover,.btn:hover,.ctask:hover,.sresult:hover,.tbtn:hover{transform:none}
 }
+
+/* ---------- Cluster-Anleitung ---------- */
+.clusterout{margin-top:22px}
+.cstep{margin:0 0 30px;padding-top:18px;border-top:1px solid var(--brd)}
+.cstep:first-child{border-top:0;padding-top:0}
+.cstep .hgroup{display:flex;align-items:center;gap:10px;color:var(--accent);font-size:11.5px;margin-bottom:9px}
+.cstep p{font-size:12.5px;line-height:1.65;color:var(--ink-2);margin:0 0 11px;max-width:76ch}
+.crole{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:none;
+  padding:2px 9px;border-radius:99px;font-weight:600;
+}
+.crole--all{background:var(--accent-soft);color:var(--accent)}
+.crole--cp{background:var(--go-sh);color:var(--go-ink)}
+.crole--worker{background:var(--ok-bg);color:var(--ok)}
+.crole--admin{background:var(--accent-soft);color:var(--accent)}
+.crole--neu{background:var(--warn-bg);color:var(--warn)}
+
+/* ---------- Playbooks einzeln holen ---------- */
+.ymlnav{
+  display:flex;flex-wrap:wrap;gap:6px;align-items:center;
+  margin:0 0 18px;padding:13px 15px;border:1px solid var(--brd);
+  border-radius:var(--r);background:var(--surface);
+}
+.ymlnav p{flex:1 1 100%;margin:0;font-size:12px;line-height:1.55;color:var(--muted)}
+.ymlnav p + .ychip{margin-top:2px}
+.ychip{
+  border:1px solid var(--brd);background:var(--bg);color:var(--ink-2);
+  padding:5px 11px;border-radius:999px;cursor:pointer;
+  font-family:var(--mono);font-size:11.5px;
+  transition:background .12s,color .12s,border-color .12s;
+}
+.ychip:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.ychip--all{border-color:var(--accent);color:var(--accent);font-weight:640;font-family:inherit}
+.crole--user{background:var(--ok-bg);color:var(--ok)}
+/* white-space:pre ohne eigenes Scrollen zieht sonst das ganze Panel in die Breite. */
+.clusterout .cmd--big{white-space:pre;font-size:12px;line-height:1.6;max-width:100%;overflow-x:auto}
+.clusterout .wikiitem p{margin:0;color:var(--muted);font-size:12px}
+.cstep code{font-family:var(--mono);font-size:11.5px;background:var(--accent-soft);color:var(--accent);padding:1px 6px;border-radius:5px}
+.cstep strong{font-weight:660;color:var(--ink)}
+.cstep .swtwrap{margin:0 0 14px}
+.cstep .swtable td:first-child code{background:none;padding:0}

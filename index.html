@@ -18,6 +18,7 @@
   <button class="tbtn" id="searchBtn">Suche</button>
   <button class="tbtn" id="explainBtn" aria-pressed="false">Erklärungen</button>
   <button class="tbtn" id="wikiBtn">kubectl</button>
+  <button class="tbtn" id="clusterBtn">Cluster</button>
   <button class="tbtn" id="profileBtn">Profil</button>
   <button class="tbtn" id="saveBtn">Speichern</button>
   <button class="tbtn" id="loadBtn">Laden</button>
@@ -97,8 +98,10 @@
       <button class="tab" id="tabRef" aria-pressed="true"></button>
       <button class="tab" id="tabBuild" aria-pressed="false"></button>
       <button class="tab" id="tabStorage" aria-pressed="false"></button>
+      <button class="tab" id="tabCheat" aria-pressed="false"></button>
     </div>
     <input type="text" id="wikiFilter" placeholder="filter">
+    <button class="btn" id="cheatPrint" hidden></button>
     <div class="nav-sp"></div>
     <button class="btn" id="wikiClose">×</button>
   </div>
@@ -110,6 +113,26 @@
     <div class="cmdout" id="cmdOut"></div>
   </div>
   <div class="storagewiki" id="storageWiki" hidden></div>
+  <div class="cheatwiki" id="cheatWiki" hidden></div>
+</div>
+
+<div class="wikipanel" id="clusterPanel" hidden>
+  <div class="wikihead">
+    <div class="tabs">
+      <button class="tab" id="tabInstall" aria-pressed="true"></button>
+      <button class="tab" id="tabTenant" aria-pressed="false"></button>
+      <button class="tab" id="tabMetallb" aria-pressed="false"></button>
+      <button class="tab" id="tabUpgrade" aria-pressed="false"></button>
+    </div>
+    <div class="nav-sp"></div>
+    <button class="btn" id="clusterMd"></button>
+    <button class="btn" id="clusterYml"></button>
+    <button class="btn" id="clusterClose">×</button>
+  </div>
+  <p class="stepdesc" id="clusterDesc"></p>
+  <div class="ymlnav" id="clusterYmlNav" hidden></div>
+  <div class="fields" id="clusterFields"></div>
+  <div class="clusterout" id="clusterOut"></div>
 </div>
 
 <div class="profilepanel" id="profilePanel" hidden>
