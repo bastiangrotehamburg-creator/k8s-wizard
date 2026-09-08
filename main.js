@@ -66,6 +66,13 @@ function emit(v, ind){
 
 function toYaml(obj){ return emit(obj, 0).join("\n"); }
 
+/* Serialisiert mehrere Dokumente zu einem Manifest. Dokumente mit einem __note-Hinweis
+   (etwa der Zieldateipfad einer kubeadm-Nebenkonfiguration) bekommen ihn als Kommentar
+   vorangestellt — so bleibt beim Wiederzusammenbauen klar, welches Stück wohin gehört. */
+function manifestText(docs){
+  return docs.map(d => (d && d.__note ? "# " + t(d.__note) + "\n" : "") + toYaml(d)).join("\n---\n");
+}
+
 let LANG = "de";
 function t(pair){
   if (typeof pair === "string"){
@@ -1079,6 +1086,272 @@ RES._stack = {
   }
 };
 
+/* Starke TLS-1.2-Cipher (die 1.3-Suiten sind ohnehin fest und nicht abschaltbar). */
+const STRONG_CIPHERS = [
+  "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+  "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+  "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+  "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+  "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+  "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
+];
+const ENC_KEY_PLACEHOLDER = "HIER-32-BYTE-SCHLUESSEL-BASE64-EINSETZEN";
+const CLUSTER_APIS = /^(kubeadm\.k8s\.io|kubelet\.config\.k8s\.io|kubeproxy\.config\.k8s\.io|apiserver\.config\.k8s\.io|audit\.k8s\.io)\//;
+
+/* Hängt einen nicht-enumerierbaren Datei-Hinweis an ein Dokument — er landet als
+   Kommentarzeile über dem Dokument, damit klar ist, welche Datei wohin gehört,
+   ohne dass der YAML-Emitter ihn als Schlüssel ausgibt. */
+function withNote(obj, note){
+  Object.defineProperty(obj, "__note", {value:note, enumerable:false});
+  return obj;
+}
+
+RES.Cluster = {
+  group:"preset", multi:true, raw:true, label:"Produktions-Cluster (kubeadm)|Production cluster (kubeadm)",
+  desc:"Gehärtete kubeadm-Konfiguration für Kubernetes 1.37 — reproduzierbar aus einer Datei|Hardened kubeadm configuration for Kubernetes 1.37 — reproducible from a single file",
+  steps:[
+    {id:"base", title:"Cluster & Version|Cluster & version",
+     desc:"Die Eckdaten, aus denen kubeadm den Cluster aufbaut. Alles hier landet in kubeadm-config.yaml — damit lässt sich derselbe Cluster jederzeit wieder erstellen.|The essentials kubeadm builds the cluster from. Everything here ends up in kubeadm-config.yaml — enough to recreate the very same cluster at any time.",
+     fields:[
+      {k:"name", t:"text", l:"Clustername|Cluster name", req:true, def:"kubernetes", ph:"kubernetes",
+        hint:"Nur ein Bezeichner in der Konfiguration und in kubeconfig-Kontexten — verändert nichts am Verhalten.|Just an identifier in the config and in kubeconfig contexts — it changes no behaviour."},
+      {k:"kubernetesVersion", t:"select", l:"Kubernetes-Version|Kubernetes version", def:"v1.37.0",
+        opts:[["v1.37.0","v1.37.0"],["v1.37.1","v1.37.1"],["v1.37.2","v1.37.2"],["v1.37.3","v1.37.3"]],
+        why:"kubeadm zieht exakt diese Version für alle Control-Plane-Komponenten. Eine feste Patch-Version statt v1.37 sorgt dafür, dass ein späterer Rebuild bitgenau dasselbe ergibt — genau das macht die Konfiguration reproduzierbar. Nodes laufen erst mit derselben, dann gestaffelt mit der nächsten Minor-Version; nie mehr als eine Minor-Version auseinander.|kubeadm pulls exactly this version for every control-plane component. Pinning a patch version instead of v1.37 makes a later rebuild bit-for-bit identical — that is what makes the config reproducible. Nodes run the same version first, then upgrade one minor at a time; never more than one minor apart."},
+      {k:"criSocket", t:"select", l:"Container-Runtime|Container runtime",
+        opts:[["","containerd (unix:///run/containerd/containerd.sock)"],
+              ["unix:///var/run/crio/crio.sock","CRI-O (unix:///var/run/crio/crio.sock)"]],
+        hint:"Die Runtime muss auf jedem Node laufen, bevor kubeadm startet. Docker selbst ist seit 1.24 keine gültige Runtime mehr.|The runtime has to be running on every node before kubeadm starts. Docker itself has not been a valid runtime since 1.24."},
+      {k:"controlPlaneEndpoint", t:"text", l:"controlPlaneEndpoint", ph:"k8s-api.example.com:6443",
+        why:"Der feste Name, unter dem die API erreichbar ist — er gehört vor den ersten init, sonst lässt sich später kein zweiter Control-Plane-Node hinzufügen, ohne alle Zertifikate neu auszustellen. In Produktion zeigt er auf einen Load Balancer vor den API-Servern, nicht auf eine einzelne Node-IP.|The stable name the API is reached under — set it before the first init, or you cannot add a second control-plane node later without reissuing every certificate. In production it points at a load balancer in front of the API servers, not at a single node IP."},
+      {k:"podSubnet", t:"text", l:"Pod-Netz|Pod subnet", def:"10.244.0.0/16", half:true,
+        hint:"Muss zum gewählten CNI passen. Darf sich mit keinem Netz überschneiden, das im Rechenzentrum schon geroutet wird.|Must match the chosen CNI. Must not overlap any network already routed in your data centre."},
+      {k:"serviceSubnet", t:"text", l:"Service-Netz|Service subnet", def:"10.96.0.0/12", half:true,
+        hint:"Aus diesem Bereich vergibt Kubernetes die ClusterIPs. Die zehnte Adresse wird die DNS-IP.|Kubernetes hands out ClusterIPs from this range. The tenth address becomes the DNS IP."},
+      {k:"dnsDomain", t:"text", adv:true, l:"networking.dnsDomain", def:"cluster.local", half:true,
+        hint:"Nachträglich nur mit sehr viel Schmerz änderbar — steht in unzähligen Zertifikaten und Service-Namen.|Changeable later only with a great deal of pain — it is baked into countless certificates and service names."},
+      {k:"certSANs", t:"lines", adv:true, l:"Zusätzliche API-Zertifikatsnamen|Additional API cert names",
+        hint:"Eine Zeile je Hostname oder IP, unter der das API-Zertifikat zusätzlich gültig sein soll — etwa der Load-Balancer-Name und jede Control-Plane-IP.|One line per hostname or IP the API certificate should additionally be valid for — for instance the load-balancer name and each control-plane IP."}
+     ]},
+
+    {id:"sec", title:"Härtung der Control Plane|Control-plane hardening",
+     desc:"Was ein Produktionscluster mindestens braucht. Jeder Schalter setzt konkrete API-Server-Flags — abschalten nur mit gutem Grund.|The minimum a production cluster needs. Each switch sets concrete API-server flags — turn one off only with a good reason.",
+     fields:[
+      {k:"pss", t:"select", l:"Pod Security Standard|Pod Security Standard", def:"restricted", structural:true,
+        opts:[["restricted","restricted — voll gehärtet erzwingen|restricted — enforce fully hardened"],
+              ["baseline","baseline — nur das Gröbste verbieten|baseline — block only the worst"],
+              ["privileged","privileged — nichts erzwingen (nicht empfohlen)|privileged — enforce nothing (not recommended)"]],
+        why:"Der PodSecurity-Admission-Controller ist seit 1.25 eingebaut und ersetzt die alten PodSecurityPolicies. Clusterweit als Default gesetzt, lehnt restricted jeden Pod ab, der als root läuft, Rechte ausweiten kann oder Host-Zugriff verlangt — bevor er überhaupt startet. Das ist die eine Einstellung, die am meisten Angriffsfläche nimmt.|The PodSecurity admission controller has been built in since 1.25 and replaces the old PodSecurityPolicies. Set cluster-wide as the default, restricted rejects any pod that runs as root, can escalate privileges or asks for host access — before it ever starts. It is the single setting that removes the most attack surface."},
+      {k:"pssExempt", t:"text", adv:true, l:"Ausgenommene Namespaces|Exempt namespaces", def:"kube-system",
+        hint:"Komma-getrennt. Systemkomponenten in kube-system brauchen oft mehr Rechte — der Rest des Clusters bleibt trotzdem eng.|Comma-separated. System components in kube-system often need more privilege — the rest of the cluster stays tight regardless."},
+      {k:"encryptSecrets", t:"bool", l:"Secrets at rest verschlüsseln|Encrypt secrets at rest", def:true, structural:true,
+        why:"Ohne diese Einstellung liegen alle Secrets im Klartext in etcd. Wer ein etcd-Backup in die Hände bekommt, hat damit jedes Passwort und jeden Token. Die EncryptionConfiguration verschlüsselt sie mit einem Schlüssel, der nur auf den Control-Plane-Nodes liegt — nicht in etcd.|Without this every secret sits in plaintext in etcd. Anyone who gets hold of an etcd backup has every password and token. The EncryptionConfiguration encrypts them with a key that lives only on the control-plane nodes — not in etcd."},
+      {k:"audit", t:"bool", l:"Audit-Logging aktivieren|Enable audit logging", def:true, structural:true,
+        why:"Ohne Audit-Log gibt es nach einem Vorfall nichts zu untersuchen — man weiß nicht, wer was wann getan hat. Die mitgelieferte Policy protokolliert Metadaten aller Zugriffe, hält aber Secret-Inhalte bewusst heraus, damit das Log sie nicht selbst preisgibt.|Without an audit log there is nothing to investigate after an incident — you cannot tell who did what when. The bundled policy records metadata of every access but deliberately keeps secret contents out, so the log does not leak them itself."},
+      {k:"anonymousOff", t:"bool", l:"Anonyme Anfragen ablehnen|Reject anonymous requests", def:true,
+        hint:"Setzt --anonymous-auth=false am API-Server. Nicht authentifizierte Aufrufe werden dann nicht mehr als system:anonymous behandelt, sondern abgewiesen.|Sets --anonymous-auth=false on the API server. Unauthenticated calls are then no longer treated as system:anonymous but rejected outright."},
+      {k:"profilingOff", t:"bool", l:"Profiling-Endpunkte abschalten|Disable profiling endpoints", def:true,
+        hint:"--profiling=false auf API-Server, Controller-Manager und Scheduler. Die pprof-Endpunkte geben sonst detaillierte Innensicht preis.|--profiling=false on API server, controller-manager and scheduler. The pprof endpoints otherwise expose detailed internals."},
+      {k:"tlsHardening", t:"bool", l:"TLS-Mindestversion & Cipher setzen|Set TLS floor & cipher suites", def:true,
+        hint:"Erzwingt mindestens TLS 1.2 und eine Auswahl starker Cipher-Suiten — schließt veraltete Verschlüsselung aus.|Enforces TLS 1.2 as the floor plus a set of strong cipher suites — rules out obsolete encryption."},
+      {k:"saTokenLookup", t:"bool", adv:true, l:"ServiceAccount-Token gegen etcd prüfen|Validate SA tokens against etcd", def:true,
+        hint:"--service-account-lookup=true: gelöschte oder widerrufene Tokens werden sofort ungültig, statt bis zum Ablauf weiterzugelten.|--service-account-lookup=true: deleted or revoked tokens become invalid at once instead of remaining usable until they expire."},
+      {k:"useSACredentials", t:"bool", adv:true, l:"Controller mit eigenen ServiceAccounts|Controllers use individual service accounts", def:true,
+        hint:"--use-service-account-credentials=true am Controller-Manager: jeder Controller bekommt eine eigene Identität, was RBAC-Audits erst aussagekräftig macht.|--use-service-account-credentials=true on the controller-manager: each controller gets its own identity, which is what makes RBAC audits meaningful."}
+     ]},
+
+    {id:"net", title:"Netzwerk & kube-proxy|Networking & kube-proxy",
+     desc:"kubeadm installiert kein CNI — das kommt nach dem init dazu. Hier wird nur festgelegt, wie kube-proxy arbeitet.|kubeadm installs no CNI — that comes after init. Here you only decide how kube-proxy works.",
+     fields:[
+      {k:"kubeProxyMode", t:"select", l:"kube-proxy-Modus|kube-proxy mode", def:"iptables", structural:true,
+        opts:[["iptables","iptables — Standard, überall stabil|iptables — default, stable everywhere"],
+              ["ipvs","ipvs — skaliert bei sehr vielen Services besser|ipvs — scales better with very many services"],
+              ["none","kein kube-proxy — CNI übernimmt (z. B. Cilium)|no kube-proxy — the CNI takes over (e.g. Cilium)"]],
+        why:"iptables ist der bewährte Standard. ipvs lohnt erst bei Tausenden von Services. none überspringt kube-proxy ganz — sinnvoll nur, wenn das CNI die Service-Weiterleitung selbst übernimmt, sonst funktionieren ClusterIPs überhaupt nicht.|iptables is the proven default. ipvs pays off only with thousands of services. none skips kube-proxy entirely — sensible only when the CNI handles service routing itself, otherwise ClusterIPs do not work at all."},
+      {k:"cni", t:"select", l:"Geplantes CNI (Hinweis)|Planned CNI (note)",
+        opts:[["","— nur als Erinnerung|— reminder only"],["cilium","Cilium"],["calico","Calico"],["flannel","Flannel"]],
+        hint:"Rein informativ: kubeadm richtet kein CNI ein. Ohne ein installiertes CNI bleiben alle Nodes NotReady. Der passende apply-Befehl erscheint rechts unten.|Purely informational: kubeadm sets up no CNI. Without one installed every node stays NotReady. The matching apply command appears at the bottom right."}
+     ]},
+
+    {id:"kubelet", adv:true, title:"Kubelet & Nodes|Kubelet & nodes",
+     desc:"Härtung, die auf jedem Node greift. Diese Werte gelten für alle Kubelets, die mit dieser Konfiguration starten.|Hardening that takes effect on every node. These values apply to every kubelet started from this config.",
+     fields:[
+      {k:"kubeletHardening", t:"bool", l:"Kubelet härten|Harden the kubelet", def:true,
+        why:"Das Kubelet ist auf jedem Node der mächtigste Prozess. Die Härtung schließt den unauthentifizierten Read-Only-Port (10255), weist anonyme Zugriffe ab, verlangt Webhook-Autorisierung für die Kubelet-API, dreht seccomp RuntimeDefault als Standard auf und lässt Client-Zertifikate automatisch rotieren. Ohne das kann jeder mit Node-Netzzugang das Kubelet auslesen.|The kubelet is the most powerful process on every node. Hardening closes the unauthenticated read-only port (10255), rejects anonymous access, requires webhook authorization for the kubelet API, turns on seccomp RuntimeDefault by default and rotates client certificates automatically. Without it anyone with node network access can read the kubelet out."},
+      {k:"bindLocalhost", t:"bool", l:"Controller-Manager & Scheduler nur an localhost|Bind controller-manager & scheduler to localhost", def:true,
+        hint:"--bind-address=127.0.0.1: die Health- und Metrics-Ports dieser beiden Komponenten sind dann nicht mehr über das Netz erreichbar.|--bind-address=127.0.0.1: the health and metrics ports of those two components are no longer reachable over the network."},
+      {k:"systemReserved", t:"bool", l:"Ressourcen für System & Kubelet reservieren|Reserve resources for system & kubelet", def:true,
+        hint:"Hält CPU und Speicher für Betriebssystem und Kubelet frei, damit ein überlasteter Pod den Node nicht mit in den Abgrund reißt.|Keeps CPU and memory free for the OS and the kubelet, so an overloaded pod cannot drag the whole node down with it."},
+      {k:"maxPods", t:"number", l:"maxPods je Node|maxPods per node", def:110, half:true,
+        hint:"Obergrenze der Pods pro Node. Der Standard 110 passt für die meisten Node-Größen.|Upper bound of pods per node. The default of 110 fits most node sizes."}
+     ]}
+  ],
+
+  build(d){
+    const out = [];
+    const cri = d.criSocket || "unix:///run/containerd/containerd.sock";
+    const arg = (name, value) => ({name:name, value:String(value)});
+    const kubeProxyless = d.kubeProxyMode === "none";
+
+    /* ---------- API-Server-, Controller- und Scheduler-Flags ---------- */
+    const apiArgs = [], apiVols = [], cmArgs = [], schArgs = [];
+
+    if (d.anonymousOff !== false) apiArgs.push(arg("anonymous-auth", "false"));
+    if (d.profilingOff !== false){
+      apiArgs.push(arg("profiling", "false"));
+      cmArgs.push(arg("profiling", "false"));
+      schArgs.push(arg("profiling", "false"));
+    }
+    if (d.tlsHardening !== false){
+      apiArgs.push(arg("tls-min-version", "VersionTLS12"));
+      apiArgs.push(arg("tls-cipher-suites", STRONG_CIPHERS.join(",")));
+    }
+    if (d.saTokenLookup !== false) apiArgs.push(arg("service-account-lookup", "true"));
+
+    if (d.audit !== false){
+      apiArgs.push(arg("audit-policy-file", "/etc/kubernetes/audit/audit-policy.yaml"));
+      apiArgs.push(arg("audit-log-path", "/var/log/kubernetes/audit/audit.log"));
+      apiArgs.push(arg("audit-log-maxage", "30"));
+      apiArgs.push(arg("audit-log-maxbackup", "10"));
+      apiArgs.push(arg("audit-log-maxsize", "100"));
+      apiVols.push({name:"audit-policy", hostPath:"/etc/kubernetes/audit", mountPath:"/etc/kubernetes/audit",
+        readOnly:true, pathType:"DirectoryOrCreate"});
+      apiVols.push({name:"audit-log", hostPath:"/var/log/kubernetes/audit", mountPath:"/var/log/kubernetes/audit",
+        readOnly:false, pathType:"DirectoryOrCreate"});
+    }
+    if (d.encryptSecrets !== false){
+      apiArgs.push(arg("encryption-provider-config", "/etc/kubernetes/enc/encryption-config.yaml"));
+      apiArgs.push(arg("encryption-provider-config-automatic-reload", "true"));
+      apiVols.push({name:"enc", hostPath:"/etc/kubernetes/enc", mountPath:"/etc/kubernetes/enc",
+        readOnly:true, pathType:"DirectoryOrCreate"});
+    }
+    /* PodSecurity wird immer über eine AdmissionConfiguration gesteuert. */
+    apiArgs.push(arg("admission-control-config-file", "/etc/kubernetes/admission/admission-config.yaml"));
+    apiVols.push({name:"admission", hostPath:"/etc/kubernetes/admission", mountPath:"/etc/kubernetes/admission",
+      readOnly:true, pathType:"DirectoryOrCreate"});
+
+    if (d.bindLocalhost !== false){
+      cmArgs.push(arg("bind-address", "127.0.0.1"));
+      schArgs.push(arg("bind-address", "127.0.0.1"));
+    }
+    if (d.useSACredentials !== false) cmArgs.push(arg("use-service-account-credentials", "true"));
+
+    /* ---------- InitConfiguration ---------- */
+    const init = {
+      apiVersion:"kubeadm.k8s.io/v1beta4", kind:"InitConfiguration",
+      nodeRegistration:{criSocket:cri},
+      skipPhases: kubeProxyless ? ["addon/kube-proxy"] : undefined
+    };
+    withNote(init, "kubeadm-config.yaml · sudo kubeadm init --config kubeadm-config.yaml --upload-certs|kubeadm-config.yaml · sudo kubeadm init --config kubeadm-config.yaml --upload-certs");
+    out.push(init);
+
+    /* ---------- ClusterConfiguration ---------- */
+    out.push({
+      apiVersion:"kubeadm.k8s.io/v1beta4", kind:"ClusterConfiguration",
+      kubernetesVersion: d.kubernetesVersion || "v1.37.0",
+      clusterName: d.name || "kubernetes",
+      controlPlaneEndpoint: d.controlPlaneEndpoint || undefined,
+      networking:{
+        podSubnet: d.podSubnet || "10.244.0.0/16",
+        serviceSubnet: d.serviceSubnet || "10.96.0.0/12",
+        dnsDomain: d.dnsDomain || undefined
+      },
+      apiServer:{
+        extraArgs: apiArgs.length ? apiArgs : undefined,
+        extraVolumes: apiVols.length ? apiVols : undefined,
+        certSANs: lines(d.certSANs)
+      },
+      controllerManager: cmArgs.length ? {extraArgs:cmArgs} : undefined,
+      scheduler: schArgs.length ? {extraArgs:schArgs} : undefined,
+      etcd:{local:{dataDir:"/var/lib/etcd"}}
+    });
+
+    /* ---------- KubeletConfiguration ---------- */
+    const kubelet = {
+      apiVersion:"kubelet.config.k8s.io/v1beta1", kind:"KubeletConfiguration",
+      cgroupDriver:"systemd",
+      maxPods: num(d.maxPods) === undefined ? 110 : num(d.maxPods)
+    };
+    if (d.kubeletHardening !== false){
+      kubelet.readOnlyPort = 0;
+      kubelet.protectKernelDefaults = true;
+      kubelet.authentication = {anonymous:{enabled:false}, webhook:{enabled:true}, x509:{clientCAFile:"/etc/kubernetes/pki/ca.crt"}};
+      kubelet.authorization = {mode:"Webhook"};
+      kubelet.rotateCertificates = true;
+      kubelet.seccompDefault = true;
+      kubelet.makeIPTablesUtilChains = true;
+      kubelet.eventRecordQPS = 5;
+      kubelet.streamingConnectionIdleTimeout = "5m";
+      if (d.tlsHardening !== false){
+        kubelet.tlsMinVersion = "VersionTLS12";
+        kubelet.tlsCipherSuites = STRONG_CIPHERS.slice();
+      }
+    }
+    if (d.systemReserved !== false){
+      kubelet.systemReserved = {cpu:"200m", memory:"256Mi", "ephemeral-storage":"1Gi"};
+      kubelet.kubeReserved = {cpu:"200m", memory:"256Mi", "ephemeral-storage":"1Gi"};
+      kubelet.evictionHard = {"memory.available":"200Mi", "nodefs.available":"10%"};
+    }
+    out.push(kubelet);
+
+    /* ---------- KubeProxyConfiguration ---------- */
+    if (!kubeProxyless) out.push({
+      apiVersion:"kubeproxy.config.k8s.io/v1alpha1", kind:"KubeProxyConfiguration",
+      mode: d.kubeProxyMode === "ipvs" ? "ipvs" : "iptables"
+    });
+
+    /* ---------- Separate Dateien, vor dem init auf den Node legen ---------- */
+    /* Pod Security Standards */
+    const level = d.pss || "restricted";
+    const exempt = String(d.pssExempt === undefined ? "kube-system" : d.pssExempt)
+      .split(",").map(x => x.trim()).filter(Boolean);
+    out.push(withNote({
+      apiVersion:"apiserver.config.k8s.io/v1", kind:"AdmissionConfiguration",
+      plugins:[{
+        name:"PodSecurity",
+        configuration:{
+          apiVersion:"pod-security.admission.config.k8s.io/v1", kind:"PodSecurityConfiguration",
+          defaults:{
+            enforce:level, "enforce-version":"latest",
+            audit:level, "audit-version":"latest",
+            warn:level, "warn-version":"latest"
+          },
+          exemptions:{usernames:[], runtimeClasses:[], namespaces: exempt.length ? exempt : undefined}
+        }
+      }]
+    }, "/etc/kubernetes/admission/admission-config.yaml"));
+
+    /* Verschlüsselung at rest */
+    if (d.encryptSecrets !== false) out.push(withNote({
+      apiVersion:"apiserver.config.k8s.io/v1", kind:"EncryptionConfiguration",
+      resources:[{
+        resources:["secrets"],
+        providers:[
+          {aescbc:{keys:[{name:"key1", secret:ENC_KEY_PLACEHOLDER}]}},
+          {identity:EMPTY_MAP}
+        ]
+      }]
+    }, "/etc/kubernetes/enc/encryption-config.yaml"));
+
+    /* Audit-Policy */
+    if (d.audit !== false) out.push(withNote({
+      apiVersion:"audit.k8s.io/v1", kind:"Policy",
+      omitStages:["RequestReceived"],
+      rules:[
+        {level:"None", verbs:["get","list","watch"]},
+        {level:"None", nonResourceURLs:["/healthz*","/readyz*","/livez*","/version","/metrics"]},
+        {level:"Metadata", resources:[{group:"", resources:["secrets","configmaps"]},
+                                      {group:"authentication.k8s.io", resources:["tokenreviews"]}]},
+        {level:"RequestResponse", resources:[{group:"rbac.authorization.k8s.io"}]},
+        {level:"RequestResponse", verbs:["create","update","patch","delete","deletecollection"]},
+        {level:"Metadata"}
+      ]
+    }, "/etc/kubernetes/audit/audit-policy.yaml"));
+
+    return out;
+  }
+};
+
 function kvObj(arr){
   const o = {};
   (arr||[]).forEach(p => { if (p.k) o[p.k] = p.v === undefined ? "" : p.v; });
@@ -1239,6 +1512,29 @@ function validate(docs){
   docs.forEach(doc => {
     ctx = doc.__src || null;
     const kind = doc.kind, meta = doc.metadata || {};
+
+    /* Cluster-Konfigurationen tragen kein metadata.name — sie bekommen eigene Prüfungen
+       statt der Standard-Namensvalidierung. */
+    if (CLUSTER_APIS.test(doc.apiVersion || "")){
+      if (kind === "ClusterConfiguration"){
+        const v = doc.kubernetesVersion || "";
+        if (!/^v1\.37(\.|$)/.test(v))
+          warn("kubernetesVersion " + v + " " +
+            t("weicht von 1.37 ab — diese Vorlage ist auf 1.37 ausgelegt|differs from 1.37 — this template targets 1.37"), "kubernetesVersion");
+        if (!doc.controlPlaneEndpoint)
+          warn(t("kein controlPlaneEndpoint — ein zweiter Control-Plane-Node lässt sich später nur mit Neuausstellung aller Zertifikate ergänzen|no controlPlaneEndpoint — adding a second control-plane node later requires reissuing every certificate"), "controlPlaneEndpoint");
+      }
+      if (kind === "EncryptionConfiguration" && toYaml(doc).indexOf(ENC_KEY_PLACEHOLDER) !== -1)
+        warn(t("Verschlüsselung: der Schlüssel ist noch ein Platzhalter — 32 zufällige Bytes einsetzen: head -c 32 /dev/urandom | base64|Encryption: the key is still a placeholder — insert 32 random bytes: head -c 32 /dev/urandom | base64"), "encryptSecrets");
+      if (kind === "AdmissionConfiguration"){
+        const pol = (doc.plugins || []).find(p => p.name === "PodSecurity");
+        const enf = pol && pol.configuration && pol.configuration.defaults && pol.configuration.defaults.enforce;
+        if (enf === "privileged")
+          warn(t("Pod Security steht auf privileged — es wird nichts erzwungen|Pod Security is set to privileged — nothing is enforced"), "pss");
+      }
+      return;
+    }
+
     const nm = meta.name;
     if (!nm){ err(t("Name fehlt|Name is missing") + " · " + kind); }
     else if (!DNS1123.test(nm)) err(kind + "/" + nm + ": " + t("Name nur Kleinbuchstaben, Ziffern und Bindestrich|name allows lowercase, digits and hyphen only"), "name");
@@ -1469,6 +1765,10 @@ function renderPicker(){
        '<u>' + t(UI.recommended) + "</u><b>" + t(RES._stack.label) + "</b><i>" +
        t(RES._stack.desc) + '</i><span class="chain">Namespace → ConfigMap → Secret → PVC → Deployment → Service → Ingress</span>' +
        '<u class="go">' + t(UI.build) + " →</u></button>";
+  h += '<button class="rescard rescard--hero" data-res="Cluster">' +
+       '<u>' + t("Cluster von Grund auf|Cluster from scratch") + "</u><b>" + t(RES.Cluster.label) + "</b><i>" +
+       t(RES.Cluster.desc) + '</i><span class="chain">kubeadm init · v1.37 · PSS restricted · Audit · Secrets verschlüsselt · TLS gehärtet</span>' +
+       '<u class="go">' + t(UI.build) + " →</u></button>";
   h += '<p class="stepdesc">' + t(UI.pickDesc) + "</p>";
   GROUPS.forEach(([g, label]) => {
     const keys = Object.keys(RES).filter(k => RES[k].group === g);
@@ -1650,7 +1950,11 @@ function buildEntry(entry, index){
   if (!entry || !RES[entry.kind]) return [];
   const b = RES[entry.kind].build(entry.data);
   const arr = Array.isArray(b) ? b : [b];
-  const ok = arr.filter(x => x && !isEmpty(x.metadata));
+  /* Cluster-/Komponenten-Konfigurationen (kubeadm, kubelet …) haben kein metadata —
+     für sie greift der metadata-Filter nicht, sie werden über raw:true durchgelassen. */
+  const ok = RES[entry.kind].raw
+    ? arr.filter(x => x && x.apiVersion && x.kind)
+    : arr.filter(x => x && !isEmpty(x.metadata));
   if (index !== undefined && index !== null)
     ok.forEach(doc => Object.defineProperty(doc, "__src", {value:{entry:index, kind:entry.kind}, enumerable:false}));
   return ok;
@@ -1687,7 +1991,7 @@ function entryLabel(e, i){
 
 function refreshYaml(){
   const docs = currentDocs();
-  const text = docs.map(toYaml).join("\n---\n");
+  const text = manifestText(docs);
   const raw = text ? text + "\n" : "";
   $("code").dataset.raw = raw;
 
@@ -1727,13 +2031,22 @@ function refreshYaml(){
         data:e.data.secrets, sealedScope:e.data.sealedScope, sealedCert:e.data.sealedCert}).forEach(x => seals.push(x));
   });
 
+  const isCluster = docs.some(d => d.kind === "InitConfiguration");
+  const clusterEnc = docs.some(d => d.kind === "EncryptionConfiguration");
+  const cmds = isCluster
+    ? [].concat(
+        clusterEnc ? ["sudo mkdir -p /etc/kubernetes/enc && head -c 32 /dev/urandom | base64"] : [],
+        ["sudo kubeadm init --config kubeadm-config.yaml --upload-certs",
+         "mkdir -p $HOME/.kube && sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config && sudo chown $(id -u):$(id -g) $HOME/.kube/config",
+         "kubectl get nodes",
+         "kubeadm token create --print-join-command"])
+    : ["kubectl apply -f manifest.yaml"]
+        .concat(app ? [
+          "kubectl rollout status deploy/" + app.metadata.name + nsFlag,
+          "kubectl logs -l app=" + app.metadata.name + nsFlag + " -f --tail=50"
+        ] : []);
   $("cmds").innerHTML = !docs.length ? "" :
-    ["kubectl apply -f manifest.yaml"]
-      .concat(app ? [
-        "kubectl rollout status deploy/" + app.metadata.name + nsFlag,
-        "kubectl logs -l app=" + app.metadata.name + nsFlag + " -f --tail=50"
-      ] : [])
-      .map(c => '<button class="cmd" data-cmd="' + esc(c) + '"><span>' + esc(c) + "</span></button>").join("")
+    cmds.map(c => '<button class="cmd" data-cmd="' + esc(c) + '"><span>' + esc(c) + "</span></button>").join("")
       + seals.map(x => '<button class="cmd cmd--seal" data-cmd="' + esc(x.cmd) +
           '" title="' + esc(t(UI.sealHint)) + '"><span>kubeseal → ' + esc(x.key) + "</span></button>").join("");
 
@@ -2207,7 +2520,7 @@ function fieldValueMd(f, d){
 
 function toMarkdown(){
   const docs = currentDocs();
-  const raw = docs.map(toYaml).join("\n---\n");
+  const raw = manifestText(docs);
   const app = docs.filter(x => x.kind === "Deployment")[0];
   const title = app ? app.metadata.name : (S.docs.length ? entryLabel(S.docs[0], -1) : "manifest");
   const de = LANG === "de";
@@ -2979,6 +3292,49 @@ function runSelfTests(){
     regServer:"h.de", regUser:"u", regPass:"p"});
   ok("Secret: auth ist base64 von user:pass",
     has(sec.stringData[".dockerconfigjson"], b64("u:p")), sec.stringData[".dockerconfigjson"]);
+
+  /* --- Produktions-Cluster --- */
+  const cl = RES.Cluster.build({name:"kubernetes", kubernetesVersion:"v1.37.0",
+    controlPlaneEndpoint:"api.example.com:6443", pss:"restricted", encryptSecrets:true, audit:true,
+    anonymousOff:true, profilingOff:true, tlsHardening:true, kubeletHardening:true,
+    bindLocalhost:true, kubeProxyMode:"iptables"});
+  const byKind = k => cl.find(x => x.kind === k);
+  const cc = byKind("ClusterConfiguration");
+  const apiArgs = (cc.apiServer.extraArgs || []).reduce((o,a) => (o[a.name]=a.value, o), {});
+  ok("Cluster: zielt auf Kubernetes 1.37", cc.kubernetesVersion === "v1.37.0", cc.kubernetesVersion);
+  ok("Cluster: kubeadm v1beta4", cc.apiVersion === "kubeadm.k8s.io/v1beta4", cc.apiVersion);
+  ok("Cluster: anonyme Anfragen aus", apiArgs["anonymous-auth"] === "false", apiArgs["anonymous-auth"]);
+  ok("Cluster: Profiling aus", apiArgs["profiling"] === "false", apiArgs["profiling"]);
+  ok("Cluster: TLS-Mindestversion gesetzt", apiArgs["tls-min-version"] === "VersionTLS12", apiArgs["tls-min-version"]);
+  ok("Cluster: Verschlüsselung at rest verdrahtet",
+    !!apiArgs["encryption-provider-config"] && !!byKind("EncryptionConfiguration"), "");
+  ok("Cluster: Audit-Policy verdrahtet",
+    !!apiArgs["audit-policy-file"] && byKind("Policy").kind === "Policy", "");
+  ok("Cluster: PodSecurity erzwingt restricted",
+    byKind("AdmissionConfiguration").plugins[0].configuration.defaults.enforce === "restricted", "");
+  const kl = byKind("KubeletConfiguration");
+  ok("Cluster: Kubelet read-only-Port geschlossen", kl.readOnlyPort === 0, String(kl.readOnlyPort));
+  ok("Cluster: Kubelet ohne anonymen Zugriff", kl.authentication.anonymous.enabled === false, "");
+  const clY = manifestText(cl);
+  ok("Cluster: Verschlüsselungsschlüssel ist ein Platzhalter (nie ein echter Wert)",
+    clY.indexOf(ENC_KEY_PLACEHOLDER) !== -1, "");
+  ok("Cluster: Dateipfade als Kommentar im Manifest",
+    has(clY, "# /etc/kubernetes/enc/encryption-config.yaml"), "");
+  ok("Cluster: Platzhalterschlüssel wird gewarnt",
+    validate(cl).some(x => x.lvl === "warn" && x.field === "encryptSecrets"), "");
+  ok("Cluster: metadatenlose Dokumente werden nicht weggefiltert",
+    buildEntry({kind:"Cluster", data:{name:"kubernetes"}}).length >= 6, "");
+  const clNoCPE = RES.Cluster.build({name:"kubernetes"});
+  ok("Cluster: fehlender controlPlaneEndpoint wird gewarnt",
+    validate(clNoCPE).some(x => x.lvl === "warn" && x.field === "controlPlaneEndpoint"), "");
+  ok("Cluster: kube-proxy-less lässt KubeProxyConfiguration weg und überspringt die Phase",
+    (()=>{ const c = RES.Cluster.build({name:"k", kubeProxyMode:"none"});
+      return !c.some(x => x.kind === "KubeProxyConfiguration") &&
+        (c.find(x => x.kind === "InitConfiguration").skipPhases||[]).indexOf("addon/kube-proxy") !== -1; })(), "");
+  ok("Cluster: privileged PSS wird gewarnt",
+    validate(RES.Cluster.build({name:"k", pss:"privileged"})).some(x => x.lvl === "warn" && x.field === "pss"), "");
+  ok("Cluster: keine Fehler in der Standardkonfiguration",
+    validate(cl).filter(x => x.lvl === "err").length === 0, validate(cl).map(x => x.m).join(" | "));
 
   if (typeof getComputedStyle === "function" && document.body){
     ["stepnav","toast","wikipanel"].forEach(cn => {
