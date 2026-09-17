@@ -84,6 +84,42 @@ Flags:
 > `init` durch 32 zufällige Bytes ersetzt werden (`head -c 32 /dev/urandom | base64`).
 > Der Assistent warnt, solange der Platzhalter noch drinsteht.
 
+### Admin-Benutzer mit allen Rechten
+
+Im Schritt **Admin-Zugang** lässt sich zusätzlich ein Benutzer mit vollen Rechten
+(`cluster-admin`) anlegen. Er wird als eigene Datei (`bootstrap-admin.yaml`) erzeugt und
+nach dem `init` mit `kubectl apply` angewandt. Zwei Varianten:
+
+- **ServiceAccount** (Standard) — API-Objekt mit optionalem, langlebigem Token-Secret;
+  passend für Automatisierung und CI.
+- **Mensch (x509)** — nur die `ClusterRoleBinding` auf den Benutzernamen; das Zertifikat
+  stellst du selbst aus.
+
+> `cluster-admin` sind uneingeschränkte Rechte im gesamten Cluster — das Gegenteil von
+> geringstmöglichen Rechten. Gedacht als Bootstrap- oder Break-glass-Zugang, nicht als
+> Alltags-Account. Für Teams und Anwendungen die enger geschnittene Vorlage
+> **„Zugriffsrechte (RBAC)"** nutzen. Der Assistent weist auf die Bindung ausdrücklich hin.
+
+### Skript: `scripts/cluster-admin-user.sh`
+
+Für einen **menschlichen** Admin gibt es ein kleines Skript, das nur nach dem
+Benutzernamen fragt, ein von der Cluster-CA signiertes Client-Zertifikat ausstellt, den
+Benutzer an `cluster-admin` bindet und am Ende eine **fertige kubeconfig** ausgibt.
+Derselbe Aufruf mit `delete` entfernt Bindung, CSR und die kubeconfig wieder.
+
+```bash
+# Anlegen (fragt nach dem Namen, wenn keiner übergeben wird)
+./scripts/cluster-admin-user.sh create alice
+# → schreibt alice.kubeconfig
+KUBECONFIG=alice.kubeconfig kubectl get nodes
+
+# Wieder entfernen
+./scripts/cluster-admin-user.sh delete alice
+```
+
+Voraussetzungen: `kubectl` (als bestehender Admin, z. B. mit `admin.conf`) und `openssl`.
+Die Gültigkeit steuert `VALID_DAYS` (Standard 365), den Ablageort `OUT_DIR`.
+
 ## Tests
 
 Der Assistent bringt eine eingebaute Selbsttest-Suite mit (Schaltfläche **tests** in

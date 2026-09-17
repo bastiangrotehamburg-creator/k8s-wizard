@@ -1160,6 +1160,23 @@ RES.Cluster = {
         hint:"--use-service-account-credentials=true am Controller-Manager: jeder Controller bekommt eine eigene Identität, was RBAC-Audits erst aussagekräftig macht.|--use-service-account-credentials=true on the controller-manager: each controller gets its own identity, which is what makes RBAC audits meaningful."}
      ]},
 
+    {id:"access", title:"Admin-Zugang|Admin access",
+     desc:"kubeadm legt bereits admin.conf für den ersten Zugang an. Zusätzlich lässt sich hier ein eigener Admin-Benutzer mit allen Rechten erzeugen — als Datei, die nach dem init mit kubectl angewandt wird.|kubeadm already writes admin.conf for the first login. On top of that you can create your own admin user with full rights here — as a file applied with kubectl after init.",
+     fields:[
+      {k:"adminUser", t:"bool", l:"Admin-Benutzer automatisch anlegen (cluster-admin)|Auto-create an admin user (cluster-admin)", structural:true,
+        why:"Erzeugt eine Identität, die per ClusterRoleBinding an die eingebaute Rolle cluster-admin gebunden wird — uneingeschränkte Rechte im gesamten Cluster, inklusive Rechtevergabe an sich selbst. Das ist das Gegenteil von geringstmöglichen Rechten: gedacht als Bootstrap- oder Break-glass-Zugang für die Plattform, nicht als Alltags-Account für Anwendungen. Für Teams und Anwendungen stattdessen enger geschnittene Rollen (die Vorlage „Zugriffsrechte (RBAC)“) verwenden.|Creates an identity bound via a ClusterRoleBinding to the built-in cluster-admin role — unrestricted rights across the whole cluster, including granting itself more rights. This is the opposite of least privilege: meant as a bootstrap or break-glass account for the platform, not as an everyday account for applications. For teams and apps use narrower roles instead (the “Access rights (RBAC)” template)."},
+      {k:"adminKind", t:"select", l:"Art der Identität|Kind of identity", structural:true, when:d=>d.adminUser,
+        opts:[["","ServiceAccount — Token, sofort nutzbar|ServiceAccount — token, usable at once"],
+              ["user","Mensch — x509-Client-Zertifikat|Human — x509 client certificate"]],
+        why:"Ein ServiceAccount ist ein API-Objekt: sofort per YAML anlegbar, mit einem Token für Automatisierung und CI. Ein menschlicher Benutzer existiert in Kubernetes nicht als Objekt — er wird allein durch ein von der Cluster-CA signiertes Client-Zertifikat repräsentiert. Deshalb wird für die Person nur die Bindung erzeugt; das Zertifikat stellst du mit den Befehlen unten selbst aus.|A ServiceAccount is an API object: creatable straight from YAML, with a token for automation and CI. A human user does not exist as an object in Kubernetes — it is represented solely by a client certificate signed by the cluster CA. So for a person only the binding is generated; you issue the certificate yourself with the commands below."},
+      {k:"adminName", t:"text", l:"Name|Name", def:"platform-admin", when:d=>d.adminUser, half:true,
+        hint:"Trägt sich durch ServiceAccount/Benutzer und die ClusterRoleBinding.|Carries through the service account/user and the ClusterRoleBinding."},
+      {k:"adminNs", t:"text", l:"Namespace", def:"kube-system", when:d=>d.adminUser && d.adminKind!=="user", half:true,
+        hint:"Nur für ServiceAccounts. Ein Bootstrap-Admin gehört üblicherweise nach kube-system.|Service accounts only. A bootstrap admin usually belongs in kube-system."},
+      {k:"adminToken", t:"bool", l:"Langlebiges Token-Secret miterzeugen|Also create a long-lived token secret", def:true, when:d=>d.adminUser && d.adminKind!=="user",
+        hint:"Legt ein Secret vom Typ service-account-token an, das Kubernetes automatisch befüllt — praktisch für CI. Alternativ liefert kubectl create token kurzlebige Tokens auf Abruf.|Creates a service-account-token secret that Kubernetes fills in automatically — handy for CI. Alternatively kubectl create token issues short-lived tokens on demand."}
+     ]},
+
     {id:"net", title:"Netzwerk & kube-proxy|Networking & kube-proxy",
      desc:"kubeadm installiert kein CNI — das kommt nach dem init dazu. Hier wird nur festgelegt, wie kube-proxy arbeitet.|kubeadm installs no CNI — that comes after init. Here you only decide how kube-proxy works.",
      fields:[
@@ -1347,6 +1364,36 @@ RES.Cluster = {
         {level:"Metadata"}
       ]
     }, "/etc/kubernetes/audit/audit-policy.yaml"));
+
+    /* ---------- Admin-Benutzer mit allen Rechten (nach dem init anwenden) ---------- */
+    if (d.adminUser){
+      const an = d.adminName || "platform-admin";
+      const isUser = d.adminKind === "user";
+      const ans = isUser ? undefined : (d.adminNs || "kube-system");
+      const bootstrap = [];
+      if (!isUser) bootstrap.push({apiVersion:"v1", kind:"ServiceAccount", metadata:{name:an, namespace:ans}});
+      const crb = {
+        apiVersion:"rbac.authorization.k8s.io/v1", kind:"ClusterRoleBinding",
+        metadata:{name:an + "-cluster-admin"},
+        roleRef:{apiGroup:"rbac.authorization.k8s.io", kind:"ClusterRole", name:"cluster-admin"},
+        subjects:[ isUser
+          ? {apiGroup:"rbac.authorization.k8s.io", kind:"User", name:an}
+          : {kind:"ServiceAccount", name:an, namespace:ans} ]
+      };
+      /* bewusst gewählte cluster-admin-Bindung: die Validierung warnt, statt zu fehlern. */
+      Object.defineProperty(crb, "__intentional", {value:true, enumerable:false});
+      bootstrap.push(crb);
+      if (!isUser && d.adminToken !== false) bootstrap.push({
+        apiVersion:"v1", kind:"Secret",
+        metadata:{name:an + "-token", namespace:ans,
+          annotations:{"kubernetes.io/service-account.name":an}},
+        type:"kubernetes.io/service-account-token"
+      });
+      withNote(bootstrap[0], isUser
+        ? "bootstrap-admin.yaml · kubectl apply -f bootstrap-admin.yaml · Zertifikat mit scripts/cluster-admin-user.sh ausstellen|bootstrap-admin.yaml · kubectl apply -f bootstrap-admin.yaml · issue the certificate with scripts/cluster-admin-user.sh"
+        : "bootstrap-admin.yaml · kubectl apply -f bootstrap-admin.yaml (nach kubeadm init)|bootstrap-admin.yaml · kubectl apply -f bootstrap-admin.yaml (after kubeadm init)");
+      bootstrap.forEach(x => out.push(x));
+    }
 
     return out;
   }
@@ -1670,8 +1717,12 @@ function validate(docs){
 
     if (kind === "ClusterRoleBinding" || kind === "RoleBinding"){
       const rr = doc.roleRef || {};
-      if (rr.name === "cluster-admin")
-        err(nm + ": " + t("Bindung auf cluster-admin — der ServiceAccount darf damit alles im gesamten Cluster, inklusive Rechtevergabe an sich selbst|binding to cluster-admin — the service account may then do anything in the entire cluster, including granting itself more rights"), "builtin");
+      if (rr.name === "cluster-admin"){
+        if (doc.__intentional)
+          warn(nm + ": " + t("bewusst auf cluster-admin gebunden — uneingeschränkte Rechte im gesamten Cluster; nur als Bootstrap-/Break-glass-Zugang verwenden|deliberately bound to cluster-admin — unrestricted rights across the whole cluster; use only as a bootstrap/break-glass account"), "adminUser");
+        else
+          err(nm + ": " + t("Bindung auf cluster-admin — der ServiceAccount darf damit alles im gesamten Cluster, inklusive Rechtevergabe an sich selbst|binding to cluster-admin — the service account may then do anything in the entire cluster, including granting itself more rights"), "builtin");
+      }
       else if (kind === "ClusterRoleBinding")
         warn(nm + ": " + t("ClusterRoleBinding gilt in jedem Namespace. Ein RoleBinding auf dieselbe ClusterRole würde sie auf einen Namespace begrenzen|a ClusterRoleBinding applies in every namespace. A RoleBinding to the same ClusterRole would limit it to one namespace"), "scope");
     }
@@ -2033,13 +2084,18 @@ function refreshYaml(){
 
   const isCluster = docs.some(d => d.kind === "InitConfiguration");
   const clusterEnc = docs.some(d => d.kind === "EncryptionConfiguration");
+  const curData = (S.current && S.current.kind === "Cluster") ? S.current.data : {};
+  const clusterAdmin = docs.some(d => d.kind === "ClusterRoleBinding" && (d.roleRef||{}).name === "cluster-admin");
+  const adminIsUser = clusterAdmin && curData.adminKind === "user";
   const cmds = isCluster
     ? [].concat(
         clusterEnc ? ["sudo mkdir -p /etc/kubernetes/enc && head -c 32 /dev/urandom | base64"] : [],
         ["sudo kubeadm init --config kubeadm-config.yaml --upload-certs",
          "mkdir -p $HOME/.kube && sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config && sudo chown $(id -u):$(id -g) $HOME/.kube/config",
          "kubectl get nodes",
-         "kubeadm token create --print-join-command"])
+         "kubeadm token create --print-join-command"],
+        clusterAdmin ? ["kubectl apply -f bootstrap-admin.yaml"] : [],
+        adminIsUser ? ["./scripts/cluster-admin-user.sh create " + (curData.adminName || "platform-admin")] : [])
     : ["kubectl apply -f manifest.yaml"]
         .concat(app ? [
           "kubectl rollout status deploy/" + app.metadata.name + nsFlag,
@@ -3335,6 +3391,27 @@ function runSelfTests(){
     validate(RES.Cluster.build({name:"k", pss:"privileged"})).some(x => x.lvl === "warn" && x.field === "pss"), "");
   ok("Cluster: keine Fehler in der Standardkonfiguration",
     validate(cl).filter(x => x.lvl === "err").length === 0, validate(cl).map(x => x.m).join(" | "));
+
+  /* --- Admin-Benutzer mit allen Rechten --- */
+  const clSa = RES.Cluster.build({name:"k", adminUser:true, adminName:"platform-admin", adminNs:"kube-system", adminToken:true});
+  const saDoc = clSa.find(x => x.kind === "ServiceAccount");
+  const crbDoc = clSa.find(x => x.kind === "ClusterRoleBinding");
+  const tokDoc = clSa.find(x => x.kind === "Secret");
+  ok("Admin (SA): ServiceAccount angelegt", saDoc && saDoc.metadata.name === "platform-admin", "");
+  ok("Admin (SA): an cluster-admin gebunden",
+    crbDoc && crbDoc.roleRef.name === "cluster-admin" && crbDoc.subjects[0].kind === "ServiceAccount", "");
+  ok("Admin (SA): Token-Secret angelegt",
+    tokDoc && tokDoc.type === "kubernetes.io/service-account-token" &&
+    tokDoc.metadata.annotations["kubernetes.io/service-account.name"] === "platform-admin", "");
+  ok("Admin: cluster-admin ist bewusst → Warnung statt Fehler",
+    validate(clSa).some(x => x.lvl === "warn" && x.field === "adminUser") &&
+    !validate(clSa).some(x => x.lvl === "err"), validate(clSa).map(x => x.lvl+":"+x.m).join(" | "));
+  const clUser = RES.Cluster.build({name:"k", adminUser:true, adminKind:"user", adminName:"alice"});
+  ok("Admin (User): nur Bindung, kein ServiceAccount/Token",
+    !clUser.some(x => x.kind === "ServiceAccount") && !clUser.some(x => x.kind === "Secret") &&
+    clUser.find(x => x.kind === "ClusterRoleBinding").subjects[0].kind === "User", "");
+  ok("Admin: ohne Option keine Bootstrap-Bindung",
+    !RES.Cluster.build({name:"k"}).some(x => x.kind === "ClusterRoleBinding"), "");
 
   if (typeof getComputedStyle === "function" && document.body){
     ["stepnav","toast","wikipanel"].forEach(cn => {
